@@ -40,7 +40,10 @@ import {
   encodeCivilizationNotesCursor,
 } from "./KnowledgeService.ts";
 import * as MailService from "./MailService.ts";
-import { civilizationProviderCapability } from "./ProviderCapability.ts";
+import {
+  civilizationProviderCapability,
+  resolveCivilizationProviderCapability,
+} from "./ProviderCapability.ts";
 
 const PACKET_KEY = "t3_civilization";
 const PACKET_VERSION = 1 as const;
@@ -567,13 +570,14 @@ const make = Effect.gen(function* () {
       instanceIds,
       (providerInstanceId) =>
         adapters.get(providerInstanceId).pipe(
-          Effect.map((adapter) =>
-            civilizationProviderCapability({
+          Effect.flatMap((adapter) =>
+            resolveCivilizationProviderCapability({
+              adapter,
               providerInstanceId,
-              driver: adapter.driver,
               observedOnly: false,
             }),
           ),
+          Effect.map(({ capability }) => capability),
           Effect.catch(() =>
             Effect.succeed(
               civilizationProviderCapability({
@@ -607,15 +611,16 @@ const make = Effect.gen(function* () {
         LIMIT 1
       `)[0];
     const adapter = yield* adapters.get(input.providerInstanceId);
-    const capability = civilizationProviderCapability({
+    const resolvedCapability = yield* resolveCivilizationProviderCapability({
+      adapter,
       providerInstanceId: input.providerInstanceId,
-      driver: adapter.driver,
       observedOnly: citizen?.observed_only === 1,
     });
+    const capability = resolvedCapability.capability;
     const explicitRead = input.source === "explicit";
     const diagnosticsMode = effective.config.operations.diagnostics;
     const packetBudget = effective.config.context.packetBytes;
-    const transport = adapter.civilizationContextTransport;
+    const transport = resolvedCapability.transport;
     const persistForTurn = (inspection: Parameters<typeof persistInspection>[0]) =>
       explicitRead ? Effect.void : persistInspectionFailSoft(inspection);
     const skipReason: CivilizationContextSuppressionReason | null = !effective.config.participation
@@ -634,15 +639,15 @@ const make = Effect.gen(function* () {
                 : capability.support !== "full"
                   ? "provider_unsupported"
                   : !explicitRead &&
-                      adapter.driver === "claudeAgent" &&
                       input.message?.createdBy === "agent" &&
-                      input.message.creationSource === "provider"
-                    ? "claude_provider_continuation"
+                      input.message.creationSource === "provider" &&
+                      !capability.providerContinuationRefresh
+                    ? "provider_continuation"
                     : !explicitRead &&
-                        adapter.driver === "claudeAgent" &&
                         input.message !== undefined &&
-                        /^\/[^\s/]+(?:\s|$)/u.test(input.message.text.trim())
-                      ? "claude_slash_command"
+                        /^\/[^\s/]+(?:\s|$)/u.test(input.message.text.trim()) &&
+                        !resolvedCapability.providerCommandRefresh
+                      ? "provider_command"
                       : packetBudget <= 0
                         ? "packet_budget_zero"
                         : null;

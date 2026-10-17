@@ -23,7 +23,10 @@ import * as MailService from "./MailService.ts";
 
 const database = SqlitePersistence.layerMemory;
 
-const providerLayer = (drivers: Readonly<Record<string, string>>) =>
+const providerLayer = (
+  drivers: Readonly<Record<string, string>>,
+  overrides: Readonly<Record<string, Partial<ProviderAdapter.ProviderAdapterV2["Service"]>>> = {},
+) =>
   Layer.succeed(
     ProviderAdapterRegistry.ProviderAdapterRegistryV2,
     ProviderAdapterRegistry.ProviderAdapterRegistryV2.of({
@@ -49,15 +52,19 @@ const providerLayer = (drivers: Readonly<Record<string, string>>) =>
                   },
                 }
               : {}),
+          ...overrides[instanceId],
         } as ProviderAdapter.ProviderAdapterV2["Service"]);
       },
       list: () => Effect.succeed(Object.keys(drivers).map((id) => ProviderInstanceId.make(id))),
     }),
   );
 
-const makeLayer = (drivers: Readonly<Record<string, string>>) => {
+const makeLayer = (
+  drivers: Readonly<Record<string, string>>,
+  overrides: Readonly<Record<string, Partial<ProviderAdapter.ProviderAdapterV2["Service"]>>> = {},
+) => {
   const config = ConfigService.layer.pipe(Layer.provide(database));
-  const registry = providerLayer(drivers);
+  const registry = providerLayer(drivers, overrides);
   const mail = MailService.layer.pipe(Layer.provide(Layer.mergeAll(database, registry)));
   return Layer.mergeAll(
     database,
@@ -594,6 +601,75 @@ it.effect(
   },
 );
 
+it.effect(
+  "suppresses managed OpenCode 2 continuations and provider commands before inbox offering",
+  () =>
+    Effect.gen(function* () {
+      const service = yield* ContextService.CivilizationContextService;
+      const sql = yield* SqlClient.SqlClient;
+      yield* setup({ packetBytes: 16 * 1024, rosterCount: 0, noteCount: 0, inboxExcerptCount: 1 });
+      yield* sql`UPDATE orchestration_v2_projection_threads SET provider_instance_id = 'opencode-main' WHERE thread_id = ${callerThreadId}`;
+      yield* sql`UPDATE orchestration_v2_projection_runs SET provider_instance_id = 'opencode-main', provider = 'opencode' WHERE run_id = ${RunId.make("run:civilization:context")}`;
+      yield* seedMail({ id: "mail:opencode2-boundary", body: "private pending mail" });
+
+      const continuation = yield* service.forTurn(
+        turnInput("opencode-main", {
+          message: { text: "provider wake", createdBy: "agent", creationSource: "provider" },
+        }),
+      );
+      assert.isNull(continuation.packet);
+      const command = yield* service.forTurn(
+        turnInput("opencode-main", {
+          message: { text: "/compact", createdBy: "user", creationSource: "web" },
+        }),
+      );
+      assert.isNull(command.packet);
+      assert.equal(
+        (yield* sql<{ readonly offer_count: number }>`
+          SELECT offer_count FROM civilization_messages WHERE message_id = 'mail:opencode2-boundary'
+        `)[0]!.offer_count,
+        0,
+      );
+
+      const actionable = yield* service.forTurn(turnInput("opencode-main"));
+      assert.equal(actionable.capability.support, "full");
+      assert.isNotNull(actionable.packet);
+      assert.equal(
+        (yield* sql<{ readonly offer_count: number }>`
+          SELECT offer_count FROM civilization_messages WHERE message_id = 'mail:opencode2-boundary'
+        `)[0]!.offer_count,
+        1,
+      );
+    }).pipe(
+      Effect.provide(
+        Layer.fresh(
+          makeLayer(
+            { "opencode-main": "opencode" },
+            {
+              "opencode-main": {
+                getCivilizationCapability: () =>
+                  Effect.succeed({
+                    support: "full" as const,
+                    contextInjection: true,
+                    keyedContextReplacement: false,
+                    actionablePromptRefresh: true,
+                    providerContinuationRefresh: false,
+                    providerCommandRefresh: false,
+                    messaging: true,
+                    contextTransport: {
+                      kind: "opencode2.user_prompt",
+                      description: "ordinary prompt",
+                      trust: "untrusted" as const,
+                    },
+                  }),
+              },
+            },
+          ),
+        ),
+      ),
+    ),
+);
+
 it.effect("applies note transfer ceilings", () => {
   return Effect.gen(function* () {
     const service = yield* ContextService.CivilizationContextService;
@@ -811,8 +887,8 @@ it.effect("records every stable turn suppression reason", () =>
       "citizen_closed",
       "observed_agent_read_only",
       "provider_unsupported",
-      "claude_provider_continuation",
-      "claude_slash_command",
+      "provider_continuation",
+      "provider_command",
       "packet_budget_zero",
       "packet_budget_too_small",
     ] as const,
@@ -863,14 +939,14 @@ it.effect("records every stable turn suppression reason", () =>
             yield* setup();
             provider = "cursor-main";
             break;
-          case "claude_provider_continuation":
+          case "provider_continuation":
             yield* setup();
             provider = "claude-main";
             overrides = {
               message: { text: "provider wake", createdBy: "agent", creationSource: "provider" },
             };
             break;
-          case "claude_slash_command":
+          case "provider_command":
             yield* setup();
             provider = "claude-main";
             overrides = {

@@ -1,4 +1,7 @@
 import type { CivilizationProviderCapability, ProviderInstanceId } from "@t3tools/contracts";
+import * as Effect from "effect/Effect";
+
+import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 
 export interface CivilizationProviderCapabilityInput {
   readonly providerInstanceId: ProviderInstanceId;
@@ -74,3 +77,48 @@ export function civilizationProviderCapability(
     detail: "This provider is release-one census/identity metadata only.",
   };
 }
+
+export const resolveCivilizationProviderCapability = Effect.fn(
+  "Civilization.resolveProviderCapability",
+)(function* (input: {
+  readonly adapter: ProviderAdapter.ProviderAdapterV2["Service"];
+  readonly providerInstanceId: ProviderInstanceId;
+  readonly observedOnly: boolean;
+}) {
+  if (input.observedOnly || input.adapter.getCivilizationCapability === undefined) {
+    return {
+      capability: civilizationProviderCapability({
+        providerInstanceId: input.providerInstanceId,
+        driver: input.adapter.driver,
+        observedOnly: input.observedOnly,
+      }),
+      transport: input.adapter.civilizationContextTransport,
+      providerCommandRefresh: input.adapter.driver === "codex",
+    } as const;
+  }
+
+  return yield* input.adapter.getCivilizationCapability().pipe(
+    Effect.map((profile) => {
+      const { contextTransport, providerCommandRefresh, ...capability } = profile;
+      return {
+        capability: {
+          providerInstanceId: input.providerInstanceId,
+          ...capability,
+        } satisfies CivilizationProviderCapability,
+        transport: contextTransport,
+        providerCommandRefresh,
+      } as const;
+    }),
+    Effect.catch(() =>
+      Effect.succeed({
+        capability: civilizationProviderCapability({
+          providerInstanceId: input.providerInstanceId,
+          observedOnly: false,
+          available: false,
+        }),
+        transport: undefined,
+        providerCommandRefresh: false,
+      } as const),
+    ),
+  );
+});

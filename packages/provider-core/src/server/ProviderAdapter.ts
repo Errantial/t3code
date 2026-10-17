@@ -1,4 +1,7 @@
-import type { OrchestrationV2HistoricalMessage } from "@t3tools/contracts";
+import type {
+  CivilizationProviderCapability,
+  OrchestrationV2HistoricalMessage,
+} from "@t3tools/contracts";
 import {
   ChatAttachment,
   CheckpointId,
@@ -432,6 +435,19 @@ export interface ProviderAdapterV2TurnInput {
   };
 }
 
+export type ProviderAdapterV2CivilizationCapability = Omit<
+  CivilizationProviderCapability,
+  "providerInstanceId"
+> & {
+  /** Whether provider-native slash/command dispatch shares the ordinary packet boundary. */
+  readonly providerCommandRefresh: boolean;
+  readonly contextTransport?: {
+    readonly kind: string;
+    readonly description: string;
+    readonly trust: "untrusted";
+  };
+};
+
 export interface ProviderAdapterV2SteerInput {
   readonly threadId: ThreadId;
   readonly runId: RunId;
@@ -648,6 +664,15 @@ export class ProviderAdapterV2 extends Context.Service<
       readonly description: string;
       readonly trust: "untrusted";
     };
+    /**
+     * Adapter-owned Civilization support truth when driver identity alone is
+     * insufficient (for example OpenCode 1.x vs 2.x). Absent adapters fall
+     * back to the release-wide driver table in the server feature.
+     */
+    readonly getCivilizationCapability?: () => Effect.Effect<
+      ProviderAdapterV2CivilizationCapability,
+      ProviderAdapterV2Error
+    >;
     readonly getCapabilities: () => Effect.Effect<
       OrchestrationV2ProviderCapabilities,
       ProviderAdapterV2Error

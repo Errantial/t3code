@@ -774,6 +774,8 @@ export const CivilizationContextSuppressionReason = Schema.Literals([
   "citizen_closed",
   "observed_agent_read_only",
   "provider_unsupported",
+  "provider_continuation",
+  "provider_command",
   "claude_provider_continuation",
   "claude_slash_command",
   "packet_budget_zero",

@@ -37,7 +37,7 @@ import { exceededDispatchModeLimit } from "../orchestration-v2/DispatchModeLimit
 import * as ProviderAdapterRegistry from "../orchestration-v2/ProviderAdapterRegistry.ts";
 import { getEffectiveCivilizationConfig } from "./ConfigService.ts";
 import { makeCivilizationDiagnostics } from "./Diagnostics.ts";
-import { civilizationProviderCapability } from "./ProviderCapability.ts";
+import { resolveCivilizationProviderCapability } from "./ProviderCapability.ts";
 
 const CURSOR_VERSION = 1 as const;
 const LIVE_RUN_STATUSES = new Set(["preparing", "queued", "starting", "running", "waiting"]);
@@ -466,13 +466,10 @@ const make = Effect.gen(function* () {
     observedOnly: boolean,
   ) {
     return yield* adapters.get(providerInstanceId).pipe(
-      Effect.map((adapter) =>
-        civilizationProviderCapability({
-          providerInstanceId,
-          driver: adapter.driver,
-          observedOnly,
-        }),
+      Effect.flatMap((adapter) =>
+        resolveCivilizationProviderCapability({ adapter, providerInstanceId, observedOnly }),
       ),
+      Effect.map(({ capability }) => capability),
       Effect.catch(() =>
         Effect.fail(
           denied(
