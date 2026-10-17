@@ -1,5 +1,5 @@
 import {
-  AuthAdministrativeScopes,
+  AuthStandardClientScopes,
   type AuthEnvironmentScope,
   AuthOrchestrationReadScope,
   CivilizationCensusCursor,
@@ -109,7 +109,7 @@ const failCli = (cause: unknown) =>
 const withCivilizationClient = <A, E, R>(
   flags: CliAuthLocationFlags,
   run: (client: CivilizationHttpClient, token: string) => Effect.Effect<A, E, R>,
-  scopes: ReadonlyArray<AuthEnvironmentScope> = AuthAdministrativeScopes,
+  scopes: ReadonlyArray<AuthEnvironmentScope> = AuthStandardClientScopes,
 ) =>
   Effect.gen(function* () {
     const logLevel = yield* GlobalFlag.LogLevel;

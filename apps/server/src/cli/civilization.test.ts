@@ -6,7 +6,7 @@ import * as NodePath from "node:path";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
-  AuthAdministrativeScopes,
+  AuthStandardClientScopes,
   AuthOrchestrationReadScope,
   AuthSettingsWriteScope,
   CivilizationDefaultConfig,
@@ -298,6 +298,7 @@ const withFakeCivilizationServer = <A, E, R>(
                     messages: 0,
                     messageBodyBytes: 0,
                     contextReferences: 0,
+                    contextInspections: 0,
                     receipts: 0,
                     quotaWindows: 0,
                     projectConfigRows: 0,
@@ -382,11 +383,13 @@ const withFakeCivilizationServer = <A, E, R>(
                     resolvedNotes: 2,
                     resolvedNoteBodyBytes: 99,
                     diagnosticReferences: 4,
+                    diagnosticInspections: 2,
                     tombstones: 1,
                   },
                   samples: {
                     noteIds: ["note:one"],
                     contextReferenceIds: ["context:one"],
+                    contextInspectionIds: ["inspection:one"],
                     tombstoneThreadIds: ["thread:one"],
                     partial: true,
                   },
@@ -419,6 +422,7 @@ const withFakeCivilizationServer = <A, E, R>(
                     resolvedNotes: 2,
                     resolvedNoteBodyBytes: 99,
                     diagnosticReferences: 4,
+                    diagnosticInspections: 2,
                     tombstones: 1,
                   },
                 }),
@@ -588,7 +592,7 @@ it.effect(
               "--note",
               "note:test",
             ]);
-            assert.deepEqual(noteReadScopes, AuthAdministrativeScopes);
+            assert.deepEqual(noteReadScopes, AuthStandardClientScopes);
             assert.include(noteReadScopes, AuthSettingsWriteScope);
 
             for (const args of [
@@ -604,7 +608,7 @@ it.effect(
               ],
             ] as const) {
               const inboxScopes = yield* authenticateInFlight(args);
-              assert.deepEqual(inboxScopes, AuthAdministrativeScopes);
+              assert.deepEqual(inboxScopes, AuthStandardClientScopes);
               assert.include(inboxScopes, AuthSettingsWriteScope);
             }
 
@@ -646,7 +650,7 @@ it.effect(
               ],
             ] as const) {
               const scopes = yield* authenticateInFlight(args);
-              assert.deepEqual(scopes, AuthAdministrativeScopes);
+              assert.deepEqual(scopes, AuthStandardClientScopes);
               assert.include(scopes, AuthSettingsWriteScope);
             }
 
