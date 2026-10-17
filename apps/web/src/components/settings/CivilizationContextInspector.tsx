@@ -12,7 +12,7 @@ import {
   RunId,
   ThreadId,
 } from "@t3tools/contracts";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import {
   civilizationSensitiveReadAction,
@@ -372,10 +372,7 @@ export function CivilizationContextInspector({
   const rows = page.data?.inspections ?? [];
   const nextCursor = page.data?.nextCursor ?? null;
   const hasPrevious = cursorStack.length > 0;
-  const activeFilterCount = useMemo(
-    () => Object.values(filters).filter((value) => value !== undefined).length,
-    [filters],
-  );
+  const activeFilterCount = Object.values(filters).filter((value) => value !== undefined).length;
 
   const apply = () => {
     setFilters(appliedFilters(draft));

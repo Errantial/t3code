@@ -1,4 +1,3 @@
-import { useMemo } from "react";
 import {
   type CivilizationCensusCursor,
   type CivilizationContextInspectionCursor,
@@ -159,13 +158,10 @@ export function useCivilizationOverview(
   environmentId: EnvironmentId | null,
   projectId: ProjectId | null,
 ) {
-  const atom = useMemo(
-    () =>
-      environmentId === null
-        ? null
-        : civilizationOverviewAtom(civilizationOverviewQueryKey(environmentId, projectId)),
-    [environmentId, projectId],
-  );
+  const atom =
+    environmentId === null
+      ? null
+      : civilizationOverviewAtom(civilizationOverviewQueryKey(environmentId, projectId));
   return useEnvironmentQuery(atom);
 }
 
@@ -213,13 +209,10 @@ const civilizationConfigTargetsAtom = Atom.family((serializedKey: string) => {
 });
 
 export function useCivilizationConfigTargets(targets: ReadonlyArray<CivilizationConfigTarget>) {
-  const atom = useMemo(
-    () =>
-      targets.length === 0
-        ? null
-        : civilizationConfigTargetsAtom(civilizationConfigTargetsKey(targets)),
-    [targets],
-  );
+  const atom =
+    targets.length === 0
+      ? null
+      : civilizationConfigTargetsAtom(civilizationConfigTargetsKey(targets));
   return useEnvironmentQuery(atom);
 }
 
@@ -310,15 +303,12 @@ export function useCivilizationCensusPage(
   cursor: CivilizationCensusCursor | null,
   limit: number,
 ) {
-  const atom = useMemo(
-    () =>
-      environmentId === null || projectId === null
-        ? null
-        : civilizationCensusPageAtom(
-            civilizationProjectPageKey([environmentId, projectId, cursor, limit]),
-          ),
-    [cursor, environmentId, limit, projectId],
-  );
+  const atom =
+    environmentId === null || projectId === null
+      ? null
+      : civilizationCensusPageAtom(
+          civilizationProjectPageKey([environmentId, projectId, cursor, limit]),
+        );
   return useEnvironmentQuery(atom);
 }
 
@@ -352,15 +342,12 @@ export function useCivilizationNotesPage(
   limit: number,
   includeResolved: boolean,
 ) {
-  const atom = useMemo(
-    () =>
-      environmentId === null || projectId === null
-        ? null
-        : civilizationNotesPageAtom(
-            civilizationProjectPageKey([environmentId, projectId, cursor, limit, includeResolved]),
-          ),
-    [cursor, environmentId, includeResolved, limit, projectId],
-  );
+  const atom =
+    environmentId === null || projectId === null
+      ? null
+      : civilizationNotesPageAtom(
+          civilizationProjectPageKey([environmentId, projectId, cursor, limit, includeResolved]),
+        );
   return useEnvironmentQuery(atom);
 }
 
@@ -425,32 +412,18 @@ export function useCivilizationContextInspectionPage(
   limit: number,
 ) {
   const { attemptId, outcome, providerInstanceId, providerTurnOrdinal, runId, threadId } = filters;
-  const atom = useMemo(
-    () =>
-      environmentId === null || projectId === null
-        ? null
-        : civilizationContextInspectionPageAtom(
-            civilizationContextInspectionQueryKey(
-              environmentId,
-              projectId,
-              { attemptId, outcome, providerInstanceId, providerTurnOrdinal, runId, threadId },
-              cursor,
-              limit,
-            ),
+  const atom =
+    environmentId === null || projectId === null
+      ? null
+      : civilizationContextInspectionPageAtom(
+          civilizationContextInspectionQueryKey(
+            environmentId,
+            projectId,
+            { attemptId, outcome, providerInstanceId, providerTurnOrdinal, runId, threadId },
+            cursor,
+            limit,
           ),
-    [
-      attemptId,
-      cursor,
-      environmentId,
-      limit,
-      outcome,
-      projectId,
-      providerInstanceId,
-      providerTurnOrdinal,
-      runId,
-      threadId,
-    ],
-  );
+        );
   return useEnvironmentQuery(atom);
 }
 
@@ -485,15 +458,12 @@ export function useCivilizationRetainedMailPage(
   cursor: CivilizationInboxCursor | null,
   limit: number,
 ) {
-  const atom = useMemo(
-    () =>
-      environmentId === null || projectId === null
-        ? null
-        : civilizationRetainedMailPageAtom(
-            civilizationProjectPageKey([environmentId, projectId, cursor, limit]),
-          ),
-    [cursor, environmentId, limit, projectId],
-  );
+  const atom =
+    environmentId === null || projectId === null
+      ? null
+      : civilizationRetainedMailPageAtom(
+          civilizationProjectPageKey([environmentId, projectId, cursor, limit]),
+        );
   return useEnvironmentQuery(atom);
 }
 

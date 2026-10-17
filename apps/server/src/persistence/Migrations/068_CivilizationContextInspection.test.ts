@@ -8,7 +8,7 @@ import { runMigrations } from "../Migrations.ts";
 it.effect("adds bounded per-turn Civilization context inspection storage", () =>
   Effect.gen(function* () {
     const sql = yield* SqlClient.SqlClient;
-    yield* runMigrations({ toMigrationInclusive: 67 });
+    yield* runMigrations({ toMigrationInclusive: 68 });
     const columns = yield* sql<{
       readonly name: string;
     }>`PRAGMA table_info(civilization_context_inspections)`;

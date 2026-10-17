@@ -3,6 +3,7 @@ import {
   type AuthEnvironmentScope,
   AuthOrchestrationReadScope,
   CivilizationCensusCursor,
+  CivilizationConfigConflictError,
   CivilizationConfigOverride,
   CivilizationInboxCursor,
   CivilizationMessageId,
@@ -92,6 +93,12 @@ const batchSizeFlag = Flag.Int("batch-size").pipe(
 const makeClient = (origin: string) => HttpApiClient.make(EnvironmentHttpApi, { baseUrl: origin });
 type CivilizationHttpClient = Effect.Success<ReturnType<typeof makeClient>>;
 const decodeOverride = Schema.decodeEffect(Schema.fromJsonString(CivilizationConfigOverride));
+const isConfigConflict = Schema.is(CivilizationConfigConflictError);
+
+export const civilizationCliErrorMessage = (cause: unknown): string =>
+  isConfigConflict(cause)
+    ? `Civilization ${cause.scope} configuration revision conflict: expected ${cause.expectedRevision}, current ${cause.currentRevision}.`
+    : "Civilization request failed.";
 
 const toProjectId = (value: Option.Option<string>) =>
   Option.match(value, {
@@ -99,12 +106,13 @@ const toProjectId = (value: Option.Option<string>) =>
     onSome: ProjectId.make,
   });
 
-const failCli = (cause: unknown) =>
-  Effect.fail(
-    new CliError.UserError({
-      cause: cause instanceof Error ? cause.message : String(cause),
-    }),
-  );
+const failCli = (cause: unknown) => {
+  const message = civilizationCliErrorMessage(cause);
+  return Effect.fail(new CliError.UserError({ cause, userMessage: message }));
+};
+
+const failCliMessage = (message: string) =>
+  Effect.fail(new CliError.UserError({ cause: message, userMessage: message }));
 
 const withCivilizationClient = <A, E, R>(
   flags: CliAuthLocationFlags,
@@ -116,7 +124,7 @@ const withCivilizationClient = <A, E, R>(
     const config = yield* resolveCliAuthConfig(flags, logLevel);
     const runtime = yield* readPersistedServerRuntimeState(config.serverRuntimeStatePath);
     if (Option.isNone(runtime) || runtime.value.pid <= 0 || !isProcessAlive(runtime.value.pid)) {
-      return yield* failCli(
+      return yield* failCliMessage(
         "No running T3 Code server owns this environment. Start the server before using `t3 civilization`.",
       );
     }

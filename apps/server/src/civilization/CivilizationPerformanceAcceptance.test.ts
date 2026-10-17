@@ -406,10 +406,10 @@ it.effect(
         WHERE migration_id BETWEEN 63 AND 66 ORDER BY migration_id ASC
       `;
       assert.deepEqual(migrations, [
-        { migration_id: 63, name: "Civilization" },
-        { migration_id: 64, name: "CivilizationKnowledge" },
-        { migration_id: 65, name: "CivilizationMail" },
-        { migration_id: 66, name: "CivilizationOperations" },
+        { migration_id: 63, name: "DropUnusedV1Projections" },
+        { migration_id: 64, name: "Civilization" },
+        { migration_id: 65, name: "CivilizationKnowledge" },
+        { migration_id: 66, name: "CivilizationMail" },
       ]);
       const dbAfterMigrations = yield* databaseFootprint(sql);
       const diskAfterMigrations = diskFootprint(dbPath);

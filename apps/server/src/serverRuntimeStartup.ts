@@ -38,6 +38,17 @@ import * as ProviderSessionManager from "./orchestration-v2/ProviderSessionManag
 import * as ThreadLaunch from "./orchestration-v2/ThreadLaunchService.ts";
 import * as ThreadManagement from "./orchestration-v2/ThreadManagementService.ts";
 import * as ProjectService from "./project/ProjectService.ts";
+
+export const recoverOptionalCivilizationStartup = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
+  effect.pipe(
+    Effect.catchCause((cause) =>
+      Cause.hasInterruptsOnly(cause)
+        ? Effect.failCause(cause)
+        : Effect.logWarning(
+            "Civilization startup catch-up failed; continuing host startup without optional catch-up.",
+          ).pipe(Effect.as(undefined)),
+    ),
+  );
 import * as GitVcsDriver from "./vcs/GitVcsDriver.ts";
 import * as ProjectStore from "./orchestration-v2/ProjectStore.ts";
 import * as AgentAwarenessRelay from "./relay/AgentAwarenessRelay.ts";
@@ -555,6 +566,7 @@ const make = (options?: StartupOptions) =>
                   ),
                 ),
               ),
+              recoverOptionalCivilizationStartup,
             ),
           ),
         ),

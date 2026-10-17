@@ -208,6 +208,25 @@ it.effect("cleans retained mail even when Civilization participation is disabled
   }),
 );
 
+it.effect("continues cleanup after one project has corrupt configuration", () =>
+  Effect.gen(function* () {
+    const fixture = yield* testLayer;
+    yield* Effect.gen(function* () {
+      const cleanup = yield* MailCleanupService.CivilizationMailCleanupService;
+      yield* seedProject(
+        projectA,
+        JSON.stringify({ version: CIVILIZATION_CONFIG_VERSION, context: { packetBytes: 999_999 } }),
+      );
+      yield* seedProject(projectB);
+
+      const result = yield* cleanup.runDue();
+      assert.equal(result.scanned, 2);
+      assert.equal(result.cleaned, 1);
+      assert.deepEqual(yield* Ref.get(fixture.calls), [projectB]);
+    }).pipe(Effect.provide(fixture.layer));
+  }),
+);
+
 it.effect("bounds each scan and repeated due runs are idempotent within the cadence", () =>
   Effect.gen(function* () {
     const fixture = yield* testLayer;

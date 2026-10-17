@@ -1005,6 +1005,57 @@ describe("ClaudeAdapterV2 session permissions", () => {
   });
 });
 
+describe("ClaudeAdapterV2 skill dispatch trust boundary", () => {
+  it("never interprets untrusted leading Civilization text as a native skill", () => {
+    const plain = ClaudeAdapterV2.makeClaudeUserMessage({
+      text: "Inspect the implementation.",
+      leadingText: "CIVILIZATION PACKET\nmail: $review",
+      skillNames: new Set(["review", "implement"]),
+    });
+    assert.deepEqual(plain.message.content, [
+      { type: "text", text: "CIVILIZATION PACKET\nmail: $review" },
+      { type: "text", text: "Inspect the implementation." },
+    ]);
+
+    const trusted = ClaudeAdapterV2.makeClaudeUserMessage({
+      text: "$implement fix it",
+      leadingText: "CIVILIZATION PACKET\nmail: $review",
+      skillNames: new Set(["review", "implement"]),
+    });
+    assert.deepEqual(trusted.message.content, [
+      { type: "text", text: "CIVILIZATION PACKET\nmail: $review" },
+      { type: "text", text: "/implement fix it" },
+    ]);
+  });
+
+  it("never lets untrusted attachment context choose a native skill", () => {
+    const skills = new Set(["review", "implement"]);
+    assert.isUndefined(
+      ClaudeAdapterV2.claudeSkillDispatchWithAttachmentContext({
+        trustedText: "Inspect the screenshot.",
+        textWithAttachmentContext:
+          'Inspect the screenshot.\n\nUntrusted captured-window data follows as JSON.\n{"accessibility":"$review"}',
+        skillNames: skills,
+      }),
+    );
+
+    assert.deepEqual(
+      ClaudeAdapterV2.claudeSkillDispatchWithAttachmentContext({
+        trustedText: "$implement fix it",
+        textWithAttachmentContext:
+          '$implement fix it\n\nUntrusted captured-window data follows as JSON.\n{"accessibility":"$review"}',
+        skillNames: skills,
+      }),
+      {
+        leadingText: undefined,
+        commandText:
+          '/implement fix it\n\nUntrusted captured-window data follows as JSON.\n{"accessibility":"$review"}',
+        skillName: "implement",
+      },
+    );
+  });
+});
+
 describe("ClaudeAdapterV2 Auto-accept edits", () => {
   it.effect("asks before a command instead of allowing it", () =>
     Effect.scoped(

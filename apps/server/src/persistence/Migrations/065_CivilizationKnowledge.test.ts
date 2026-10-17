@@ -21,11 +21,11 @@ const readProjectState = (projectId: string) =>
       `)[0];
   });
 
-describe("064_CivilizationKnowledge", () => {
+describe("065_CivilizationKnowledge", () => {
   it.effect("bumps project census and notes revisions from table triggers", () =>
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
-      yield* runMigrations({ toMigrationInclusive: 64 });
+      yield* runMigrations({ toMigrationInclusive: 65 });
 
       const projectId = "project:civilization:knowledge";
       const threadId = "thread:civilization:knowledge";
@@ -65,6 +65,17 @@ describe("064_CivilizationKnowledge", () => {
       assert.strictEqual((yield* readProjectState(projectId))?.census_revision, 2);
 
       yield* sql`
+        UPDATE civilization_citizens
+        SET last_applied_sequence = last_applied_sequence + 1, updated_at = datetime('now')
+        WHERE thread_id = ${threadId}
+      `;
+      assert.strictEqual(
+        (yield* readProjectState(projectId))?.census_revision,
+        2,
+        "watermark-only updates must not invalidate census cursors",
+      );
+
+      yield* sql`
         INSERT INTO civilization_notes (
           note_id, project_id, category, body, body_bytes, author_thread_id, author_epoch,
           accepted_runtime_mode, accepted_interaction_mode, source_refs_json,
@@ -94,7 +105,7 @@ describe("064_CivilizationKnowledge", () => {
   it.effect("keeps context references bounded to metadata", () =>
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
-      yield* runMigrations({ toMigrationInclusive: 64 });
+      yield* runMigrations({ toMigrationInclusive: 65 });
       const columns = yield* sql<{
         readonly name: string;
       }>`PRAGMA table_info(civilization_context_references)`;

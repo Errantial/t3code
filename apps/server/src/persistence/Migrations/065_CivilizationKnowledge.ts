@@ -93,6 +93,7 @@ export default Effect.gen(function* () {
   yield* sql`
     CREATE TRIGGER civilization_citizens_revision_update
     AFTER UPDATE ON civilization_citizens
+    WHEN OLD.project_id <> NEW.project_id OR OLD.revision <> NEW.revision
     BEGIN
       INSERT INTO civilization_project_state (project_id, census_revision, notes_revision, updated_at)
       VALUES (OLD.project_id, 1, 0, datetime('now'))

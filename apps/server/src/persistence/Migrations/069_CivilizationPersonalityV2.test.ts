@@ -5,7 +5,7 @@ import * as SqlClient from "effect/sql/SqlClient";
 
 import { runMigrations } from "../Migrations.ts";
 
-const seedCitizen = Effect.fn("068_CivilizationPersonalityV2.test.seedCitizen")(function* (
+const seedCitizen = Effect.fn("069_CivilizationPersonalityV2.test.seedCitizen")(function* (
   threadId: string,
   profile: {
     readonly id: string;
@@ -45,7 +45,7 @@ it.effect(
   () =>
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
-      yield* runMigrations({ toMigrationInclusive: 67 });
+      yield* runMigrations({ toMigrationInclusive: 68 });
 
       const v1EnvironmentOverride = {
         version: 1,
@@ -159,8 +159,8 @@ it.effect(
         styleText: "Keep this other custom style.",
       });
 
-      assert.deepStrictEqual(yield* runMigrations({ toMigrationInclusive: 68 }), [
-        [68, "CivilizationPersonalityV2"],
+      assert.deepStrictEqual(yield* runMigrations({ toMigrationInclusive: 69 }), [
+        [69, "CivilizationPersonalityV2"],
       ]);
 
       const columns = yield* sql<{

@@ -20,7 +20,7 @@ type MailStateRow = {
   readonly retained_body_bytes: number;
 };
 
-const insertCitizen = Effect.fn("065.test.insertCitizen")(function* (input: {
+const insertCitizen = Effect.fn("066.test.insertCitizen")(function* (input: {
   readonly threadId: string;
   readonly projectId: string;
   readonly epoch: number;
@@ -52,11 +52,11 @@ const insertCitizen = Effect.fn("065.test.insertCitizen")(function* (input: {
   `;
 });
 
-describe("065_CivilizationMail", () => {
+describe("066_CivilizationMail", () => {
   it.effect("adds an independent delivery epoch and backfills lifecycle component bits", () =>
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
-      yield* runMigrations({ toMigrationInclusive: 64 });
+      yield* runMigrations({ toMigrationInclusive: 65 });
       const projectId = "project:civilization:mail:lifecycle";
       const threadId = "thread:civilization:mail:lifecycle";
 
@@ -72,7 +72,7 @@ describe("065_CivilizationMail", () => {
       `;
       yield* insertCitizen({ threadId, projectId, epoch: 7 });
 
-      yield* runMigrations({ toMigrationInclusive: 65 });
+      yield* runMigrations({ toMigrationInclusive: 66 });
       const row = (yield* sql<DeliveryRow>`
         SELECT epoch, delivery_epoch, delivery_settled, delivery_archived, delivery_deleted
         FROM civilization_citizens WHERE thread_id = ${threadId}
@@ -106,7 +106,7 @@ describe("065_CivilizationMail", () => {
     () =>
       Effect.gen(function* () {
         const sql = yield* SqlClient.SqlClient;
-        yield* runMigrations({ toMigrationInclusive: 65 });
+        yield* runMigrations({ toMigrationInclusive: 66 });
         const projectId = "project:civilization:mail:schema";
 
         yield* sql`

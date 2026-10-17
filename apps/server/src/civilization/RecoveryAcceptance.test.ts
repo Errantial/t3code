@@ -468,11 +468,11 @@ const makeFileLayer = (dbPath: string) =>
   );
 
 it.effect(
-  "migrates 063 identity/config rows to latest without rerolling names, profiles or epochs",
+  "migrates 064 identity/config rows to latest without rerolling names, profiles or epochs",
   () =>
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
-      yield* runMigrations({ toMigrationInclusive: 63 });
+      yield* runMigrations({ toMigrationInclusive: 64 });
       const projectId = ProjectId.make("project:recovery:migration");
       const threadId = ThreadId.make("thread:recovery:migration");
       const environmentOverrideV1 = JSON.stringify({
@@ -538,7 +538,7 @@ it.effect(
       const migrated = yield* runMigrations();
       assert.deepEqual(
         migrated.map(([id]) => id),
-        [64, 65, 66, 67, 68, 69],
+        [65, 66, 67, 68, 69, 70],
       );
       assert.deepEqual(
         (yield* sql<{
@@ -604,12 +604,12 @@ it.effect(
     }).pipe(Effect.provide(Layer.fresh(NodeSqliteClient.layer({ filename: ":memory:" })))),
 );
 
-it.effect("rolls back partial 066 DDL and retries without changing retained feature state", () =>
+it.effect("rolls back partial 067 DDL and retries without changing retained feature state", () =>
   Effect.gen(function* () {
     const sql = yield* SqlClient.SqlClient;
     const projectId = ProjectId.make("project:recovery:migration-rollback");
     const threadId = ThreadId.make("thread:recovery:migration-rollback");
-    yield* runMigrations({ toMigrationInclusive: 65 });
+    yield* runMigrations({ toMigrationInclusive: 66 });
     yield* seedLatestFeatureRows({
       projectId,
       threadId,
@@ -619,15 +619,15 @@ it.effect("rolls back partial 066 DDL and retries without changing retained feat
     const before = yield* readPreRichFeatureState(projectId);
     yield* assertRetainedStateCoherent(projectId);
 
-    // Force migration 066 to fail after CREATE TABLE succeeds. SQLite DDL is
+    // Force migration 067 to fail after CREATE TABLE succeeds. SQLite DDL is
     // transactional here, so the table and migration-ledger row must both roll
     // back instead of leaving a half-applied cleanup authority behind.
-    yield* sql`CREATE TABLE recovery_066_index_blocker (project_id TEXT NOT NULL)`;
+    yield* sql`CREATE TABLE recovery_067_index_blocker (project_id TEXT NOT NULL)`;
     yield* sql`
       CREATE INDEX civilization_purge_tombstones_project_progress_idx
-      ON recovery_066_index_blocker(project_id)
+      ON recovery_067_index_blocker(project_id)
     `;
-    const failed = yield* Effect.exit(runMigrations({ toMigrationInclusive: 66 }));
+    const failed = yield* Effect.exit(runMigrations({ toMigrationInclusive: 67 }));
     assert.isTrue(Exit.isFailure(failed));
     assert.deepEqual(
       yield* sql<{ readonly name: string }>`
@@ -638,18 +638,18 @@ it.effect("rolls back partial 066 DDL and retries without changing retained feat
     );
     assert.deepEqual(
       yield* sql<{ readonly migration_id: number }>`
-        SELECT migration_id FROM effect_sql_migrations WHERE migration_id = 66
+        SELECT migration_id FROM effect_sql_migrations WHERE migration_id = 67
       `,
       [],
     );
     assert.deepEqual(yield* readPreRichFeatureState(projectId), before);
 
     yield* sql`DROP INDEX civilization_purge_tombstones_project_progress_idx`;
-    yield* sql`DROP TABLE recovery_066_index_blocker`;
-    const retried = yield* runMigrations({ toMigrationInclusive: 66 });
+    yield* sql`DROP TABLE recovery_067_index_blocker`;
+    const retried = yield* runMigrations({ toMigrationInclusive: 67 });
     assert.deepEqual(
       retried.map(([id]) => id),
-      [66],
+      [67],
     );
     assert.deepEqual(
       yield* sql<{ readonly name: string }>`
@@ -789,7 +789,7 @@ it.effect(
       const knowledge = yield* KnowledgeService.CivilizationKnowledgeService;
       const projectId = ProjectId.make("project:recovery:partial");
       const threadId = ThreadId.make("thread:recovery:partial");
-      yield* runMigrations({ toMigrationInclusive: 63 });
+      yield* runMigrations({ toMigrationInclusive: 64 });
       yield* seedProject({ projectId });
       yield* config.set({
         expectedRevision: 0,

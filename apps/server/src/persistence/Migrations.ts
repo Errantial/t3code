@@ -66,13 +66,13 @@ import Migration0060 from "./Migrations/060_ThreadSnapshotWindowIndexes.ts";
 import Migration0061 from "./Migrations/061_PullRequestReviewGuides.ts";
 import Migration0062 from "./Migrations/062_ThreadFailureLookupIndex.ts";
 import Migration0063 from "./Migrations/063_DropUnusedV1Projections.ts";
-import Migration0064 from "./Migrations/063_Civilization.ts";
-import Migration0065 from "./Migrations/064_CivilizationKnowledge.ts";
-import Migration0066 from "./Migrations/065_CivilizationMail.ts";
-import Migration0067 from "./Migrations/066_CivilizationOperations.ts";
-import Migration0068 from "./Migrations/067_CivilizationContextInspection.ts";
-import Migration0069 from "./Migrations/068_CivilizationPersonalityV2.ts";
-import Migration0070 from "./Migrations/069_CivilizationContextInspectionReferenceSync.ts";
+import Migration0064 from "./Migrations/064_Civilization.ts";
+import Migration0065 from "./Migrations/065_CivilizationKnowledge.ts";
+import Migration0066 from "./Migrations/066_CivilizationMail.ts";
+import Migration0067 from "./Migrations/067_CivilizationOperations.ts";
+import Migration0068 from "./Migrations/068_CivilizationContextInspection.ts";
+import Migration0069 from "./Migrations/069_CivilizationPersonalityV2.ts";
+import Migration0070 from "./Migrations/070_CivilizationContextInspectionReferenceSync.ts";
 
 export const migrationEntries = [
   [1, "OrchestrationEvents", Migration0001],

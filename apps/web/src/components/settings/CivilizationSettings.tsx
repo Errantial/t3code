@@ -10,7 +10,7 @@ import {
 } from "@t3tools/contracts";
 import { useAtomSet } from "@effect/atom-react";
 import { RefreshCwIcon } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useState } from "react";
 
 import {
   applyCivilizationConfigFanout,
@@ -402,13 +402,9 @@ function CivilizationMultiTargetParticipation({
 }) {
   const readable = useEnvironmentsWithScope(targets, AuthOrchestrationReadScope);
   const writable = useEnvironmentsWithScope(targets, AuthSettingsWriteScope);
-  const scopedTargets = useMemo(
-    () =>
-      targets
-        .filter((target) => readable.has(target.environmentId))
-        .map(({ environmentId, projectId }) => ({ environmentId, projectId })),
-    [readable, targets],
-  );
+  const scopedTargets = targets
+    .filter((target) => readable.has(target.environmentId))
+    .map(({ environmentId, projectId }) => ({ environmentId, projectId }));
   const overview = useCivilizationConfigTargets(scopedTargets);
   const runConfigAction: CivilizationConfigRunner = useAtomSet(civilizationConfigAction, {
     mode: "promise",
@@ -423,7 +419,7 @@ function CivilizationMultiTargetParticipation({
   const [message, setMessage] = useState<string | null>(null);
   const [reviewRequired, setReviewRequired] = useState(false);
 
-  const resolvedDraft = useMemo<MultiParticipationDraft>(() => {
+  const resolvedDraft: MultiParticipationDraft = (() => {
     if (overview.data === null || overview.data.length === 0)
       return { enabled: null, adoption: null };
     const enabled = new Set(
@@ -436,9 +432,9 @@ function CivilizationMultiTargetParticipation({
       enabled: enabled.size === 1 ? [...enabled][0]! : null,
       adoption: adoption.size === 1 ? [...adoption][0]! : null,
     };
-  }, [overview.data]);
+  })();
   const draft = dirty ? draftState : resolvedDraft;
-  const currentRevisions = useMemo(() => {
+  const currentRevisions = (() => {
     const next: Record<string, number> = {};
     for (const entry of overview.data ?? []) {
       next[civilizationTargetKey(entry)] = civilizationConfigExpectedRevision(
@@ -447,7 +443,7 @@ function CivilizationMultiTargetParticipation({
       );
     }
     return next;
-  }, [overview.data]);
+  })();
   const conflictRefreshComplete =
     reviewRequired &&
     Object.entries(capturedRevisions).some(

@@ -342,6 +342,38 @@ it.effect("reset removes the override while advancing its revision", () =>
   }).pipe(Effect.provide(Layer.fresh(layer))),
 );
 
+it.effect("reset recovers corrupt persisted environment and project overrides", () =>
+  Effect.gen(function* () {
+    const service = yield* ConfigService.CivilizationConfigService;
+    const sql = yield* SqlClient.SqlClient;
+    const projectId = ProjectId.make("project:civilization:reset-corrupt");
+    yield* insertProject(projectId);
+    const corrupt = JSON.stringify({
+      version: CIVILIZATION_CONFIG_VERSION,
+      context: { packetBytes: 999_999 },
+    });
+    yield* sql`
+      UPDATE civilization_environment_config
+      SET revision = 4, override_json = ${corrupt}
+      WHERE singleton = 1
+    `;
+
+    assert.isTrue(isUnavailable(yield* Effect.flip(service.getEffective())));
+    const environmentReset = yield* service.reset({ expectedRevision: 4 });
+    assert.equal(environmentReset.revision, 5);
+    assert.isFalse(environmentReset.effective.config.participation.enabled);
+
+    yield* sql`
+      INSERT INTO civilization_project_config (project_id, revision, override_json, updated_at)
+      VALUES (${projectId}, 7, ${corrupt}, datetime('now'))
+    `;
+    assert.isTrue(isUnavailable(yield* Effect.flip(service.getEffective(projectId))));
+    const projectReset = yield* service.reset({ projectId, expectedRevision: 7 });
+    assert.equal(projectReset.revision, 8);
+    assert.isFalse(projectReset.effective.config.participation.enabled);
+  }).pipe(Effect.provide(Layer.fresh(layer))),
+);
+
 it.effect("invalidates the runtime config cache after supported writes", () =>
   Effect.gen(function* () {
     const service = yield* ConfigService.CivilizationConfigService;

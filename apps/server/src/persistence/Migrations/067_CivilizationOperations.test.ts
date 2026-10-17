@@ -8,7 +8,7 @@ import { runMigrations } from "../Migrations.ts";
 it.effect("adds only minimal resumable Civilization purge tombstones", () =>
   Effect.gen(function* () {
     const sql = yield* SqlClient.SqlClient;
-    yield* runMigrations({ toMigrationInclusive: 66 });
+    yield* runMigrations({ toMigrationInclusive: 67 });
     const columns = yield* sql<{
       readonly name: string;
     }>`PRAGMA table_info(civilization_purge_tombstones)`;

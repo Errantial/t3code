@@ -942,20 +942,26 @@ const resetOverride = Effect.fn("CivilizationConfig.resetOverride")(function* (i
   return yield* sql.withTransaction(
     Effect.gen(function* () {
       if (input.projectId === undefined) {
-        const current = yield* readCivilizationEnvironmentConfig();
-        if (current.revision !== input.expectedRevision) {
+        const currentRevision =
+          (yield* sql<{ readonly revision: number }>`
+            SELECT revision
+            FROM civilization_environment_config
+            WHERE singleton = 1
+            LIMIT 1
+          `)[0]?.revision ?? 0;
+        if (currentRevision !== input.expectedRevision) {
           return yield* Effect.fail(
             new CivilizationConfigConflictError({
               code: "civilization_conflict",
               scope: "environment",
               expectedRevision: input.expectedRevision,
-              currentRevision: current.revision,
+              currentRevision,
             }),
           );
         }
         const empty: CivilizationConfigOverride = { version: CIVILIZATION_CONFIG_VERSION };
         yield* validateEnvironmentCandidate(empty);
-        const revision = current.revision + 1;
+        const revision = currentRevision + 1;
         yield* sql`
           UPDATE civilization_environment_config
           SET revision = ${revision}, override_json = NULL, updated_at = datetime('now')
@@ -965,18 +971,24 @@ const resetOverride = Effect.fn("CivilizationConfig.resetOverride")(function* (i
       }
 
       yield* ensureProjectExists(input.projectId);
-      const current = yield* readCivilizationProjectConfig(input.projectId);
-      if (current.revision !== input.expectedRevision) {
+      const currentRevision =
+        (yield* sql<{ readonly revision: number }>`
+          SELECT revision
+          FROM civilization_project_config
+          WHERE project_id = ${input.projectId}
+          LIMIT 1
+        `)[0]?.revision ?? 0;
+      if (currentRevision !== input.expectedRevision) {
         return yield* Effect.fail(
           new CivilizationConfigConflictError({
             code: "civilization_conflict",
             scope: "project",
             expectedRevision: input.expectedRevision,
-            currentRevision: current.revision,
+            currentRevision,
           }),
         );
       }
-      const revision = current.revision + 1;
+      const revision = currentRevision + 1;
       yield* sql`
         INSERT INTO civilization_project_config (project_id, revision, override_json, updated_at)
         VALUES (${input.projectId}, ${revision}, NULL, datetime('now'))
@@ -1151,24 +1163,32 @@ const make = Effect.gen(function* () {
     string,
     Effect.Success<ReturnType<typeof getRuntimeCivilizationConfig>>
   >();
+  let runtimeCacheGeneration = 0;
   const runtimeKey = (projectId?: ProjectId) =>
     projectId === undefined ? "<environment>" : String(projectId);
   const getRuntime = (projectId?: ProjectId) => {
     const key = runtimeKey(projectId);
     const cached = runtimeCache.get(key);
     if (cached !== undefined) return Effect.succeed(cached);
-    return provideSql(getRuntimeCivilizationConfig(projectId)).pipe(
-      Effect.tap((resolved) =>
-        Effect.sync(() => {
-          runtimeCache.set(key, resolved);
-        }),
-      ),
-    );
+    return Effect.suspend(() => {
+      const generation = runtimeCacheGeneration;
+      return provideSql(getRuntimeCivilizationConfig(projectId)).pipe(
+        Effect.tap((resolved) =>
+          Effect.sync(() => {
+            if (generation === runtimeCacheGeneration) runtimeCache.set(key, resolved);
+          }),
+        ),
+      );
+    });
   };
   const invalidateRuntimeCache = <A, E>(effect: Effect.Effect<A, E, SqlClient.SqlClient>) =>
-    provideSql(effect).pipe(
-      Effect.tap(() =>
+    Effect.sync(() => {
+      runtimeCacheGeneration += 1;
+    }).pipe(
+      Effect.andThen(provideSql(effect)),
+      Effect.ensuring(
         Effect.sync(() => {
+          runtimeCacheGeneration += 1;
           runtimeCache.clear();
         }),
       ),

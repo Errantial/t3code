@@ -431,6 +431,47 @@ it.effect(
       ]) {
         assert.notInclude(serialized, sensitive);
       }
+
+      yield* sql`
+        INSERT INTO civilization_project_config (project_id, revision, override_json, updated_at)
+        VALUES (${projectId}, 50, ${JSON.stringify({ version: CIVILIZATION_CONFIG_VERSION, participation: { enabled: false } })}, datetime('now'))
+      `;
+      yield* seedCitizen(threadA, "Recreated Ada");
+      yield* sql`
+        INSERT INTO civilization_notes (
+          note_id, project_id, category, body, body_bytes, author_thread_id, author_epoch,
+          accepted_runtime_mode, accepted_interaction_mode, source_refs_json, revision,
+          created_at, updated_at, resolved_at
+        ) VALUES ('note:recreated', ${projectId}, 'fact', 'new-data', 8, ${threadA}, 0,
+          'full-access', 'default', '[]', 1, datetime('now'), datetime('now'), NULL)
+      `;
+      const freshPreview = yield* operations.previewPurge(projectId);
+      assert.notEqual(freshPreview.previewToken, preview.previewToken);
+      const stale = yield* Effect.flip(
+        operations.applyPurge({
+          projectId,
+          expectedPreviewToken: preview.previewToken,
+          batchSize: 100,
+        }),
+      );
+      assert.equal((stale as { readonly code?: string }).code, "civilization_purge_conflict");
+      assert.equal(
+        (yield* sql<{ readonly count: number }>`
+          SELECT COUNT(*) AS count FROM civilization_notes WHERE project_id = ${projectId}
+        `)[0]?.count,
+        1,
+      );
+      const freshApply = yield* operations.applyPurge({
+        projectId,
+        expectedPreviewToken: freshPreview.previewToken,
+        batchSize: 100,
+      });
+      assert.isTrue(freshApply.complete);
+      const rebound = (yield* sql<{ readonly preview_token: string | null }>`
+        SELECT preview_token FROM civilization_purge_tombstones
+        WHERE project_id = ${projectId} AND thread_id = '__project__'
+      `)[0];
+      assert.equal(rebound?.preview_token, freshPreview.previewToken);
     }).pipe(Effect.provide(Layer.fresh(layer))),
 );
 

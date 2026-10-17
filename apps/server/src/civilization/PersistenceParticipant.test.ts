@@ -99,6 +99,7 @@ type CitizenRow = {
   readonly delivery_archived: number;
   readonly delivery_deleted: number;
   readonly last_applied_sequence: number;
+  readonly revision: number;
 };
 
 type MessageRow = {
@@ -117,7 +118,7 @@ const readCitizen = Effect.fn("PersistenceParticipant.test.readCitizen")(functio
              parent_thread_id, relationship_to_parent, generation, lineage_status, observed_only,
              title_managed, epoch, closed, deleted,
              delivery_epoch, delivery_settled, delivery_archived, delivery_deleted,
-             last_applied_sequence
+             last_applied_sequence, revision
       FROM civilization_citizens WHERE thread_id = ${threadId} LIMIT 1
     `)[0];
 });
@@ -231,6 +232,36 @@ it.effect(
       }>`SELECT COUNT(*) AS count FROM civilization_citizens`)[0]!.count;
       assert.equal(count, 2);
     }).pipe(Effect.provide(Layer.fresh(layer))),
+);
+
+it.effect("does not let corrupt optional Civilization config roll back host thread creation", () =>
+  Effect.gen(function* () {
+    const sink = yield* EventSink.EventSinkV2;
+    const sql = yield* SqlClient.SqlClient;
+    const now = yield* DateTime.now;
+    const projectId = ProjectId.make("project:civilization:corrupt-enrollment");
+    const threadId = ThreadId.make("thread:civilization:corrupt-enrollment");
+    yield* sql`
+      UPDATE civilization_environment_config
+      SET revision = 1,
+          override_json = ${JSON.stringify({ version: CIVILIZATION_CONFIG_VERSION, context: { packetBytes: 999_999 } })}
+      WHERE singleton = 1
+    `;
+    const thread = makeThread(threadId, projectId, now);
+    const stored = yield* sink.write({
+      events: [
+        {
+          id: EventId.make("event:civilization:corrupt-enrollment"),
+          type: "thread.created",
+          threadId,
+          occurredAt: now,
+          payload: thread,
+        },
+      ],
+    });
+    assert.lengthOf(stored, 1);
+    assert.isUndefined(yield* readCitizen(threadId));
+  }).pipe(Effect.provide(Layer.fresh(layer))),
 );
 
 it.effect("uses the injectable Effect random service for the stored weighted name draw", () =>
@@ -539,17 +570,20 @@ it.effect(
         )?.terminal_reason,
         "recipient_archived",
       );
+      const beforeUnarchiveRevision = (yield* readCitizen(threadId))?.revision;
       thread = { ...thread, archivedAt: null, updatedAt: now };
       yield* writeThread("thread.unarchived", thread, "event:civilization:lifecycle:unarchive");
+      const afterUnarchive = yield* readCitizen(threadId);
       assert.deepEqual(
         {
-          epoch: (yield* readCitizen(threadId))?.epoch,
-          closed: (yield* readCitizen(threadId))?.closed,
-          deliveryEpoch: (yield* readCitizen(threadId))?.delivery_epoch,
-          archived: (yield* readCitizen(threadId))?.delivery_archived,
+          epoch: afterUnarchive?.epoch,
+          closed: afterUnarchive?.closed,
+          deliveryEpoch: afterUnarchive?.delivery_epoch,
+          archived: afterUnarchive?.delivery_archived,
         },
         { epoch: 3, closed: 1, deliveryEpoch: 3, archived: 0 },
       );
+      assert.equal(afterUnarchive?.revision, (beforeUnarchiveRevision ?? 0) + 1);
 
       yield* service.set({
         expectedRevision: 1,

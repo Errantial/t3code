@@ -154,7 +154,18 @@ export const enrollCivilizationThread = Effect.fn("civilization.enrollThread")(f
   `;
   if (existing.length > 0) return false;
 
-  const effective = yield* getEffectiveCivilizationConfig(thread.projectId);
+  const effective = yield* getEffectiveCivilizationConfig(thread.projectId).pipe(
+    Effect.catchTags({
+      CivilizationUnavailableError: (error) =>
+        Effect.logWarning(
+          "Civilization enrollment skipped because configuration is unavailable",
+        ).pipe(
+          Effect.annotateLogs({ projectId: thread.projectId, reason: error.reason }),
+          Effect.as(undefined),
+        ),
+    }),
+  );
+  if (effective === undefined) return false;
   const participation = effective.config.participation;
   if (!participation.enabled || participation.emergencyOff) return false;
   const observedOnly = isProviderNativeSubagentThread(thread);
@@ -267,6 +278,10 @@ export const reconcileCivilizationStoredEvent = Effect.fn("civilization.reconcil
     const enteredDeleted = delivery.deleted && row.delivery_deleted === 0;
     const deliveryEpochAdvance =
       (enteredSettled ? 1 : 0) + (enteredArchived ? 1 : 0) + (enteredDeleted ? 1 : 0);
+    const deliveryStateChanged =
+      delivery.settled !== (row.delivery_settled === 1) ||
+      delivery.archived !== (row.delivery_archived === 1) ||
+      delivery.deleted !== (row.delivery_deleted === 1);
     const terminalReason = enteredDeleted
       ? "recipient_deleted"
       : enteredArchived
@@ -287,6 +302,12 @@ export const reconcileCivilizationStoredEvent = Effect.fn("civilization.reconcil
       thread.titleRegeneration == null &&
       expectedManagedTitle !== null &&
       thread.title !== expectedManagedTitle;
+    const citizenStateChanged =
+      changedLifecycle ||
+      nextDeleted !== row.deleted ||
+      deliveryStateChanged ||
+      pendingTitleLanded ||
+      titleRelinquished;
     yield* sql`
     UPDATE civilization_citizens
     SET epoch = epoch + ${changedLifecycle ? 1 : 0},
@@ -304,7 +325,7 @@ export const reconcileCivilizationStoredEvent = Effect.fn("civilization.reconcil
         pending_title_command_id = CASE WHEN ${pendingTitleLanded || titleRelinquished ? 1 : 0} = 1 THEN NULL ELSE pending_title_command_id END,
         pending_managed_title = CASE WHEN ${pendingTitleLanded || titleRelinquished ? 1 : 0} = 1 THEN NULL ELSE pending_managed_title END,
         pending_title_topic = CASE WHEN ${pendingTitleLanded || titleRelinquished ? 1 : 0} = 1 THEN NULL ELSE pending_title_topic END,
-        revision = revision + 1,
+        revision = revision + ${citizenStateChanged ? 1 : 0},
         updated_at = ${DateTime.formatIso(thread.updatedAt)}
     WHERE thread_id = ${stored.event.threadId}
   `;

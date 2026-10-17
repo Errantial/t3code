@@ -9,6 +9,7 @@ import {
   AuthStandardClientScopes,
   AuthOrchestrationReadScope,
   AuthSettingsWriteScope,
+  CivilizationConfigConflictError,
   CivilizationDefaultConfig,
 } from "@t3tools/contracts";
 import { assert, it } from "@effect/vitest";
@@ -21,6 +22,7 @@ import { Command } from "effect/cli";
 
 import * as EnvironmentAuth from "../auth/EnvironmentAuth.ts";
 import { cli } from "../binCli.ts";
+import { civilizationCliErrorMessage } from "./civilization.ts";
 import * as ServerConfig from "../config.ts";
 import { persistServerRuntimeState } from "../serverRuntimeState.ts";
 
@@ -29,6 +31,24 @@ const runCli = (args: ReadonlyArray<string>) =>
   Command.runWith(cli, { version: "0.0.0" })(args).pipe(Effect.provide(layerCliRuntime));
 
 const encodeJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
+
+it("renders only safe Civilization CLI error metadata", () => {
+  assert.equal(
+    civilizationCliErrorMessage(
+      new CivilizationConfigConflictError({
+        code: "civilization_conflict",
+        scope: "project",
+        expectedRevision: 3,
+        currentRevision: 4,
+      }),
+    ),
+    "Civilization project configuration revision conflict: expected 3, current 4.",
+  );
+  assert.equal(
+    civilizationCliErrorMessage(new Error("authorization=Bearer super-secret-token")),
+    "Civilization request failed.",
+  );
+});
 
 const withTempDirectory = <A, E, R>(
   prefix: string,

@@ -551,6 +551,7 @@ const make = Effect.gen(function* () {
     readonly deletionAt: string | null;
     readonly previewToken: string | null;
     readonly tombstoneRetentionDays: number;
+    readonly restartCompleted?: boolean | undefined;
   }) {
     const batchSize = Math.max(1, Math.min(MAX_BATCH, Math.trunc(input.batchSize)));
     const now = DateTime.formatIso(yield* DateTime.now);
@@ -558,13 +559,19 @@ const make = Effect.gen(function* () {
       readonly purge_started_at: string;
       readonly preview_token: string | null;
       readonly retention_days: number;
+      readonly progress_state: string;
     }>`
-        SELECT purge_started_at, preview_token, retention_days FROM civilization_purge_tombstones
+        SELECT purge_started_at, preview_token, retention_days, progress_state
+        FROM civilization_purge_tombstones
         WHERE project_id = ${input.projectId} AND thread_id = ${PROJECT_TOMBSTONE_THREAD_ID}
         LIMIT 1
       `)[0];
-    const startedAt = existing?.purge_started_at ?? now;
-    const tombstoneRetentionDays = existing?.retention_days ?? input.tombstoneRetentionDays;
+    const restartCompleted =
+      input.restartCompleted === true && existing?.progress_state === "complete";
+    const startedAt = restartCompleted ? now : (existing?.purge_started_at ?? now);
+    const tombstoneRetentionDays = restartCompleted
+      ? input.tombstoneRetentionDays
+      : (existing?.retention_days ?? input.tombstoneRetentionDays);
     yield* sql`
       INSERT INTO civilization_purge_tombstones (
         project_id, thread_id, deletion_at, purge_started_at, purge_completed_at, preview_token,
@@ -572,8 +579,11 @@ const make = Effect.gen(function* () {
       ) VALUES (${input.projectId}, ${PROJECT_TOMBSTONE_THREAD_ID}, ${input.deletionAt}, ${startedAt}, NULL, ${input.previewToken ?? existing?.preview_token ?? null}, ${tombstoneRetentionDays}, 'in_progress', ${now})
       ON CONFLICT(project_id, thread_id) DO UPDATE SET
         deletion_at = COALESCE(civilization_purge_tombstones.deletion_at, excluded.deletion_at),
-        preview_token = COALESCE(civilization_purge_tombstones.preview_token, excluded.preview_token),
-        progress_state = CASE WHEN civilization_purge_tombstones.progress_state = 'complete' THEN 'complete' ELSE 'in_progress' END,
+        purge_started_at = CASE WHEN ${restartCompleted ? 1 : 0} = 1 THEN excluded.purge_started_at ELSE civilization_purge_tombstones.purge_started_at END,
+        purge_completed_at = CASE WHEN ${restartCompleted ? 1 : 0} = 1 THEN NULL ELSE civilization_purge_tombstones.purge_completed_at END,
+        preview_token = CASE WHEN ${restartCompleted ? 1 : 0} = 1 THEN excluded.preview_token ELSE COALESCE(civilization_purge_tombstones.preview_token, excluded.preview_token) END,
+        retention_days = CASE WHEN ${restartCompleted ? 1 : 0} = 1 THEN excluded.retention_days ELSE civilization_purge_tombstones.retention_days END,
+        progress_state = CASE WHEN ${restartCompleted ? 1 : 0} = 1 THEN 'in_progress' WHEN civilization_purge_tombstones.progress_state = 'complete' THEN 'complete' ELSE 'in_progress' END,
         updated_at = excluded.updated_at
     `;
 
@@ -667,7 +677,17 @@ const make = Effect.gen(function* () {
             WHERE project_id = ${input.projectId} AND thread_id = ${PROJECT_TOMBSTONE_THREAD_ID}
             LIMIT 1
           `)[0];
-        if (progress?.preview_token !== undefined && progress.preview_token !== null) {
+        const completedRemaining =
+          progress?.progress_state === "complete" ? yield* remainingCount(input.projectId) : null;
+        const completedReplay =
+          progress?.progress_state === "complete" &&
+          completedRemaining === 0 &&
+          progress.preview_token === input.expectedPreviewToken;
+        if (
+          progress?.preview_token !== undefined &&
+          progress.preview_token !== null &&
+          progress.progress_state !== "complete"
+        ) {
           if (progress.preview_token !== input.expectedPreviewToken) {
             return yield* new CivilizationPurgeConflictError({
               code: "civilization_purge_conflict",
@@ -675,7 +695,7 @@ const make = Effect.gen(function* () {
               message: "This purge is already bound to a different approved preview token.",
             });
           }
-        } else {
+        } else if (!completedReplay) {
           const effective = yield* config.getEffective(input.projectId);
           if (
             effective.config.participation.enabled &&
@@ -704,6 +724,7 @@ const make = Effect.gen(function* () {
           deletionAt: null,
           previewToken: input.expectedPreviewToken,
           tombstoneRetentionDays: yield* tombstoneRetentionForProject(input.projectId),
+          restartCompleted: progress?.progress_state === "complete" && !completedReplay,
         });
       }),
     );

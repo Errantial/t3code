@@ -86,26 +86,72 @@ const make = Effect.gen(function* () {
     let cleaned = 0;
     let skipped = 0;
     for (const candidate of candidates) {
-      const effective = yield* config.getEffective(candidate.project_id);
-      const retention = yield* operations.getAppliedRetentionPolicy(candidate.project_id);
-      const cadenceMs = effective.config.operations.cleanupCadenceMinutes * 60_000;
-      const cleanupBatch = Math.max(
-        1,
-        Math.min(PROJECT_SCAN_LIMIT, Math.trunc(effective.config.operations.cleanupBatch)),
-      );
-      const parsedLastCleanup =
-        candidate.last_mail_cleanup_at === null
-          ? Option.none()
-          : DateTime.make(candidate.last_mail_cleanup_at);
-      const lastMs = Option.isSome(parsedLastCleanup)
-        ? DateTime.toEpochMillis(parsedLastCleanup.value)
-        : Number.NEGATIVE_INFINITY;
-      if (Number.isFinite(lastMs) && nowMs - lastMs < cadenceMs) {
-        skipped += 1;
-        continue;
-      }
+      const result = yield* Effect.exit(
+        Effect.gen(function* () {
+          const effective = yield* config.getEffective(candidate.project_id);
+          const retention = yield* operations.getAppliedRetentionPolicy(candidate.project_id);
+          const cadenceMs = effective.config.operations.cleanupCadenceMinutes * 60_000;
+          const cleanupBatch = Math.max(
+            1,
+            Math.min(PROJECT_SCAN_LIMIT, Math.trunc(effective.config.operations.cleanupBatch)),
+          );
+          const parsedLastCleanup =
+            candidate.last_mail_cleanup_at === null
+              ? Option.none()
+              : DateTime.make(candidate.last_mail_cleanup_at);
+          const lastMs = Option.isSome(parsedLastCleanup)
+            ? DateTime.toEpochMillis(parsedLastCleanup.value)
+            : Number.NEGATIVE_INFINITY;
+          if (Number.isFinite(lastMs) && nowMs - lastMs < cadenceMs) {
+            return "skipped" as const;
+          }
 
-      const result = yield* Effect.exit(mail.cleanupProject(candidate.project_id));
+          yield* mail.cleanupProject(candidate.project_id);
+          const noteRetentionCutoff = DateTime.formatIso(
+            DateTime.subtract(now, { days: retention.noteRetentionDays }),
+          );
+          yield* sql`
+            DELETE FROM civilization_notes
+            WHERE rowid IN (
+              SELECT rowid FROM civilization_notes
+              WHERE project_id = ${candidate.project_id}
+                AND resolved_at IS NOT NULL
+                AND resolved_at <= ${noteRetentionCutoff}
+              ORDER BY resolved_at ASC, note_id ASC
+              LIMIT ${cleanupBatch}
+            )
+          `;
+          const diagnosticRetentionCutoff = DateTime.formatIso(
+            DateTime.subtract(now, { days: retention.diagnosticRetentionDays }),
+          );
+          yield* sql`
+            DELETE FROM civilization_context_inspections
+            WHERE rowid IN (
+              SELECT rowid FROM civilization_context_inspections
+              WHERE project_id = ${candidate.project_id}
+                AND created_at <= ${diagnosticRetentionCutoff}
+              ORDER BY created_at ASC, inspection_id ASC
+              LIMIT ${cleanupBatch}
+            )
+          `;
+          yield* sql`
+            DELETE FROM civilization_context_references
+            WHERE rowid IN (
+              SELECT rowid FROM civilization_context_references
+              WHERE project_id = ${candidate.project_id}
+                AND created_at <= ${diagnosticRetentionCutoff}
+              ORDER BY created_at ASC, context_reference_id ASC
+              LIMIT ${cleanupBatch}
+            )
+          `;
+          yield* sql`
+            UPDATE civilization_project_state
+            SET last_mail_cleanup_at = ${nowIso}, updated_at = ${nowIso}
+            WHERE project_id = ${candidate.project_id}
+          `;
+          return "cleaned" as const;
+        }),
+      );
       if (Exit.isFailure(result)) {
         yield* Effect.logWarning("civilization.mail-cleanup.project-failed", {
           projectId: candidate.project_id,
@@ -113,49 +159,8 @@ const make = Effect.gen(function* () {
         });
         continue;
       }
-      const noteRetentionCutoff = DateTime.formatIso(
-        DateTime.subtract(now, { days: retention.noteRetentionDays }),
-      );
-      yield* sql`
-        DELETE FROM civilization_notes
-        WHERE rowid IN (
-          SELECT rowid FROM civilization_notes
-          WHERE project_id = ${candidate.project_id}
-            AND resolved_at IS NOT NULL
-            AND resolved_at <= ${noteRetentionCutoff}
-          ORDER BY resolved_at ASC, note_id ASC
-          LIMIT ${cleanupBatch}
-        )
-      `;
-      const diagnosticRetentionCutoff = DateTime.formatIso(
-        DateTime.subtract(now, { days: retention.diagnosticRetentionDays }),
-      );
-      yield* sql`
-        DELETE FROM civilization_context_inspections
-        WHERE rowid IN (
-          SELECT rowid FROM civilization_context_inspections
-          WHERE project_id = ${candidate.project_id}
-            AND created_at <= ${diagnosticRetentionCutoff}
-          ORDER BY created_at ASC, inspection_id ASC
-          LIMIT ${cleanupBatch}
-        )
-      `;
-      yield* sql`
-        DELETE FROM civilization_context_references
-        WHERE rowid IN (
-          SELECT rowid FROM civilization_context_references
-          WHERE project_id = ${candidate.project_id}
-            AND created_at <= ${diagnosticRetentionCutoff}
-          ORDER BY created_at ASC, context_reference_id ASC
-          LIMIT ${cleanupBatch}
-        )
-      `;
-      yield* sql`
-        UPDATE civilization_project_state
-        SET last_mail_cleanup_at = ${nowIso}, updated_at = ${nowIso}
-        WHERE project_id = ${candidate.project_id}
-      `;
-      cleaned += 1;
+      if (result.value === "skipped") skipped += 1;
+      else cleaned += 1;
     }
 
     let deletedProjectCleanups = 0;

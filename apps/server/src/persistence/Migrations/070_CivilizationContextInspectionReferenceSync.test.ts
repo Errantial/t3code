@@ -8,7 +8,7 @@ import { runMigrations } from "../Migrations.ts";
 it.effect("synchronizes successful inspection provenance into bounded context references", () =>
   Effect.gen(function* () {
     const sql = yield* SqlClient.SqlClient;
-    yield* runMigrations({ toMigrationInclusive: 69 });
+    yield* runMigrations({ toMigrationInclusive: 70 });
 
     yield* sql`
       INSERT INTO civilization_context_inspections (
