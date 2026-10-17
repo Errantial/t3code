@@ -1195,6 +1195,11 @@ export const CLAUDE_READ_ONLY_T3_MCP_ALLOWED_TOOLS: ReadonlyArray<string> = [
   "mcp__t3-code__t3_queue_read",
   "mcp__t3-code__html_preview",
   "mcp__t3-code__html_render",
+  "mcp__t3-code__civilization_context",
+  "mcp__t3-code__civilization_census",
+  "mcp__t3-code__civilization_note_list",
+  "mcp__t3-code__civilization_note_read",
+  "mcp__t3-code__civilization_inbox_list",
 ];
 
 // Claude Code aborts an HTTP MCP call after 60 s ("The operation timed out.")
@@ -2672,6 +2677,29 @@ function isClaudeProviderContinuationTurn(
   return input.message.createdBy === "agent" && input.message.creationSource === "provider";
 }
 
+// Slash commands must stay the first token so the CLI runs them; same rule as
+// applyClaudePromptEffortPrefix: a leading token with no second slash.
+function isClaudeSlashCommand(text: string): boolean {
+  return /^\/[^\s/]+(?:\s|$)/u.test(text.trim());
+}
+
+// Claude keeps ordinary history, so the packet is the latest bounded snapshot
+// with its own revision header, prepended to each new actionable prompt and
+// replaced (never concatenated) on the next one. Continuation turns have no
+// prompt at all and slash commands must stay first, so both stay untouched.
+// Runs before the effort prefix so "Ultrathink:" remains the first line.
+function claudePromptTextWithCivilizationPacket(
+  userText: string,
+  input: ProviderAdapter.ProviderAdapterV2TurnInput,
+): string {
+  if (input.civilizationPacket === undefined) return userText;
+  if (isClaudeSlashCommand(input.message.text)) return userText;
+  return `${input.civilizationPacket.text}\n\n${userText}`;
+}
+
+// Root turn output whose owner (the offered prompt or a queued wake turn)
+// the prompt echo decides. Subagent frames, lifecycle frames, and anything
+// else not produced by the root model turn pass straight through.
 function isClaudePromptEchoGatedFrame(message: SDKMessage): boolean {
   switch (message.type) {
     case "assistant":
@@ -3382,6 +3410,11 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
   return ProviderAdapter.ProviderAdapterV2.of({
     instanceId: adapterOptions.instanceId,
     driver: CLAUDE_PROVIDER,
+    civilizationContextTransport: {
+      kind: "claude.actionable_prompt_context",
+      description: "Inserted before actionable user text; Claude effort prefixing may precede it.",
+      trust: "untrusted",
+    },
     getCapabilities: () => Effect.succeed(ClaudeProviderCapabilitiesV2),
     planSelectionTransition: () => Effect.succeed(turnScopedSelectionTransition()),
     openSession: Effect.fn("ClaudeAdapterV2.openSession")(
@@ -8341,7 +8374,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                 ? null
                 : yield* makeClaudeUserMessageWithAttachments({
                     text: applyClaudePromptEffortPrefix(
-                      turnInput.message.text,
+                      claudePromptTextWithCivilizationPacket(turnInput.message.text, turnInput),
                       compileClaudeModelSelection(turnInput.modelSelection).promptEffort,
                     ),
                     attachments: turnInput.message.attachments,

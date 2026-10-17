@@ -47,6 +47,7 @@ import { forkParked, forkParkedFiber } from "./serverActivation.ts";
 import * as AnalyticsService from "./telemetry/AnalyticsService.ts";
 import * as ServerEnvironment from "./environment/ServerEnvironment.ts";
 import * as EnvironmentAuth from "./auth/EnvironmentAuth.ts";
+import * as CivilizationCitizens from "./civilization/CitizenService.ts";
 import {
   formatHeadlessServeOutput,
   formatHostForUrl,
@@ -440,6 +441,7 @@ const make = (options?: StartupOptions) =>
     const lifecycleEvents = yield* ServerLifecycleEvents.ServerLifecycleEvents;
     const serverSettings = yield* ServerSettings.ServerSettingsService;
     const serverEnvironment = yield* ServerEnvironment.ServerEnvironment;
+    const civilizationCitizens = yield* CivilizationCitizens.CivilizationCitizenService;
     const crypto = yield* Crypto.Crypto;
     const launcher = yield* ServiceLauncherClient.ServiceLauncherClient;
 
@@ -530,7 +532,32 @@ const make = (options?: StartupOptions) =>
             ),
           ),
         ),
-        recover: runStartupPhase("orchestration-v2.recovery", providerRuntimeRecovery.recover),
+        recover: runStartupPhase("orchestration-v2.recovery", providerRuntimeRecovery.recover).pipe(
+          Effect.tap(() =>
+            runStartupPhase(
+              "civilization.reconcile",
+              civilizationCitizens.reconcileExisting(),
+            ).pipe(
+              Effect.tap((summary) =>
+                summary.appliedEventCount === 0
+                  ? Effect.void
+                  : Effect.logInfo("Civilization lifecycle catch-up completed", summary),
+              ),
+              Effect.andThen(
+                runStartupPhase(
+                  "civilization.adopt-existing",
+                  civilizationCitizens.adoptExisting(),
+                ).pipe(
+                  Effect.tap((summary) =>
+                    summary.adopted === 0
+                      ? Effect.void
+                      : Effect.logInfo("Civilization existing-thread adoption resumed", summary),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
         recoverDelegatedTasks: runStartupPhase(
           "orchestration-v2.delegated-tasks.recover",
           orchestrator.recoverDelegatedTasks,
