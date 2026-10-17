@@ -44,7 +44,6 @@ import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
-import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
 import * as Random from "effect/Random";
@@ -937,6 +936,17 @@ export const makeOpenCodeAdapterV2 = Effect.fn("makeOpenCodeAdapterV2")(function
   return ProviderAdapter.ProviderAdapterV2.of({
     instanceId: options.instanceId,
     driver: OPENCODE_PROVIDER,
+    getCivilizationCapability: () =>
+      Effect.succeed({
+        support: "metadata_only",
+        contextInjection: false,
+        keyedContextReplacement: false,
+        actionablePromptRefresh: false,
+        providerContinuationRefresh: false,
+        providerCommandRefresh: false,
+        messaging: false,
+        detail: "OpenCode 1.x is Civilization census/identity metadata only.",
+      }),
     getCapabilities: () => Effect.succeed(OpenCodeProviderCapabilitiesV2),
     planSelectionTransition: () => Effect.succeed(turnScopedSelectionTransition()),
     openSession: Effect.fn("OpenCodeAdapterV2.openSession")(
@@ -3715,20 +3725,3 @@ export const OpenCodeAdapterV2Driver: ProviderAdapterDriver<
       ),
   ),
 };
-
-const layer: Layer.Layer<ProviderAdapter.ProviderAdapterV2, never, OpenCodeAdapterV2DriverEnv> =
-  Layer.effect(
-    ProviderAdapter.ProviderAdapterV2,
-    Effect.gen(function* () {
-      const hostEnvironment = yield* HostProcess.Environment;
-      const providerEventLoggers = yield* ProviderEventLoggers.ProviderEventLoggers;
-      return yield* makeOpenCodeAdapterV2({
-        instanceId: OPENCODE_DEFAULT_INSTANCE_ID,
-        settings: DEFAULT_OPENCODE_SETTINGS,
-        environment: hostEnvironment,
-        ...(providerEventLoggers.native === undefined
-          ? {}
-          : { nativeEventLogger: providerEventLoggers.native }),
-      });
-    }),
-  );

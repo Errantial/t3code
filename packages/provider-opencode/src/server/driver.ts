@@ -17,7 +17,7 @@ import * as ProviderLatestVersions from "@t3tools/provider-core/server/ProviderL
 import * as ProviderHost from "@t3tools/provider-core/server/ProviderHost";
 import * as OpenCodeAdapterV2 from "./adapter.ts";
 import * as OpenCode2AdapterV2 from "./v2/adapter.ts";
-import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
+import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import type { ProviderTextGeneration } from "@t3tools/provider-core/server/textGeneration";
 import { ProviderDriverError } from "@t3tools/provider-core/server/errors";
 import { openCodeUsageReader, type OpenCodeUsageReaderEnv } from "./usage.ts";
@@ -117,14 +117,60 @@ function selectOpenCodeRuntimeAdapter(input: {
   const pick = <PE>(probed: Effect.Effect<ProbedOpenCode | undefined, PE>) =>
     byOpenCodeRuntime(probed, { v1: Effect.succeed(input.v1), v2: Effect.succeed(input.v2) });
   const hot = pick(Effect.map(input.probe.lastSuccess, Option.getOrUndefined));
+  const civilizationHot = input.probe.lastSuccess.pipe(
+    Effect.flatMap(
+      Option.match({
+        onNone: () =>
+          Effect.succeed<ProviderAdapter.ProviderAdapterV2CivilizationCapability>({
+            support: "metadata_only",
+            contextInjection: false,
+            keyedContextReplacement: false,
+            actionablePromptRefresh: false,
+            providerContinuationRefresh: false,
+            providerCommandRefresh: false,
+            messaging: false,
+            detail:
+              "OpenCode generation has not been established for Civilization capability inspection.",
+          }),
+        onSome: (probed) => {
+          const adapter = probed.generation === "v2" ? input.v2 : input.v1;
+          return adapter.getCivilizationCapability === undefined
+            ? Effect.succeed<ProviderAdapter.ProviderAdapterV2CivilizationCapability>({
+                support: "metadata_only",
+                contextInjection: false,
+                keyedContextReplacement: false,
+                actionablePromptRefresh: false,
+                providerContinuationRefresh: false,
+                providerCommandRefresh: false,
+                messaging: false,
+                detail: "OpenCode is Civilization census/identity metadata only.",
+              })
+            : adapter.getCivilizationCapability();
+        },
+      }),
+    ),
+  );
   return {
     instanceId: input.v1.instanceId,
     driver: DRIVER_KIND,
+    getCivilizationCapability: () => civilizationHot,
     getCapabilities: () => Effect.flatMap(hot, (adapter) => adapter.getCapabilities()),
     planSelectionTransition: (transition) =>
       Effect.flatMap(hot, (adapter) => adapter.planSelectionTransition(transition)),
     openSession: (session) =>
-      Effect.flatMap(pick(input.probe.get), (adapter) => adapter.openSession(session)),
+      input.probe.refresh.pipe(
+        Effect.mapError(
+          (cause) =>
+            new ProviderAdapter.ProviderAdapterOpenSessionError({
+              driver: DRIVER_KIND,
+              providerSessionId: session.providerSessionId,
+              cause,
+            }),
+        ),
+        Effect.flatMap((probed) =>
+          (probed.generation === "v2" ? input.v2 : input.v1).openSession(session),
+        ),
+      ),
   };
 }
 
@@ -172,6 +218,10 @@ export type OpenCodeDriverEnv =
   | ProviderLatestVersions.ProviderLatestVersions
   | OpenCodeRuntime.OpenCodeRuntime
   | Path.Path;
+
+// Managed/local OpenCode 2 passed its provider-specific Civilization live
+// qualification on OpenCode 2.0.32. External OpenCode 2 remains metadata-only.
+const OPENCODE2_CIVILIZATION_PROMOTED = true;
 
 export const OpenCodeDriver: ProviderDriver<
   OpenCodeSettings,
@@ -283,9 +333,14 @@ export const OpenCodeDriver: ProviderDriver<
       const orchestrationAdapter = selectOpenCodeRuntimeAdapter({
         probe: runtimeProbe,
         v1: openCodeV1Adapter,
-        v2: yield* OpenCode2AdapterV2.make(instanceId).pipe(
-          Effect.provideService(OpenCode2Server.OpenCode2Server, openCode2Server),
-        ),
+        v2: yield* OpenCode2AdapterV2.make(instanceId, {
+          civilizationFullSupport:
+            OPENCODE2_CIVILIZATION_PROMOTED && effectiveConfig.serverUrl.trim().length === 0,
+          civilizationMetadataOnlyDetail:
+            effectiveConfig.serverUrl.trim().length === 0
+              ? "Managed OpenCode 2 Civilization support is unavailable until the runtime generation is established."
+              : "Externally configured OpenCode 2 is Civilization census/identity metadata only.",
+        }).pipe(Effect.provideService(OpenCode2Server.OpenCode2Server, openCode2Server)),
       });
       const loadOpenCode2Models = yield* makeOpenCode2ModelLoader(
         openCode2Server.withConnection(({ client }) =>

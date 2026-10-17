@@ -27,6 +27,7 @@ import {
   replayOpenCodeServer,
 } from "./probeResponses.fixture.ts";
 import { OpenCodeDriver, openCodeUpdateFor } from "./driver.ts";
+import * as OpenCode2AdapterV2 from "./v2/adapter.ts";
 import * as TestProviderHost from "@t3tools/provider-testing/TestProviderHost";
 
 const serverStarts: Array<string> = [];
@@ -75,6 +76,12 @@ it.layer(layer)("OpenCodeDriver runtime selection", (it) => {
     Effect.gen(function* () {
       serverStarts.length = 0;
       const instance = yield* create({}, noHttp);
+      const before = yield* instance.orchestrationAdapter.getCivilizationCapability!();
+      assert.deepInclude(before, {
+        support: "metadata_only",
+        contextInjection: false,
+        messaging: false,
+      });
       yield* Effect.flip(
         instance.textGeneration.generateThreadTitle({
           cwd: process.cwd(),
@@ -83,6 +90,22 @@ it.layer(layer)("OpenCodeDriver runtime selection", (it) => {
         }),
       );
       assert.deepStrictEqual(serverStarts, ["start"]);
+      const after = yield* instance.orchestrationAdapter.getCivilizationCapability!();
+      assert.deepInclude(after, {
+        support: "full",
+        contextInjection: true,
+        keyedContextReplacement: false,
+        actionablePromptRefresh: true,
+        providerContinuationRefresh: false,
+        providerCommandRefresh: false,
+        messaging: true,
+      });
+      assert.deepEqual(after.contextTransport, {
+        kind: "opencode2.user_prompt",
+        description:
+          "Prepended to ordinary session.prompt user text before the actionable request.",
+        trust: "untrusted",
+      });
     }).pipe(Effect.scoped),
   );
 
@@ -111,6 +134,12 @@ it.layer(layer)("OpenCodeDriver runtime selection", (it) => {
       );
       assert.include(requested, "/api/skill");
       assert.deepStrictEqual(serverStarts, []);
+      const capability = yield* instance.orchestrationAdapter.getCivilizationCapability!();
+      assert.deepInclude(capability, {
+        support: "metadata_only",
+        contextInjection: false,
+        messaging: false,
+      });
     }).pipe(Effect.scoped),
   );
 
@@ -127,6 +156,26 @@ it.layer(layer)("OpenCodeDriver runtime selection", (it) => {
       yield* Fiber.join(capabilities);
     }).pipe(Effect.scoped, Effect.provide(TestClock.layer())),
   );
+});
+
+it("defines the managed OpenCode 2 full Civilization candidate independently of promotion", () => {
+  const capability = OpenCode2AdapterV2.civilizationCapabilityFor({
+    civilizationFullSupport: true,
+  });
+  assert.deepInclude(capability, {
+    support: "full",
+    contextInjection: true,
+    keyedContextReplacement: false,
+    actionablePromptRefresh: true,
+    providerContinuationRefresh: false,
+    providerCommandRefresh: false,
+    messaging: true,
+  });
+  assert.deepEqual(capability.contextTransport, {
+    kind: "opencode2.user_prompt",
+    description: "Prepended to ordinary session.prompt user text before the actionable request.",
+    trust: "untrusted",
+  });
 });
 
 // npm links `<prefix>/bin/opencode` into the package that installed it:

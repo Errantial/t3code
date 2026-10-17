@@ -127,6 +127,7 @@ const operationOf = (
 const replayHttpClient = (
   controller: OpenCodeReplayController,
   replayGate: ProviderReplayGate | undefined,
+  captureOutbound: ((operation: unknown) => void) | undefined,
 ) =>
   HttpClient.make((request, url) =>
     Effect.tryPromise({
@@ -145,6 +146,7 @@ const replayHttpClient = (
           query,
           raw === undefined ? undefined : decodeJson(raw),
         );
+        captureOutbound?.(operation);
         // The event stream and requests are separate connections: a request
         // is matched only once what was recorded before it was delivered.
         if (operation.type !== "event.subscribe") await controller.untilInboundDelivered();
@@ -189,6 +191,7 @@ export const replayServer = (
     readonly external?: boolean;
     readonly replayGate?: ProviderReplayGate;
     readonly borrowers?: { current: number };
+    readonly captureOutbound?: (operation: unknown) => void;
   },
 ) =>
   Effect.gen(function* () {
@@ -202,7 +205,7 @@ export const replayServer = (
     const opencode = yield* OpenCode2Client.make.pipe(
       Effect.provideService(
         HttpClient.HttpClient,
-        replayHttpClient(controller, options?.replayGate),
+        replayHttpClient(controller, options?.replayGate, options?.captureOutbound),
       ),
     );
     const connection = {
@@ -235,13 +238,14 @@ const makeReplayAdapter = (
     readonly external?: boolean;
     readonly replayGate?: ProviderReplayGate;
     readonly borrowers?: { current: number };
+    readonly captureOutbound?: (operation: unknown) => void;
   },
 ) =>
   Effect.gen(function* () {
     const server = yield* replayServer(transcript, options);
-    return yield* OpenCode2Adapter.make(ProviderInstanceId.make("opencode")).pipe(
-      Effect.provideService(OpenCode2Server.OpenCode2Server, server),
-    );
+    return yield* OpenCode2Adapter.make(ProviderInstanceId.make("opencode"), {
+      civilizationFullSupport: options?.external !== true,
+    }).pipe(Effect.provideService(OpenCode2Server.OpenCode2Server, server));
   });
 
 const layerReplayHost = TestProviderHost.layer().pipe(Layer.provide(NodeServices.layer));
@@ -263,6 +267,7 @@ export const openCode2ReplayRuntime = (
     readonly external?: boolean;
     readonly borrowers?: { current: number };
     readonly replayGate?: ProviderReplayGate;
+    readonly captureOutbound?: (operation: unknown) => void;
   },
 ) =>
   Effect.gen(function* () {

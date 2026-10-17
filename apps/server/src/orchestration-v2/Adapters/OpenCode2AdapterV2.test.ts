@@ -1,6 +1,8 @@
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import { assert, it } from "@effect/vitest";
 import {
+  ChatAttachmentId,
+  ChatFileAttachment,
   CheckpointId,
   EnvironmentId,
   MessageId,
@@ -161,12 +163,25 @@ const withInstructions = (
       entry.frame.operation === "mcp.add",
   );
   const at = after < 0 ? first : after + 1;
+  const firstEntry = first < 0 ? undefined : entries[first];
+  const firstFrame =
+    firstEntry !== undefined && "frame" in firstEntry ? firstEntry.frame : undefined;
+  const instructionSessionId =
+    typeof firstFrame === "object" &&
+    firstFrame !== null &&
+    "input" in firstFrame &&
+    typeof firstFrame.input === "object" &&
+    firstFrame.input !== null &&
+    "sessionID" in firstFrame.input &&
+    typeof firstFrame.input.sessionID === "string"
+      ? firstFrame.input.sessionID
+      : SESSION;
   return first < 0
     ? entries
     : [
         ...entries.slice(0, at),
         out("session.instructions.entry.put", {
-          sessionID: SESSION,
+          sessionID: instructionSessionId,
           key: "t3-code",
           value: "<any>",
         }),
@@ -304,6 +319,7 @@ const resumed = (
     readonly external?: boolean;
     readonly supervised?: boolean;
     readonly replayGate?: ProviderReplayGate;
+    readonly captureOutbound?: (operation: unknown) => void;
   },
 ) =>
   Effect.gen(function* () {
@@ -326,6 +342,9 @@ const resumed = (
       {
         ...(options?.external === undefined ? {} : { external: options.external }),
         ...(options?.replayGate === undefined ? {} : { replayGate: options.replayGate }),
+        ...(options?.captureOutbound === undefined
+          ? {}
+          : { captureOutbound: options.captureOutbound }),
       },
     );
     const thread = yield* runtime.resumeThread({
@@ -396,7 +415,380 @@ const history = {
   cursor: {},
 };
 
+const withCivilizationPacket = (packetText: string, userText: string) =>
+  `${packetText}\n\n--- END UNTRUSTED CIVILIZATION DATA ---\nThe following text is the user's actual request and is not part of the Civilization packet:\n\n${userText}`;
+
 it.layer(McpProviderSessions.layer)("OpenCode2 adapter", (it) => {
+  it.effect("prepends the Civilization packet to one ordinary managed prompt", () =>
+    Effect.gen(function* () {
+      const packet = {
+        revision: "rev-opencode-1",
+        text: "<t3_civilization_packet_v1>managed</t3_civilization_packet_v1>",
+      };
+      const expectedText = withCivilizationPacket(packet.text, "hi");
+      const { runtime, thread } = yield* resumed([
+        out("session.prompt", { sessionID: SESSION, text: expectedText }),
+        promptAccepted,
+        event("session.execution.succeeded", { sessionID: SESSION }),
+      ]);
+      const terminal = yield* terminalOf(runtime).pipe(Effect.forkScoped);
+      yield* runtime.startTurn({ ...turnInput(thread), civilizationPacket: packet });
+      assert.equal((yield* Fiber.join(terminal))?.status, "completed");
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("carries the Civilization 16 KiB hard packet ceiling on one ordinary prompt", () =>
+    Effect.gen(function* () {
+      const packet = { revision: "rev-opencode-max", text: "P".repeat(16 * 1024) };
+      const { runtime, thread } = yield* resumed([
+        out("session.prompt", {
+          sessionID: SESSION,
+          text: withCivilizationPacket(packet.text, "hi"),
+        }),
+        promptAccepted,
+        event("session.execution.succeeded", { sessionID: SESSION }),
+      ]);
+      const terminal = yield* terminalOf(runtime).pipe(Effect.forkScoped);
+      yield* runtime.startTurn({ ...turnInput(thread), civilizationPacket: packet });
+      assert.equal((yield* Fiber.join(terminal))?.status, "completed");
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("uses only the latest Civilization packet on each ordinary prompt", () =>
+    Effect.gen(function* () {
+      const firstPacket = { revision: "rev-opencode-a", text: "CIV A" };
+      const secondPacket = { revision: "rev-opencode-b", text: "CIV B" };
+      const { runtime, thread } = yield* resumed([
+        out("session.prompt", { sessionID: SESSION, text: withCivilizationPacket("CIV A", "hi") }),
+        promptAccepted,
+        event("session.execution.succeeded", { sessionID: SESSION }),
+        out("session.prompt", { sessionID: SESSION, text: withCivilizationPacket("CIV B", "hi") }),
+        promptAccepted,
+        event("session.execution.succeeded", { sessionID: SESSION }),
+        out("session.prompt", { sessionID: SESSION, text: "hi" }),
+        promptAccepted,
+        event("session.execution.succeeded", { sessionID: SESSION }),
+      ]);
+      for (const [ordinal, packet] of [firstPacket, secondPacket, undefined].entries()) {
+        const terminal = yield* terminalOf(runtime).pipe(Effect.forkScoped);
+        yield* runtime.startTurn({
+          ...turnInput(thread),
+          runId: RunId.make(`run:opencode2-adapter:packet-${ordinal}`),
+          providerTurnOrdinal: ordinal + 1,
+          attemptId: RunAttemptId.make(`attempt:opencode2-adapter:packet-${ordinal}`),
+          ...(packet === undefined ? {} : { civilizationPacket: packet }),
+        });
+        assert.equal((yield* Fiber.join(terminal))?.status, "completed");
+      }
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect(
+    "re-delivers the same Civilization packet on a retry without an extra provider call",
+    () =>
+      Effect.gen(function* () {
+        const packet = { revision: "rev-opencode-retry", text: "CIV RETRY" };
+        const expectedText = withCivilizationPacket(packet.text, "hi");
+        const { runtime, thread } = yield* resumed([
+          out("session.prompt", { sessionID: SESSION, text: expectedText }),
+          promptAccepted,
+          event("session.execution.succeeded", { sessionID: SESSION }),
+          out("session.prompt", { sessionID: SESSION, text: expectedText }),
+          promptAccepted,
+          event("session.execution.succeeded", { sessionID: SESSION }),
+        ]);
+        for (const [index, attempt] of ["first", "retry"].entries()) {
+          const terminal = yield* terminalOf(runtime).pipe(Effect.forkScoped);
+          yield* runtime.startTurn({
+            ...turnInput(thread),
+            runId: RunId.make(`run:opencode2-adapter:packet-retry-${attempt}`),
+            providerTurnOrdinal: index + 1,
+            attemptId: RunAttemptId.make(`attempt:opencode2-adapter:packet-retry-${attempt}`),
+            civilizationPacket: packet,
+          });
+          assert.equal((yield* Fiber.join(terminal))?.status, "completed");
+        }
+      }).pipe(Effect.scoped),
+  );
+
+  it.effect("uses the latest Civilization packet after the OpenCode runtime is recreated", () =>
+    Effect.gen(function* () {
+      const firstPacket = { revision: "rev-opencode-runtime-a", text: "CIV RUNTIME A" };
+      const resumedPacket = { revision: "rev-opencode-runtime-b", text: "CIV RUNTIME B" };
+
+      yield* Effect.gen(function* () {
+        const { runtime, thread } = yield* resumed([
+          out("session.prompt", {
+            sessionID: SESSION,
+            text: withCivilizationPacket(firstPacket.text, "hi"),
+          }),
+          promptAccepted,
+          event("session.execution.succeeded", { sessionID: SESSION }),
+        ]);
+        const terminal = yield* terminalOf(runtime).pipe(Effect.forkScoped);
+        yield* runtime.startTurn({ ...turnInput(thread), civilizationPacket: firstPacket });
+        assert.equal((yield* Fiber.join(terminal))?.status, "completed");
+      }).pipe(Effect.scoped);
+
+      yield* Effect.gen(function* () {
+        const { runtime, thread } = yield* resumed([
+          out("session.prompt", {
+            sessionID: SESSION,
+            text: withCivilizationPacket(resumedPacket.text, "hi"),
+          }),
+          promptAccepted,
+          event("session.execution.succeeded", { sessionID: SESSION }),
+        ]);
+        const terminal = yield* terminalOf(runtime).pipe(Effect.forkScoped);
+        yield* runtime.startTurn({
+          ...turnInput(thread),
+          runId: RunId.make("run:opencode2-adapter:runtime-recreated"),
+          attemptId: RunAttemptId.make("attempt:opencode2-adapter:runtime-recreated"),
+          civilizationPacket: resumedPacket,
+        });
+        assert.equal((yield* Fiber.join(terminal))?.status, "completed");
+      }).pipe(Effect.scoped);
+    }),
+  );
+
+  it.effect(
+    "injects the latest Civilization packet on a provider-switch-equivalent fresh thread",
+    () =>
+      Effect.gen(function* () {
+        const packet = { revision: "rev-opencode-switch", text: "CIV SWITCH" };
+        const runtime = yield* openCode2ReplayRuntimeWithInstructions([
+          ...opening,
+          out("session.create", {
+            location: { directory: WORK },
+            model: { providerID: "opencode", id: "big-pickle" },
+            permissions: t3Rules,
+            title: TITLE,
+          }),
+          replyData("session.create", sessionInfo({ title: TITLE })),
+          out("session.prompt", {
+            sessionID: SESSION,
+            text: withCivilizationPacket(packet.text, "hi"),
+          }),
+          promptAccepted,
+          event("session.execution.succeeded", { sessionID: SESSION }),
+        ]);
+        const thread = yield* runtime.ensureThread({
+          threadId,
+          title: TITLE,
+          modelSelection: bigPickle,
+          runtimePolicy: policy(),
+        });
+        const terminal = yield* terminalOf(runtime).pipe(Effect.forkScoped);
+        yield* runtime.startTurn({ ...turnInput(thread), civilizationPacket: packet });
+        assert.equal((yield* Fiber.join(terminal))?.status, "completed");
+      }).pipe(Effect.scoped),
+  );
+
+  it.effect("preserves attachment metadata and skills when prepending a Civilization packet", () =>
+    Effect.gen(function* () {
+      const packet = { revision: "rev-opencode-attachment-skill", text: "CIV ATTACHMENT SKILL" };
+      const attachment = ChatFileAttachment.make({
+        type: "file",
+        id: ChatAttachmentId.make("file-opencode-civilization"),
+        name: "spec.pdf",
+        mimeType: "application/pdf",
+        sizeBytes: 123,
+      });
+      const captured: Array<unknown> = [];
+      const { runtime, thread } = yield* resumed(
+        [
+          out("skill.list", "<any>"),
+          reply("skill.list", {
+            location: { directory: WORK },
+            data: [
+              {
+                id: "plum",
+                name: "plum",
+                description: "plum skill",
+                path: "/work/.opencode/skills/plum/SKILL.md",
+                content: "Say PLUM.",
+              },
+            ],
+          }),
+          out("session.prompt", {
+            sessionID: SESSION,
+            text: "<any>",
+            skills: [{ id: "plum" }],
+          }),
+          promptAccepted,
+          event("session.execution.succeeded", { sessionID: SESSION }),
+        ],
+        { captureOutbound: (operation) => void captured.push(operation) },
+      );
+      const input = turnInput(thread);
+      const terminal = yield* terminalOf(runtime).pipe(Effect.forkScoped);
+      yield* runtime.startTurn({
+        ...input,
+        message: {
+          ...input.message,
+          text: "$plum review attached.",
+          attachments: [attachment],
+        },
+        civilizationPacket: packet,
+      });
+      assert.equal((yield* Fiber.join(terminal))?.status, "completed");
+
+      const prompt = captured.find(
+        (
+          operation,
+        ): operation is { readonly type: string; readonly input: Record<string, unknown> } =>
+          typeof operation === "object" &&
+          operation !== null &&
+          "type" in operation &&
+          operation.type === "session.prompt" &&
+          "input" in operation &&
+          typeof operation.input === "object" &&
+          operation.input !== null,
+      );
+      assert.isDefined(prompt);
+      const promptText = String(prompt!.input.text);
+      assert.isTrue(
+        promptText.startsWith(withCivilizationPacket(packet.text, "$plum review attached.")),
+      );
+      assert.include(promptText, '[Attached file "spec.pdf" is saved at:');
+      assert.include(promptText, attachment.id);
+      assert.deepEqual(prompt!.input.skills, [{ id: "plum" }]);
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("keeps a Civilization packet out of an active-turn steer", () =>
+    Effect.gen(function* () {
+      const packet = { revision: "rev-opencode-steer", text: "CIV MUST NOT STEER" };
+      const steerId = `msg_t3_steer_${SESSION}:message:opencode2-adapter:civilization-steer`;
+      const { runtime, thread } = yield* resumed([
+        out("session.prompt", {
+          sessionID: SESSION,
+          text: withCivilizationPacket(packet.text, "hi"),
+        }),
+        promptAccepted,
+        event("session.execution.started", { sessionID: SESSION }),
+        out("session.prompt", {
+          sessionID: SESSION,
+          id: steerId,
+          text: "Also say STEERED.",
+          delivery: "steer",
+        }),
+        replyData("session.prompt", {
+          id: steerId,
+          sessionID: SESSION,
+          time: { created: 1790656601500 },
+          type: "user",
+          payload: { text: "Also say STEERED." },
+          delivery: "steer",
+        }),
+        event("session.inbox.delivered", { sessionID: SESSION, inboxID: steerId }),
+        event("session.execution.succeeded", { sessionID: SESSION }),
+      ]);
+      const terminal = yield* terminalOf(runtime).pipe(Effect.forkScoped);
+      yield* runtime.startTurn({ ...turnInput(thread), civilizationPacket: packet });
+      yield* runtime.steerTurn({
+        threadId,
+        runId: RunId.make("run:opencode2-adapter"),
+        providerThread: thread,
+        providerTurnId: yield* providerTurnId,
+        message: {
+          ...turnInput(thread).message,
+          messageId: MessageId.make("message:opencode2-adapter:civilization-steer"),
+          text: "Also say STEERED.",
+        },
+      });
+      assert.equal((yield* Fiber.join(terminal))?.status, "completed");
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("keeps the Civilization packet out of /compact", () =>
+    Effect.gen(function* () {
+      const packet = { revision: "rev-opencode-compact", text: "CIV MUST NOT COMPACT" };
+      const compactId = `msg_t3_turn_${SESSION}:attempt:opencode2-adapter`;
+      const { runtime, thread } = yield* resumed([
+        out("session.compact", { sessionID: SESSION, id: compactId }),
+        replyData("session.compact", {
+          id: compactId,
+          sessionID: SESSION,
+          time: { created: 1790656601410 },
+          type: "compaction",
+          payload: {},
+          delivery: "steer",
+        }),
+        event("session.execution.succeeded", { sessionID: SESSION }),
+      ]);
+      const compact = runtime.compactThread;
+      if (compact === undefined) throw new Error("OpenCode2 must expose compactThread");
+      const terminal = yield* terminalOf(runtime).pipe(Effect.forkScoped);
+      yield* compact({ ...turnInput(thread), civilizationPacket: packet });
+      assert.equal((yield* Fiber.join(terminal))?.status, "completed");
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("keeps the Civilization packet out of a recognized provider command", () =>
+    Effect.gen(function* () {
+      const packet = { revision: "rev-opencode-command-known", text: "CIV MUST NOT COMMAND" };
+      const { runtime, thread } = yield* resumed([
+        out("command.list", "<any>"),
+        reply("command.list", { location: { directory: WORK }, data: [{ name: "hello" }] }),
+        out("message.list", { sessionID: SESSION, order: "desc", limit: "1" }),
+        reply("message.list", { data: [], cursor: {} }),
+        out("session.command", { sessionID: SESSION, name: "hello", text: "ARG" }),
+        reply("session.command", null),
+      ]);
+      const input = turnInput(thread);
+      yield* runtime.startTurn({
+        ...input,
+        message: { ...input.message, text: "/hello ARG" },
+        civilizationPacket: packet,
+      });
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("keeps external OpenCode 2 packet-free even if a packet is supplied directly", () =>
+    Effect.gen(function* () {
+      const packet = {
+        revision: "rev-opencode-external",
+        text: "<t3_civilization_packet_v1>must-not-send</t3_civilization_packet_v1>",
+      };
+      const { runtime, thread } = yield* resumed(
+        [
+          out("session.prompt", { sessionID: SESSION, text: "hi" }),
+          promptAccepted,
+          event("session.execution.succeeded", { sessionID: SESSION }),
+        ],
+        { external: true },
+      );
+      const terminal = yield* terminalOf(runtime).pipe(Effect.forkScoped);
+      yield* runtime.startTurn({ ...turnInput(thread), civilizationPacket: packet });
+      assert.equal((yield* Fiber.join(terminal))?.status, "completed");
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("preserves slash-first semantics for an unadvertised provider command", () =>
+    Effect.gen(function* () {
+      const packet = {
+        revision: "rev-opencode-command",
+        text: "<t3_civilization_packet_v1>must-not-prefix</t3_civilization_packet_v1>",
+      };
+      const { runtime, thread } = yield* resumed([
+        out("command.list", "<any>"),
+        reply("command.list", { location: { directory: WORK }, data: [] }),
+        out("session.prompt", { sessionID: SESSION, text: "/unknown ARG" }),
+        promptAccepted,
+        event("session.execution.succeeded", { sessionID: SESSION }),
+      ]);
+      const terminal = yield* terminalOf(runtime).pipe(Effect.forkScoped);
+      const input = turnInput(thread);
+      yield* runtime.startTurn({
+        ...input,
+        message: { ...input.message, text: "/unknown ARG" },
+        civilizationPacket: packet,
+      });
+      assert.equal((yield* Fiber.join(terminal))?.status, "completed");
+    }).pipe(Effect.scoped),
+  );
+
   it.effect("switches the session's model and variant before a turn that changed them", () =>
     Effect.gen(function* () {
       const { runtime, thread } = yield* resumed([
@@ -4186,7 +4578,22 @@ it.layer(McpProviderSessions.layer)("OpenCode2 adapter", (it) => {
     Effect.gen(function* () {
       const FORK = "ses_f1484db83ffeLGtrRCFimo1H0e";
       const target = "/work/opencode2-fork-target";
+      const targetThreadId = ThreadId.make("thread:opencode2-adapter:fork");
+      const parentPacket = {
+        revision: "rev-opencode-fork-parent",
+        text: "<t3_civilization_packet_v1>parent-stale</t3_civilization_packet_v1>",
+      };
+      const childPacket = {
+        revision: "rev-opencode-fork-child",
+        text: "<t3_civilization_packet_v1>child-only</t3_civilization_packet_v1>",
+      };
       const { runtime, thread } = yield* resumed([
+        out("session.prompt", {
+          sessionID: SESSION,
+          text: withCivilizationPacket(parentPacket.text, "hi"),
+        }),
+        promptAccepted,
+        event("session.execution.succeeded", { sessionID: SESSION }),
         out("session.fork", { sessionID: SESSION }),
         replyData("session.fork", sessionInfo({ id: FORK })),
         out("session.update", {
@@ -4201,17 +4608,59 @@ it.layer(McpProviderSessions.layer)("OpenCode2 adapter", (it) => {
         // OpenCode makes the fork where its source runs; the target thread runs elsewhere.
         out("session.move", { sessionID: FORK, directory: target }),
         reply("session.move", null),
+        out("session.instructions.entry.put", {
+          sessionID: FORK,
+          key: "t3-code",
+          value: "<any>",
+        }),
+        reply("session.instructions.entry.put", null),
+        out("session.prompt", {
+          sessionID: FORK,
+          text: withCivilizationPacket(childPacket.text, "hi"),
+        }),
+        replyData("session.prompt", {
+          id: PROMPT_ID,
+          sessionID: FORK,
+          time: { created: 1790656601410 },
+          type: "user",
+          payload: { text: "hi" },
+          delivery: "steer",
+        }),
+        event("session.execution.succeeded", { sessionID: FORK }),
       ]);
+      const parentTerminal = yield* terminalOf(runtime).pipe(Effect.forkScoped);
+      yield* runtime.startTurn({ ...turnInput(thread), civilizationPacket: parentPacket });
+      assert.equal((yield* Fiber.join(parentTerminal))?.status, "completed");
       const forked = yield* runtime.forkThread({
         sourceProviderThread: thread,
-        targetThreadId: ThreadId.make("thread:opencode2-adapter:fork"),
+        targetThreadId,
         runtimePolicy: { ...policy(), cwd: target },
       });
       assert.equal(forked.nativeThreadRef?.nativeId, FORK);
+      const terminal = yield* terminalOf(runtime).pipe(Effect.forkScoped);
+      const input = turnInput(forked);
+      yield* runtime.startTurn({
+        ...input,
+        threadId: targetThreadId,
+        appThread: {
+          ...input.appThread,
+          id: targetThreadId,
+          lineage: {
+            parentThreadId: threadId,
+            relationshipToParent: "fork",
+            rootThreadId: threadId,
+          },
+        },
+        civilizationPacket: childPacket,
+      });
+      assert.equal((yield* Fiber.join(terminal))?.status, "completed");
     }).pipe(Effect.scoped),
   );
 
-  const continued = (after: ReadonlyArray<ProviderReplayEntry>) =>
+  const continued = (
+    after: ReadonlyArray<ProviderReplayEntry>,
+    continuationPacket?: { readonly revision: string; readonly text: string },
+  ) =>
     Effect.gen(function* () {
       const offers: Array<ProviderContinuationRequests.ProviderContinuationRequest> = [];
       const { runtime, thread } = yield* resumed([
@@ -4270,7 +4719,10 @@ it.layer(McpProviderSessions.layer)("OpenCode2 adapter", (it) => {
       yield* Effect.gen(function* () {
         while (offers.length === 0) yield* Effect.yieldNow;
       }).pipe(Effect.timeout("2 seconds"), Effect.orDie);
-      yield* runtime.startTurn(continuationTurn(thread, offers[0]!));
+      yield* runtime.startTurn({
+        ...continuationTurn(thread, offers[0]!),
+        ...(continuationPacket === undefined ? {} : { civilizationPacket: continuationPacket }),
+      });
       yield* Deferred.await(bothEnded);
       const [first, second] = turns;
       return { runtime, thread, first: first!, second: second! };
@@ -4284,6 +4736,17 @@ it.layer(McpProviderSessions.layer)("OpenCode2 adapter", (it) => {
     ],
     cursor: {},
   };
+
+  it.effect("does not inject a Civilization packet on a provider-native continuation", () =>
+    Effect.gen(function* () {
+      const packet = {
+        revision: "rev-opencode-continuation",
+        text: "<t3_civilization_packet_v1>must-not-wake</t3_civilization_packet_v1>",
+      };
+      const { second } = yield* continued([], packet);
+      assert.equal(second.status, "completed");
+    }).pipe(Effect.scoped),
+  );
 
   it.effect("forks before a continuation's report, so the fork leaves out its answer", () =>
     Effect.gen(function* () {

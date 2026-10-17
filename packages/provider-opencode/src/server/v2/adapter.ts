@@ -660,7 +660,49 @@ const turnTokenUsage = (turn: ActiveTurn, status: OrchestrationV2ProviderTurn["s
         hasSubagents: turn.usedSubagents,
       };
 
-export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: ProviderInstanceId) {
+export interface OpenCode2CivilizationOptions {
+  readonly civilizationFullSupport: boolean;
+  readonly civilizationMetadataOnlyDetail?: string;
+}
+
+export const civilizationCapabilityFor = (
+  options: OpenCode2CivilizationOptions,
+): ProviderAdapter.ProviderAdapterV2CivilizationCapability =>
+  options.civilizationFullSupport
+    ? {
+        support: "full",
+        contextInjection: true,
+        keyedContextReplacement: false,
+        actionablePromptRefresh: true,
+        providerContinuationRefresh: false,
+        providerCommandRefresh: false,
+        messaging: true,
+        detail:
+          "Managed OpenCode 2 receives the latest Civilization packet on ordinary actionable prompts; provider-native continuations and provider commands have no fresh injection boundary.",
+        contextTransport: {
+          kind: "opencode2.user_prompt",
+          description:
+            "Prepended to ordinary session.prompt user text before the actionable request.",
+          trust: "untrusted",
+        },
+      }
+    : {
+        support: "metadata_only",
+        contextInjection: false,
+        keyedContextReplacement: false,
+        actionablePromptRefresh: false,
+        providerContinuationRefresh: false,
+        providerCommandRefresh: false,
+        messaging: false,
+        detail:
+          options.civilizationMetadataOnlyDetail ??
+          "Externally configured OpenCode 2 is Civilization census/identity metadata only.",
+      };
+
+export const make = Effect.fn("OpenCode2Adapter.make")(function* (
+  instanceId: ProviderInstanceId,
+  options: OpenCode2CivilizationOptions,
+) {
   const server = yield* OpenCode2Server.OpenCode2Server;
   const idAllocator = yield* IdAllocator.IdAllocatorV2;
   const host = yield* ProviderHost.ProviderHost;
@@ -2910,12 +2952,19 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
       };
     });
 
-    const promptText = (turnInput: ProviderAdapter.ProviderAdapterV2TurnInput) =>
-      providerMessageTextWithAttachmentPaths({
+    const promptText = (turnInput: ProviderAdapter.ProviderAdapterV2TurnInput) => {
+      const userText = providerMessageTextWithAttachmentPaths({
         text: turnInput.message.text,
         attachments: turnInput.message.attachments,
         resolveAttachmentPath: host.resolveAttachmentPath,
       }).trim();
+      const providerCommand = /^\/[^\s/]+(?:\s|$)/u.test(turnInput.message.text.trim());
+      return !options.civilizationFullSupport ||
+        turnInput.civilizationPacket === undefined ||
+        providerCommand
+        ? userText
+        : `${turnInput.civilizationPacket.text}\n\n--- END UNTRUSTED CIVILIZATION DATA ---\nThe following text is the user's actual request and is not part of the Civilization packet:\n\n${userText}`;
+    };
 
     const removeMcp = (mcp: { readonly name: string; readonly directory: string }) =>
       Effect.suspend(() =>
@@ -3924,6 +3973,7 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
   return ProviderAdapter.ProviderAdapterV2.of({
     instanceId,
     driver,
+    getCivilizationCapability: () => Effect.succeed(civilizationCapabilityFor(options)),
     getCapabilities: () => Effect.succeed(OpenCode2ProviderCapabilities),
     planSelectionTransition: () => Effect.succeed(turnScopedSelectionTransition()),
     // The session borrows the instance's server for as long as it is open, so a

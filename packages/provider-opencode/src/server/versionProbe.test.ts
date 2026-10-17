@@ -194,4 +194,35 @@ describe("OpenCode version probe", () => {
       assert.strictEqual(calls, 3);
     }),
   );
+
+  it.effect("drops the last successful generation when an explicit refresh fails", () =>
+    Effect.gen(function* () {
+      let calls = 0;
+      const runtime = {
+        runOpenCodeCommand: () => {
+          calls += 1;
+          return calls === 1
+            ? Effect.succeed({ stdout: "opencode v2.0.18\n", stderr: "", code: 0 })
+            : Effect.fail(
+                new OpenCodeRuntime.OpenCodeRuntimeError({ operation: "spawn", detail: "ENOENT" }),
+              );
+        },
+      } as unknown as OpenCodeRuntime.OpenCodeRuntime["Service"];
+      const probe = yield* makeOpenCodeRuntimeProbe(
+        probeOpenCodeRuntime({ binaryPath: "opencode", serverUrl: "", serverPassword: "" }).pipe(
+          Effect.provideService(OpenCodeRuntime.OpenCodeRuntime, runtime),
+          Effect.provideService(
+            HttpClient.HttpClient,
+            HttpClient.make(() => Effect.die("A local binary must not be probed over HTTP")),
+          ),
+        ),
+      );
+
+      assert.strictEqual((yield* probe.get).generation, "v2");
+      assert.strictEqual((yield* probe.lastSuccess)._tag, "Some");
+      yield* Effect.flip(probe.refresh);
+      assert.strictEqual((yield* probe.lastSuccess)._tag, "None");
+      assert.strictEqual(calls, 2);
+    }),
+  );
 });
