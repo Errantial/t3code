@@ -1,6 +1,5 @@
 import {
   CivilizationDefaultConfig,
-  CivilizationMessageId,
   CivilizationNoteId,
   EnvironmentId,
   ProjectId,
@@ -17,7 +16,6 @@ const testState = vi.hoisted(() => ({
   sensitiveCalls: [] as unknown[],
   citizenCalls: [] as unknown[],
   pageCalls: [] as unknown[],
-  mailHookInputs: [] as Array<readonly [string | null, string | null]>,
 }));
 
 const atoms = vi.hoisted(() => ({
@@ -30,7 +28,6 @@ const environmentId = EnvironmentId.make("environment-ui3");
 const projectId = ProjectId.make("project-ui3");
 const threadId = ThreadId.make("thread-ui3");
 const noteId = CivilizationNoteId.make("note-ui3");
-const messageId = CivilizationMessageId.make("mail-ui3");
 
 const EFFECTIVE = {
   config: CivilizationDefaultConfig,
@@ -74,31 +71,6 @@ const note = {
   resolvedAt: null,
 } as const;
 
-const mail = {
-  messageId,
-  senderThreadId: threadId,
-  senderNameAtSend: "Ada",
-  senderCitizenEpoch: 2,
-  senderRunId: "run-ui3",
-  recipientThreadId: threadId,
-  recipientDeliveryEpoch: 3,
-  replyToMessageId: null,
-  bodyBytes: 11,
-  acceptedRuntimeMode: "full-access",
-  acceptedInteractionMode: "default",
-  acceptedEnvironmentRevision: 7,
-  acceptedProjectRevision: 9,
-  acceptedAt: "2026-10-16T18:00:00.000Z",
-  expiresAt: "2026-10-17T18:00:00.000Z",
-  terminalRetentionDays: 30,
-  firstOfferedAt: null,
-  lastOfferedAt: null,
-  offerCount: 0,
-  acknowledgedAt: null,
-  terminalAt: null,
-  terminalReason: null,
-} as const;
-
 vi.mock("@effect/atom-react", () => ({
   useAtomSet: (atom: symbol) => async (input: unknown) => {
     if (atom === atoms.sensitive) {
@@ -106,7 +78,9 @@ vi.mock("@effect/atom-react", () => ({
       const typed = input as { type: string };
       return typed.type === "noteBody"
         ? { ...note, body: "secret note body", sourceReferences: [] }
-        : { projectId, ...mail, body: "secret mail body" };
+        : (() => {
+            throw new Error("unexpected sensitive read");
+          })();
     }
     if (atom === atoms.citizen) {
       testState.citizenCalls.push(input);
@@ -161,18 +135,6 @@ vi.mock("../../state/civilization", () => ({
     isPending: false,
     refresh: vi.fn(),
   }),
-  useCivilizationRetainedMailPage: (environment: string | null, project: string | null) => {
-    testState.mailHookInputs.push([environment, project]);
-    return {
-      data:
-        environment === null
-          ? null
-          : { projectId, revision: 12, messages: [mail], nextCursor: null, partial: false },
-      error: null,
-      isPending: false,
-      refresh: vi.fn(),
-    };
-  },
 }));
 
 vi.mock("../../state/session", () => ({
@@ -242,6 +204,27 @@ vi.mock("./CivilizationDataRetention", () => ({
   CivilizationDataRetention: () => <div data-testid="civilization-data-retention" />,
 }));
 
+vi.mock("./CivilizationChronicle", () => ({
+  CivilizationChronicle: () => <div data-testid="civilization-chronicle" />,
+}));
+
+vi.mock("./CivilizationCorrespondenceHistory", () => ({
+  CivilizationCorrespondenceHistory: ({
+    allowSensitiveActions,
+  }: {
+    allowSensitiveActions: boolean;
+  }) => (
+    <div>
+      Correspondence history ·{" "}
+      {!testState.writable
+        ? "Restricted"
+        : allowSensitiveActions
+          ? "Administrative inspection"
+          : "Select one environment"}
+    </div>
+  ),
+}));
+
 import { CivilizationProjectInspection } from "./CivilizationProjectInspection";
 
 let renderer: ReactTestRenderer | undefined;
@@ -269,7 +252,6 @@ beforeEach(() => {
   testState.sensitiveCalls = [];
   testState.citizenCalls = [];
   testState.pageCalls = [];
-  testState.mailHookInputs = [];
 });
 
 afterEach(async () => {
@@ -279,23 +261,22 @@ afterEach(async () => {
 });
 
 describe("Civilization project inspection", () => {
-  it("shows census and note metadata to read-only users without fetching sensitive bodies or retained mail", async () => {
+  it("shows census and note metadata to read-only users while correspondence remains restricted", async () => {
     await render();
 
     expect(text()).toContain("Observed Ada");
     expect(text()).toContain("fact");
     expect(text()).toContain("Provider-owned · read only");
-    expect(text()).toContain("Retained mail");
+    expect(text()).toContain("Correspondence history");
     expect(text()).toContain("Restricted");
     expect(testState.sensitiveCalls).toEqual([]);
     expect(testState.citizenCalls).toEqual([]);
-    expect(testState.mailHookInputs.every(([environment]) => environment === null)).toBe(true);
     expect(text()).not.toContain("Reassign identity");
     expect(text()).not.toContain("Restore title");
     expect(text()).not.toContain("Reclaim title");
   });
 
-  it("fetches note and retained-mail bodies only after explicit settings-write clicks", async () => {
+  it("fetches note bodies only after explicit settings-write clicks", async () => {
     testState.writable = true;
     await render();
     const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
@@ -307,7 +288,7 @@ describe("Civilization project inspection", () => {
     const openButtons = renderer!.root
       .findAllByType("button")
       .filter((button) => button.props.children === "Open body");
-    expect(openButtons).toHaveLength(2);
+    expect(openButtons).toHaveLength(1);
 
     await act(async () => {
       openButtons[0]!.props.onClick();
@@ -317,21 +298,12 @@ describe("Civilization project inspection", () => {
     expect(testState.sensitiveCalls[0]).toMatchObject({ type: "noteBody", noteId });
     expect(text()).toContain("secret note body");
 
-    await act(async () => {
-      openButtons[1]!.props.onClick();
-      await Promise.resolve();
-    });
-    expect(testState.sensitiveCalls).toHaveLength(2);
-    expect(testState.sensitiveCalls[1]).toMatchObject({ type: "mailBody", messageId });
-    expect(text()).toContain("secret mail body");
-
     const logged = [logSpy, infoSpy, warnSpy, errorSpy]
       .flatMap((spy) => spy.mock.calls)
       .flat()
       .map(String)
       .join("\n");
     expect(logged).not.toContain("secret note body");
-    expect(logged).not.toContain("secret mail body");
   });
 
   it("keeps sensitive project actions disabled when multiple environments are selected", async () => {

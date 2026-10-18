@@ -350,12 +350,13 @@ const readFeatureState = Effect.fn("RecoveryAcceptance.readFeatureState")(functi
         readonly census_revision: number;
         readonly notes_revision: number;
         readonly mail_revision: number;
+        readonly mail_history_revision: number;
         readonly chronicle_revision: number;
         readonly achievement_revision: number;
         readonly retained_message_count: number;
         readonly retained_body_bytes: number;
       }>`
-        SELECT census_revision, notes_revision, mail_revision,
+        SELECT census_revision, notes_revision, mail_revision, mail_history_revision,
                chronicle_revision, achievement_revision,
                retained_message_count, retained_body_bytes
         FROM civilization_project_state
@@ -576,7 +577,7 @@ it.effect(
       const migrated = yield* runMigrations();
       assert.deepEqual(
         migrated.map(([id]) => id),
-        [65, 66, 67, 68, 69, 70, 71, 72, 73, 74],
+        [65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75],
       );
       assert.deepEqual(
         (yield* sql<{

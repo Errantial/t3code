@@ -932,6 +932,56 @@ export const CivilizationAdminMailPage = Schema.Struct({
 });
 export type CivilizationAdminMailPage = typeof CivilizationAdminMailPage.Type;
 
+export const CivilizationCorrespondenceCursor = TrimmedNonEmptyString.pipe(
+  Schema.brand("CivilizationCorrespondenceCursor"),
+);
+export type CivilizationCorrespondenceCursor = typeof CivilizationCorrespondenceCursor.Type;
+
+export const CivilizationCorrespondenceReplyRelation = Schema.Literals([
+  "any",
+  "root",
+  "replies_to",
+]);
+export type CivilizationCorrespondenceReplyRelation =
+  typeof CivilizationCorrespondenceReplyRelation.Type;
+
+export const CivilizationCorrespondenceHistoryPage = Schema.Struct({
+  projectId: ProjectId,
+  revision: Schema.Number,
+  messages: Schema.Array(CivilizationMailSummary),
+  nextCursor: Schema.NullOr(CivilizationCorrespondenceCursor),
+  partial: Schema.Boolean,
+});
+export type CivilizationCorrespondenceHistoryPage =
+  typeof CivilizationCorrespondenceHistoryPage.Type;
+
+export const CivilizationCorrespondenceRelation = Schema.Literals([
+  "ancestor",
+  "selected",
+  "descendant",
+]);
+export type CivilizationCorrespondenceRelation = typeof CivilizationCorrespondenceRelation.Type;
+
+export const CivilizationCorrespondenceThreadEntry = Schema.Struct({
+  message: CivilizationMailSummary,
+  relation: CivilizationCorrespondenceRelation,
+  depth: Schema.Number,
+  unresolvedParent: Schema.Boolean,
+});
+export type CivilizationCorrespondenceThreadEntry =
+  typeof CivilizationCorrespondenceThreadEntry.Type;
+
+export const CivilizationCorrespondenceThreadPage = Schema.Struct({
+  projectId: ProjectId,
+  revision: Schema.Number,
+  selectedMessageId: CivilizationMessageId,
+  entries: Schema.Array(CivilizationCorrespondenceThreadEntry),
+  rootStatus: Schema.Literals(["resolved", "missing_parent", "depth_limit"]),
+  ancestorTruncated: Schema.Boolean,
+  descendantsTruncated: Schema.Boolean,
+});
+export type CivilizationCorrespondenceThreadPage = typeof CivilizationCorrespondenceThreadPage.Type;
+
 export const CivilizationContextInspectionId = TrimmedNonEmptyString.pipe(
   Schema.brand("CivilizationContextInspectionId"),
 );

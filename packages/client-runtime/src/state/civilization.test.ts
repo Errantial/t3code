@@ -38,6 +38,8 @@ import {
   fetchEnvironmentCivilizationAchievementPage,
   fetchEnvironmentCivilizationCensusPage,
   fetchEnvironmentCivilizationChroniclePage,
+  fetchEnvironmentCivilizationCorrespondencePage,
+  fetchEnvironmentCivilizationCorrespondenceThread,
   fetchEnvironmentCivilizationLineageNeighborhood,
   fetchEnvironmentCivilizationCapabilities,
   fetchEnvironmentCivilizationConfig,
@@ -137,6 +139,102 @@ function responseFor(url: string) {
 }
 
 describe("Civilization environment HTTP reads", () => {
+  it.effect(
+    "maps bounded correspondence filters and anchored thread reads without fetching bodies",
+    () =>
+      Effect.gen(function* () {
+        const calls: string[] = [];
+        const messageId = CivilizationMessageId.make("mail:client-runtime:correspondence");
+        const parentId = CivilizationMessageId.make("mail:client-runtime:parent");
+        const participantThreadId = ThreadId.make("thread:client-runtime:participant");
+        const senderThreadId = ThreadId.make("thread:client-runtime:sender");
+        const recipientThreadId = ThreadId.make("thread:client-runtime:recipient");
+        const fetchFn: typeof fetch = async (request) => {
+          const url = String(request);
+          calls.push(url);
+          const parsed = new URL(url);
+          if (parsed.pathname === "/api/civilization/correspondence") {
+            return Response.json({
+              projectId: PROJECT_ID,
+              revision: 12,
+              messages: [],
+              nextCursor: null,
+              partial: false,
+            });
+          }
+          if (
+            parsed.pathname ===
+            `/api/civilization/correspondence/${encodeURIComponent(messageId)}/thread`
+          ) {
+            return Response.json({
+              projectId: PROJECT_ID,
+              revision: 12,
+              selectedMessageId: messageId,
+              entries: [],
+              rootStatus: "resolved",
+              ancestorTruncated: false,
+              descendantsTruncated: false,
+            });
+          }
+          return new Response("not found", { status: 404 });
+        };
+        const auth = {
+          prepared: PREPARED,
+          signer: Option.none(),
+          remoteAuthorization: Option.none(),
+        };
+        const provide = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
+          effect.pipe(Effect.provide(RpcHttp.layerRemoteHttpClient(fetchFn)));
+
+        yield* provide(
+          fetchEnvironmentCivilizationCorrespondencePage({
+            ...auth,
+            projectId: PROJECT_ID,
+            participantThreadId,
+            senderThreadId,
+            recipientThreadId,
+            replyRelation: "replies_to",
+            replyToMessageId: parentId,
+            acknowledged: false,
+            terminal: true,
+            deliveryEpoch: 4,
+            from: "2026-10-17T10:00:00.000Z",
+            to: "2026-10-18T10:00:00.000Z",
+            limit: 20,
+          }),
+        );
+        const historyUrl = new URL(calls[0]!);
+        expect(historyUrl.pathname).toBe("/api/civilization/correspondence");
+        expect(historyUrl.searchParams.get("projectId")).toBe(PROJECT_ID);
+        expect(historyUrl.searchParams.get("participantThreadId")).toBe(participantThreadId);
+        expect(historyUrl.searchParams.get("senderThreadId")).toBe(senderThreadId);
+        expect(historyUrl.searchParams.get("recipientThreadId")).toBe(recipientThreadId);
+        expect(historyUrl.searchParams.get("replyRelation")).toBe("replies_to");
+        expect(historyUrl.searchParams.get("replyToMessageId")).toBe(parentId);
+        expect(historyUrl.searchParams.get("acknowledged")).toBe("false");
+        expect(historyUrl.searchParams.get("terminal")).toBe("true");
+        expect(historyUrl.searchParams.get("deliveryEpoch")).toBe("4");
+        expect(historyUrl.searchParams.get("limit")).toBe("20");
+
+        yield* provide(
+          fetchEnvironmentCivilizationCorrespondenceThread({
+            ...auth,
+            projectId: PROJECT_ID,
+            messageId,
+            ancestorLimit: 5,
+            descendantLimit: 8,
+          }),
+        );
+        const threadUrl = new URL(calls[1]!);
+        expect(threadUrl.pathname).toBe(
+          `/api/civilization/correspondence/${encodeURIComponent(messageId)}/thread`,
+        );
+        expect(threadUrl.searchParams.get("projectId")).toBe(PROJECT_ID);
+        expect(threadUrl.searchParams.get("ancestorLimit")).toBe("5");
+        expect(threadUrl.searchParams.get("descendantLimit")).toBe("8");
+      }),
+  );
+
   it.effect("keeps context-inspection metadata and sensitive detail on separate requests", () =>
     Effect.gen(function* () {
       const calls: string[] = [];

@@ -90,6 +90,10 @@ import {
   CivilizationChronicleCursor,
   CivilizationChronicleKind,
   CivilizationChroniclePage,
+  CivilizationCorrespondenceCursor,
+  CivilizationCorrespondenceHistoryPage,
+  CivilizationCorrespondenceReplyRelation,
+  CivilizationCorrespondenceThreadPage,
   CivilizationLineageCursor,
   CivilizationLineageNeighborhood,
   CivilizationCapabilitiesResult,
@@ -797,6 +801,32 @@ const EnvironmentCivilizationInboxMessageQuery = Schema.Struct({
   projectId: ProjectId,
 });
 
+const EnvironmentCivilizationCorrespondenceQuery = Schema.Struct({
+  projectId: ProjectId,
+  participantThreadId: Schema.optionalKey(ThreadId),
+  senderThreadId: Schema.optionalKey(ThreadId),
+  recipientThreadId: Schema.optionalKey(ThreadId),
+  replyRelation: Schema.optionalKey(CivilizationCorrespondenceReplyRelation),
+  replyToMessageId: Schema.optionalKey(CivilizationMessageId),
+  acknowledged: Schema.optionalKey(Schema.Literals(["true", "false"])),
+  terminal: Schema.optionalKey(Schema.Literals(["true", "false"])),
+  deliveryEpoch: Schema.optionalKey(TrimmedNonEmptyString),
+  from: Schema.optionalKey(TrimmedNonEmptyString),
+  to: Schema.optionalKey(TrimmedNonEmptyString),
+  cursor: Schema.optionalKey(CivilizationCorrespondenceCursor),
+  limit: Schema.optionalKey(TrimmedNonEmptyString),
+});
+
+const EnvironmentCivilizationCorrespondenceThreadParams = Schema.Struct({
+  messageId: CivilizationMessageId,
+});
+
+const EnvironmentCivilizationCorrespondenceThreadQuery = Schema.Struct({
+  projectId: ProjectId,
+  ancestorLimit: Schema.optionalKey(TrimmedNonEmptyString),
+  descendantLimit: Schema.optionalKey(TrimmedNonEmptyString),
+});
+
 const EnvironmentCivilizationProjectQuery = Schema.Struct({
   projectId: ProjectId,
 });
@@ -1053,6 +1083,27 @@ class EnvironmentCivilizationHttpApi extends HttpApiGroup.make("civilization")
       success: CivilizationAdminMailRecord,
       error: EnvironmentCivilizationAdminMailErrors,
     }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.get("correspondenceList", "/api/civilization/correspondence", {
+      headers: OptionalBearerHeaders,
+      query: EnvironmentCivilizationCorrespondenceQuery,
+      success: CivilizationCorrespondenceHistoryPage,
+      error: EnvironmentCivilizationAdminMailErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.get(
+      "correspondenceThread",
+      "/api/civilization/correspondence/:messageId/thread",
+      {
+        headers: OptionalBearerHeaders,
+        params: EnvironmentCivilizationCorrespondenceThreadParams,
+        query: EnvironmentCivilizationCorrespondenceThreadQuery,
+        success: CivilizationCorrespondenceThreadPage,
+        error: EnvironmentCivilizationAdminMailErrors,
+      },
+    ).middleware(EnvironmentAuthenticatedAuth),
   )
   .add(
     HttpApiEndpoint.get("contextInspectionList", "/api/civilization/context-inspections", {

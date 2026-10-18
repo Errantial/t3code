@@ -1,16 +1,12 @@
 import { useAtomSet } from "@effect/atom-react";
 import {
   AuthSettingsWriteScope,
-  type CivilizationAdminMailRecord,
   type CivilizationCensusCursor,
   type CivilizationCensusPage,
   type CivilizationCitizenReassignmentPreview,
   type CivilizationCitizenReassignmentRequest,
   type CivilizationCitizenSummary,
   type CivilizationEffectiveConfig,
-  type CivilizationAdminMailPage,
-  type CivilizationInboxCursor,
-  type CivilizationMailSummary,
   type CivilizationNoteBody,
   type CivilizationNoteSummary,
   type CivilizationNotesCursor,
@@ -29,7 +25,6 @@ import {
   type CivilizationRevisionPageState,
   useCivilizationCensusPage,
   useCivilizationNotesPage,
-  useCivilizationRetainedMailPage,
 } from "../../state/civilization";
 import { readEnvironmentScope, useEnvironmentScope } from "../../state/session";
 import { Button } from "../ui/button";
@@ -46,6 +41,7 @@ import { Input } from "../ui/input";
 import { Switch } from "../ui/switch";
 import { SettingsRow, SettingsSection } from "./settingsLayout";
 import { CivilizationChronicle } from "./CivilizationChronicle";
+import { CivilizationCorrespondenceHistory } from "./CivilizationCorrespondenceHistory";
 import { CivilizationDataRetention } from "./CivilizationDataRetention";
 import { CivilizationLineageExplorer } from "./CivilizationLineageExplorer";
 
@@ -226,7 +222,7 @@ function CitizenCard({
             View lineage
           </Button>
           {citizen.observedOnly ? (
-            <span className="text-xs text-muted-foreground">Provider-owned ? read only</span>
+            <span className="text-xs text-muted-foreground">Provider-owned · read only</span>
           ) : canAdminister ? (
             <>
               <Button size="xs" variant="outline" onClick={() => setReassignOpen(true)}>
@@ -323,7 +319,6 @@ export function CivilizationProjectInspection({
 }: CivilizationProjectInspectionProps) {
   const canWrite = useEnvironmentScope(environmentId, AuthSettingsWriteScope);
   const censusLimit = effective.config.operations.censusPageSize;
-  const inboxLimit = effective.config.operations.inboxPageSize;
   const [includeResolved, setIncludeResolved] = useState(false);
   const [lineageFocusThreadId, setLineageFocusThreadId] = useState<ThreadId | null>(null);
   const census = useCivilizationCensusPage(environmentId, projectId, null, censusLimit);
@@ -333,12 +328,6 @@ export function CivilizationProjectInspection({
     null,
     censusLimit,
     includeResolved,
-  );
-  const mail = useCivilizationRetainedMailPage(
-    canWrite ? environmentId : null,
-    canWrite ? projectId : null,
-    null,
-    inboxLimit,
   );
   const loadPage = useAtomSet(civilizationProjectReadAction, { mode: "promise" });
   const readSensitive = useAtomSet(civilizationSensitiveReadAction, { mode: "promise" });
@@ -351,12 +340,7 @@ export function CivilizationProjectInspection({
     useState<CivilizationRevisionPageState<CivilizationNoteSummary> | null>(null);
   const [notesCursor, setNotesCursor] = useState<CivilizationNotesCursor | null>(null);
   const [notesMessage, setNotesMessage] = useState<string | null>(null);
-  const [mailAccumulated, setMailAccumulated] =
-    useState<CivilizationRevisionPageState<CivilizationMailSummary> | null>(null);
-  const [mailCursor, setMailCursor] = useState<CivilizationInboxCursor | null>(null);
-  const [mailMessage, setMailMessage] = useState<string | null>(null);
   const [noteBody, setNoteBody] = useState<CivilizationNoteBody | null>(null);
-  const [mailBody, setMailBody] = useState<CivilizationAdminMailRecord | null>(null);
   const [bodyLoading, setBodyLoading] = useState(false);
   const sensitiveAllowed = allowSensitiveActions && canWrite;
 
@@ -387,18 +371,6 @@ export function CivilizationProjectInspection({
     notesAccumulated.revision === baseNotes.revision
       ? notesCursor
       : (baseNotes?.nextCursor ?? null);
-
-  const baseMail = mail.data;
-  const mailState =
-    baseMail !== null && mailAccumulated?.revision === baseMail.revision
-      ? mailAccumulated
-      : baseMail === null
-        ? null
-        : { status: "ready" as const, revision: baseMail.revision, items: baseMail.messages };
-  const nextMailCursor =
-    mailAccumulated !== null && baseMail !== null && mailAccumulated.revision === baseMail.revision
-      ? mailCursor
-      : (baseMail?.nextCursor ?? null);
 
   const loadMoreCensus = () => {
     if (nextCensusCursor === null || baseCensus === null) return;
@@ -463,37 +435,6 @@ export function CivilizationProjectInspection({
       .catch((error: unknown) => setNotesMessage(errorMessage(error)));
   };
 
-  const loadMoreMail = () => {
-    if (nextMailCursor === null || baseMail === null || !sensitiveAllowed) return;
-    setMailMessage(null);
-    void loadPage({
-      type: "mailPage",
-      environmentId,
-      projectId,
-      cursor: nextMailCursor,
-      limit: inboxLimit,
-    })
-      .then((result) => {
-        const page = result as CivilizationAdminMailPage;
-        const current = mailState ?? {
-          status: "ready" as const,
-          revision: baseMail.revision,
-          items: baseMail.messages,
-        };
-        const merged = mergeCivilizationRevisionPage(current, {
-          revision: page.revision,
-          items: page.messages,
-        });
-        setMailAccumulated(merged);
-        setMailCursor(page.nextCursor);
-        if (merged.status === "stale") {
-          setMailMessage("Retained mail changed while paging; restarted from the newest page.");
-          mail.refresh();
-        }
-      })
-      .catch((error: unknown) => setMailMessage(errorMessage(error)));
-  };
-
   const openNoteBody = (note: CivilizationNoteSummary) => {
     if (!sensitiveAllowed || bodyLoading) return;
     if (!readEnvironmentScope(environmentId, AuthSettingsWriteScope)) {
@@ -510,25 +451,6 @@ export function CivilizationProjectInspection({
       .catch((error: unknown) => {
         setBodyLoading(false);
         setNotesMessage(errorMessage(error));
-      });
-  };
-
-  const openMailBody = (message: CivilizationMailSummary) => {
-    if (!sensitiveAllowed || bodyLoading) return;
-    if (!readEnvironmentScope(environmentId, AuthSettingsWriteScope)) {
-      setMailMessage("Permission changed before body inspection; settings:write is required.");
-      return;
-    }
-    setBodyLoading(true);
-    setMailMessage(null);
-    void readSensitive({ type: "mailBody", environmentId, projectId, messageId: message.messageId })
-      .then((body) => {
-        setBodyLoading(false);
-        setMailBody(body as CivilizationAdminMailRecord);
-      })
-      .catch((error: unknown) => {
-        setBodyLoading(false);
-        setMailMessage(errorMessage(error));
       });
   };
 
@@ -653,72 +575,13 @@ export function CivilizationProjectInspection({
         </div>
       </SettingsSection>
 
-      <SettingsSection title={`Retained mail · ${targetLabel}`} id="civilization-retained-mail">
-        {!canWrite ? (
-          <SettingsRow
-            title="Retained mail"
-            description="Administrative retained-mail inspection requires settings:write."
-            control={<span className="text-sm text-muted-foreground">Restricted</span>}
-          />
-        ) : !allowSensitiveActions ? (
-          <SettingsRow
-            title="Retained mail"
-            description="Select one environment before inspecting retained mail or message bodies."
-            control={<span className="text-sm text-muted-foreground">Choose environment</span>}
-          />
-        ) : (
-          <div className="space-y-2 px-3 sm:px-4">
-            {mailState?.items.map((message) => (
-              <div
-                key={message.messageId}
-                className="flex flex-wrap items-start justify-between gap-3 rounded-lg border border-border/70 p-3"
-              >
-                <div className="min-w-0 text-xs text-muted-foreground">
-                  <div className="font-medium text-sm text-foreground">
-                    {message.senderNameAtSend} → {message.recipientThreadId}
-                  </div>
-                  <div>
-                    {message.bodyBytes} bytes · accepted {formatDate(message.acceptedAt)} · expires{" "}
-                    {formatDate(message.expiresAt)}
-                  </div>
-                  <div>
-                    offered {formatDate(message.lastOfferedAt)} · acknowledged{" "}
-                    {formatDate(message.acknowledgedAt)}
-                  </div>
-                  <div>
-                    {message.terminalReason === null
-                      ? "Retained"
-                      : `Terminal: ${message.terminalReason}`}
-                  </div>
-                </div>
-                <Button
-                  size="xs"
-                  variant="outline"
-                  disabled={bodyLoading}
-                  onClick={() => openMailBody(message)}
-                >
-                  Open body
-                </Button>
-              </div>
-            ))}
-            {mail.isPending && mail.data === null ? (
-              <div className="text-sm text-muted-foreground">Loading retained mail…</div>
-            ) : null}
-            {mail.error === null ? null : (
-              <div className="text-sm text-destructive">{mail.error}</div>
-            )}
-            <PaginationMessage message={mailMessage} />
-            {nextMailCursor === null ? null : (
-              <Button size="sm" variant="outline" onClick={loadMoreMail}>
-                Load more mail
-              </Button>
-            )}
-            <div className="text-xs text-muted-foreground">
-              Inspection only. This UI cannot send, reply, wake, steer, or resume another agent.
-            </div>
-          </div>
-        )}
-      </SettingsSection>
+      <CivilizationCorrespondenceHistory
+        environmentId={environmentId}
+        projectId={projectId}
+        pageSize={effective.config.operations.inboxPageSize}
+        allowSensitiveActions={allowSensitiveActions}
+        onViewLineage={setLineageFocusThreadId}
+      />
 
       <CivilizationDataRetention
         environmentId={environmentId}
@@ -729,7 +592,6 @@ export function CivilizationProjectInspection({
         refreshProjectData={() => {
           census.refresh();
           notes.refresh();
-          mail.refresh();
         }}
       />
 
@@ -750,27 +612,6 @@ export function CivilizationProjectInspection({
           <DialogPanel>
             <pre className="max-h-96 overflow-auto whitespace-pre-wrap wrap-anywhere text-sm">
               {noteBody?.body}
-            </pre>
-          </DialogPanel>
-        </DialogPopup>
-      </Dialog>
-
-      <Dialog
-        open={mailBody !== null}
-        onOpenChange={(open) => {
-          if (!open) setMailBody(null);
-        }}
-      >
-        <DialogPopup>
-          <DialogHeader>
-            <DialogTitle>Retained mail body</DialogTitle>
-            <DialogDescription>
-              Sensitive administrative inspection only; no send or reply action is available.
-            </DialogDescription>
-          </DialogHeader>
-          <DialogPanel>
-            <pre className="max-h-96 overflow-auto whitespace-pre-wrap wrap-anywhere text-sm">
-              {mailBody?.body}
             </pre>
           </DialogPanel>
         </DialogPopup>

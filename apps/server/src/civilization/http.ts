@@ -4,6 +4,7 @@ import {
   CivilizationAchievementCursor,
   CivilizationCensusCursor,
   CivilizationChronicleCursor,
+  CivilizationCorrespondenceCursor,
   CivilizationLineageCursor,
   CivilizationInboxCursor,
   CivilizationNotesCursor,
@@ -85,6 +86,14 @@ const parseOptionalPositiveInteger = (value: string | undefined) => {
   if (value === undefined) return { ok: true as const, value: undefined };
   const parsed = Number(value);
   return Number.isSafeInteger(parsed) && parsed >= 1
+    ? { ok: true as const, value: parsed }
+    : { ok: false as const };
+};
+
+const parseOptionalNonNegativeInteger = (value: string | undefined) => {
+  if (value === undefined) return { ok: true as const, value: undefined };
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) && parsed >= 0
     ? { ok: true as const, value: parsed }
     : { ok: false as const };
 };
@@ -513,6 +522,99 @@ export const layer = HttpApiBuilder.group(
               SqlError: (cause) => failEnvironmentInternal("internal_error", cause),
             }),
           );
+        }),
+      )
+      .handle(
+        "correspondenceList",
+        Effect.fn("environment.civilization.correspondenceList")(function* (args) {
+          yield* authorizeSettingsWrite(args.endpoint.name);
+          const limitResult = parseOptionalPositiveInteger(args.query.limit);
+          if (!limitResult.ok) {
+            return yield* new EnvironmentHttpBadRequestError({
+              message: "limit must be a positive integer.",
+            });
+          }
+          const deliveryEpochResult = parseOptionalNonNegativeInteger(args.query.deliveryEpoch);
+          if (!deliveryEpochResult.ok) {
+            return yield* new EnvironmentHttpBadRequestError({
+              message: "deliveryEpoch must be a non-negative integer.",
+            });
+          }
+          return yield* mail
+            .listCorrespondenceHistory({
+              projectId: args.query.projectId,
+              ...(args.query.participantThreadId === undefined
+                ? {}
+                : { participantThreadId: args.query.participantThreadId }),
+              ...(args.query.senderThreadId === undefined
+                ? {}
+                : { senderThreadId: args.query.senderThreadId }),
+              ...(args.query.recipientThreadId === undefined
+                ? {}
+                : { recipientThreadId: args.query.recipientThreadId }),
+              ...(args.query.replyRelation === undefined
+                ? {}
+                : { replyRelation: args.query.replyRelation }),
+              ...(args.query.replyToMessageId === undefined
+                ? {}
+                : { replyToMessageId: args.query.replyToMessageId }),
+              ...(args.query.acknowledged === undefined
+                ? {}
+                : { acknowledged: args.query.acknowledged === "true" }),
+              ...(args.query.terminal === undefined
+                ? {}
+                : { terminal: args.query.terminal === "true" }),
+              ...(deliveryEpochResult.value === undefined
+                ? {}
+                : { deliveryEpoch: deliveryEpochResult.value }),
+              ...(args.query.from === undefined ? {} : { from: args.query.from }),
+              ...(args.query.to === undefined ? {} : { to: args.query.to }),
+              ...(args.query.cursor === undefined ? {} : { cursor: args.query.cursor }),
+              ...(limitResult.value === undefined ? {} : { limit: limitResult.value }),
+            })
+            .pipe(
+              Effect.map((page) => ({
+                ...page,
+                nextCursor:
+                  page.nextCursor === null
+                    ? null
+                    : CivilizationCorrespondenceCursor.make(page.nextCursor),
+              })),
+              Effect.catchTags({
+                SqlError: (cause) => failEnvironmentInternal("internal_error", cause),
+                CivilizationMailInvalidError: (cause) =>
+                  Effect.fail(new EnvironmentHttpBadRequestError({ message: cause.message })),
+              }),
+            );
+        }),
+      )
+      .handle(
+        "correspondenceThread",
+        Effect.fn("environment.civilization.correspondenceThread")(function* (args) {
+          yield* authorizeSettingsWrite(args.endpoint.name);
+          const ancestorLimit = parseOptionalPositiveInteger(args.query.ancestorLimit);
+          const descendantLimit = parseOptionalPositiveInteger(args.query.descendantLimit);
+          if (!ancestorLimit.ok || !descendantLimit.ok) {
+            return yield* new EnvironmentHttpBadRequestError({
+              message: "Correspondence traversal limits must be positive integers.",
+            });
+          }
+          return yield* mail
+            .readCorrespondenceThread({
+              projectId: args.query.projectId,
+              messageId: args.params.messageId,
+              ...(ancestorLimit.value === undefined ? {} : { ancestorLimit: ancestorLimit.value }),
+              ...(descendantLimit.value === undefined
+                ? {}
+                : { descendantLimit: descendantLimit.value }),
+            })
+            .pipe(
+              Effect.catchTags({
+                SqlError: (cause) => failEnvironmentInternal("internal_error", cause),
+                CivilizationMailInvalidError: (cause) =>
+                  Effect.fail(new EnvironmentHttpBadRequestError({ message: cause.message })),
+              }),
+            );
         }),
       )
       .handle(

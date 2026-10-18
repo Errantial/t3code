@@ -4,6 +4,8 @@ import {
   type CivilizationCensusCursor,
   type CivilizationChronicleCursor,
   type CivilizationChronicleKind,
+  type CivilizationCorrespondenceCursor,
+  type CivilizationCorrespondenceReplyRelation,
   type CivilizationLineageCursor,
   type CivilizationContextInspectionCursor,
   type CivilizationContextInspectionId,
@@ -611,6 +613,94 @@ export const fetchEnvironmentCivilizationRetainedMailBody = Effect.fn(
   );
 });
 
+/** List retained correspondence metadata only; bodies remain explicit reads. */
+export const fetchEnvironmentCivilizationCorrespondencePage = Effect.fn(
+  "clientRuntime.state.fetchEnvironmentCivilizationCorrespondencePage",
+)(function* (
+  input: CivilizationEnvironmentRequestInput & {
+    readonly projectId: ProjectId;
+    readonly participantThreadId?: ThreadId | undefined;
+    readonly senderThreadId?: ThreadId | undefined;
+    readonly recipientThreadId?: ThreadId | undefined;
+    readonly replyRelation?: CivilizationCorrespondenceReplyRelation | undefined;
+    readonly replyToMessageId?: CivilizationMessageId | undefined;
+    readonly acknowledged?: boolean | undefined;
+    readonly terminal?: boolean | undefined;
+    readonly deliveryEpoch?: number | undefined;
+    readonly from?: string | undefined;
+    readonly to?: string | undefined;
+    readonly cursor?: CivilizationCorrespondenceCursor | undefined;
+    readonly limit?: number | undefined;
+  },
+) {
+  const query = {
+    projectId: input.projectId,
+    ...(input.participantThreadId === undefined
+      ? {}
+      : { participantThreadId: input.participantThreadId }),
+    ...(input.senderThreadId === undefined ? {} : { senderThreadId: input.senderThreadId }),
+    ...(input.recipientThreadId === undefined
+      ? {}
+      : { recipientThreadId: input.recipientThreadId }),
+    ...(input.replyRelation === undefined ? {} : { replyRelation: input.replyRelation }),
+    ...(input.replyToMessageId === undefined ? {} : { replyToMessageId: input.replyToMessageId }),
+    ...(input.acknowledged === undefined
+      ? {}
+      : { acknowledged: input.acknowledged ? ("true" as const) : ("false" as const) }),
+    ...(input.terminal === undefined
+      ? {}
+      : { terminal: input.terminal ? ("true" as const) : ("false" as const) }),
+    ...(input.deliveryEpoch === undefined ? {} : { deliveryEpoch: String(input.deliveryEpoch) }),
+    ...(input.from === undefined ? {} : { from: input.from }),
+    ...(input.to === undefined ? {} : { to: input.to }),
+    ...(input.cursor === undefined ? {} : { cursor: input.cursor }),
+    ...(input.limit === undefined ? {} : { limit: String(input.limit) }),
+  };
+  const endpoint = { query };
+  return yield* preserveCivilizationConfigErrors(
+    executeAuthenticatedEnvironmentHttpRequest({
+      ...input,
+      group: "civilization",
+      method: "GET",
+      url: (urls) => urls.correspondenceList(endpoint),
+      timeoutMs: input.timeoutMs ?? DEFAULT_CIVILIZATION_READ_TIMEOUT_MS,
+      request: ({ client, headers }) => client.correspondenceList({ ...endpoint, headers }),
+    }),
+  );
+});
+
+export const fetchEnvironmentCivilizationCorrespondenceThread = Effect.fn(
+  "clientRuntime.state.fetchEnvironmentCivilizationCorrespondenceThread",
+)(function* (
+  input: CivilizationEnvironmentRequestInput & {
+    readonly projectId: ProjectId;
+    readonly messageId: CivilizationMessageId;
+    readonly ancestorLimit?: number | undefined;
+    readonly descendantLimit?: number | undefined;
+  },
+) {
+  const endpoint = {
+    params: { messageId: input.messageId },
+    query: {
+      projectId: input.projectId,
+      ...(input.ancestorLimit === undefined ? {} : { ancestorLimit: String(input.ancestorLimit) }),
+      ...(input.descendantLimit === undefined
+        ? {}
+        : { descendantLimit: String(input.descendantLimit) }),
+    },
+  };
+  return yield* preserveCivilizationConfigErrors(
+    executeAuthenticatedEnvironmentHttpRequest({
+      ...input,
+      group: "civilization",
+      method: "GET",
+      url: (urls) => urls.correspondenceThread(endpoint),
+      timeoutMs: input.timeoutMs ?? DEFAULT_CIVILIZATION_READ_TIMEOUT_MS,
+      request: ({ client, headers }) => client.correspondenceThread({ ...endpoint, headers }),
+    }),
+  );
+});
+
 export const previewEnvironmentCivilizationCitizenReassignment = Effect.fn(
   "clientRuntime.state.previewEnvironmentCivilizationCitizenReassignment",
 )(function* (
@@ -956,6 +1046,41 @@ export const fetchCurrentEnvironmentCivilizationRetainedMailBody = Effect.fn(
 }) {
   const auth = yield* currentCivilizationAuth;
   return yield* fetchEnvironmentCivilizationRetainedMailBody({ ...input, ...auth });
+});
+
+export const fetchCurrentEnvironmentCivilizationCorrespondencePage = Effect.fn(
+  "clientRuntime.state.fetchCurrentEnvironmentCivilizationCorrespondencePage",
+)(function* (input: {
+  readonly prepared: PreparedConnection;
+  readonly projectId: ProjectId;
+  readonly participantThreadId?: ThreadId | undefined;
+  readonly senderThreadId?: ThreadId | undefined;
+  readonly recipientThreadId?: ThreadId | undefined;
+  readonly replyRelation?: CivilizationCorrespondenceReplyRelation | undefined;
+  readonly replyToMessageId?: CivilizationMessageId | undefined;
+  readonly acknowledged?: boolean | undefined;
+  readonly terminal?: boolean | undefined;
+  readonly deliveryEpoch?: number | undefined;
+  readonly from?: string | undefined;
+  readonly to?: string | undefined;
+  readonly cursor?: CivilizationCorrespondenceCursor | undefined;
+  readonly limit?: number | undefined;
+}) {
+  const auth = yield* currentCivilizationAuth;
+  return yield* fetchEnvironmentCivilizationCorrespondencePage({ ...input, ...auth });
+});
+
+export const fetchCurrentEnvironmentCivilizationCorrespondenceThread = Effect.fn(
+  "clientRuntime.state.fetchCurrentEnvironmentCivilizationCorrespondenceThread",
+)(function* (input: {
+  readonly prepared: PreparedConnection;
+  readonly projectId: ProjectId;
+  readonly messageId: CivilizationMessageId;
+  readonly ancestorLimit?: number | undefined;
+  readonly descendantLimit?: number | undefined;
+}) {
+  const auth = yield* currentCivilizationAuth;
+  return yield* fetchEnvironmentCivilizationCorrespondenceThread({ ...input, ...auth });
 });
 
 export type EnvironmentCivilizationDataAction =

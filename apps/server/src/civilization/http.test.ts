@@ -4,6 +4,7 @@ import {
   CivilizationAchievementCursor,
   CivilizationCensusCursor,
   CivilizationChronicleCursor,
+  CivilizationCorrespondenceCursor,
   CivilizationLineageCursor,
   CivilizationInboxCursor,
   CivilizationMessageId,
@@ -106,6 +107,8 @@ const fakeMail = MailService.CivilizationMailService.of({
   offerInboxForContext: () => Effect.die("unused context inbox offer"),
   listAdminMail: () => Effect.die("unused admin mail list"),
   readAdminMessage: () => Effect.die("unused admin mail read"),
+  listCorrespondenceHistory: () => Effect.die("unused correspondence history list"),
+  readCorrespondenceThread: () => Effect.die("unused correspondence thread read"),
   cleanupProject: () => Effect.die("unused mail cleanup"),
 });
 const fakeChronicle = ChronicleService.CivilizationChronicleService.of({
@@ -303,6 +306,8 @@ it.effect(
               "/api/civilization/context-inspections/context%3Aread-only?projectId=project%3Aread-only",
               "/api/civilization/inbox?projectId=project%3Aread-only",
               "/api/civilization/inbox/mail%3Aread-only?projectId=project%3Aread-only",
+              "/api/civilization/correspondence?projectId=project%3Aread-only",
+              "/api/civilization/correspondence/mail%3Aread-only/thread?projectId=project%3Aread-only",
               "/api/civilization/export?projectId=project%3Aread-only",
               "/api/civilization/purge/preview?projectId=project%3Aread-only",
               "/api/civilization/retention?projectId=project%3Aread-only",
@@ -884,6 +889,11 @@ it.effect(
         readonly projectId: ProjectId;
         readonly messageId: CivilizationMessageId;
       } | null>(null);
+      const correspondenceInput = yield* Ref.make<MailService.CorrespondenceHistoryInput | null>(
+        null,
+      );
+      const correspondenceThreadInput =
+        yield* Ref.make<MailService.CorrespondenceThreadInput | null>(null);
       const summary = {
         messageId,
         senderThreadId: ThreadId.make("thread:sender"),
@@ -922,6 +932,35 @@ it.effect(
           ),
         readAdminMessage: (input) =>
           Ref.set(readInput, input).pipe(Effect.as({ projectId, ...summary, body: "hello" })),
+        listCorrespondenceHistory: (input) =>
+          Ref.set(correspondenceInput, input).pipe(
+            Effect.as({
+              projectId,
+              revision: 8,
+              messages: [summary],
+              nextCursor: CivilizationCorrespondenceCursor.make("correspondence-next"),
+              partial: true,
+            }),
+          ),
+        readCorrespondenceThread: (input) =>
+          Ref.set(correspondenceThreadInput, input).pipe(
+            Effect.as({
+              projectId,
+              revision: 8,
+              selectedMessageId: messageId,
+              entries: [
+                {
+                  message: summary,
+                  relation: "selected" as const,
+                  depth: 0,
+                  unresolvedParent: false,
+                },
+              ],
+              rootStatus: "resolved" as const,
+              ancestorTruncated: false,
+              descendantsTruncated: false,
+            }),
+          ),
       });
 
       return yield* Effect.acquireUseRelease(
@@ -961,14 +1000,68 @@ it.effect(
             );
             expect(read.status).toBe(200);
             expect(await read.json()).toMatchObject({ projectId, messageId, body: "hello" });
+
+            const correspondence = await server.handler(
+              new Request(
+                `http://127.0.0.1/api/civilization/correspondence?projectId=${encodeURIComponent(projectId)}&participantThreadId=thread%3Asender&replyRelation=root&acknowledged=false&terminal=true&deliveryEpoch=4&from=${encodeURIComponent("2026-10-16T09:00:00.000Z")}&to=${encodeURIComponent("2026-10-16T11:00:00.000Z")}&cursor=correspondence-cursor&limit=2`,
+              ),
+              requestContext,
+            );
+            expect(correspondence.status).toBe(200);
+            expect(await correspondence.json()).toMatchObject({
+              projectId,
+              revision: 8,
+              nextCursor: "correspondence-next",
+              partial: true,
+              messages: [{ messageId }],
+            });
+
+            const thread = await server.handler(
+              new Request(
+                `http://127.0.0.1/api/civilization/correspondence/${encodeURIComponent(messageId)}/thread?projectId=${encodeURIComponent(projectId)}&ancestorLimit=3&descendantLimit=4`,
+              ),
+              requestContext,
+            );
+            expect(thread.status).toBe(200);
+            expect(await thread.json()).toMatchObject({
+              projectId,
+              revision: 8,
+              selectedMessageId: messageId,
+              rootStatus: "resolved",
+            });
           }),
         (server) => Effect.promise(() => server.dispose()),
       ).pipe(
-        Effect.andThen(Effect.all({ list: Ref.get(listInput), read: Ref.get(readInput) })),
+        Effect.andThen(
+          Effect.all({
+            list: Ref.get(listInput),
+            read: Ref.get(readInput),
+            correspondence: Ref.get(correspondenceInput),
+            correspondenceThread: Ref.get(correspondenceThreadInput),
+          }),
+        ),
         Effect.tap((inputs) =>
           Effect.sync(() => {
             expect(inputs.list).toEqual({ projectId, cursor: "mail-cursor", limit: 2 });
             expect(inputs.read).toEqual({ projectId, messageId });
+            expect(inputs.correspondence).toEqual({
+              projectId,
+              participantThreadId: ThreadId.make("thread:sender"),
+              replyRelation: "root",
+              acknowledged: false,
+              terminal: true,
+              deliveryEpoch: 4,
+              from: "2026-10-16T09:00:00.000Z",
+              to: "2026-10-16T11:00:00.000Z",
+              cursor: "correspondence-cursor",
+              limit: 2,
+            });
+            expect(inputs.correspondenceThread).toEqual({
+              projectId,
+              messageId,
+              ancestorLimit: 3,
+              descendantLimit: 4,
+            });
           }),
         ),
       );

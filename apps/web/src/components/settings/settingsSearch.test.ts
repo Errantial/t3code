@@ -130,6 +130,7 @@ describe("searchSettings", () => {
     ["civilization achievements", "civilization-chronicle"],
     ["resolved notes", "civilization-notes"],
     ["retained mail body", "civilization-retained-mail"],
+    ["reply chain", "civilization-retained-mail"],
     ["purge project data", "civilization-data-retention"],
   ])("finds Civilization settings for %s", (query, id) => {
     expect(searchSettings(query).map((item) => item.id)).toContain(id);

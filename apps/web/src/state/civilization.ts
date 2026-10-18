@@ -3,6 +3,8 @@ import {
   type CivilizationCensusCursor,
   type CivilizationChronicleCursor,
   type CivilizationChronicleKind,
+  type CivilizationCorrespondenceCursor,
+  type CivilizationCorrespondenceReplyRelation,
   type CivilizationLineageCursor,
   type CivilizationContextInspectionCursor,
   type CivilizationContextInspectionId,
@@ -29,6 +31,8 @@ import {
   fetchCurrentEnvironmentCivilizationLineageNeighborhood,
   fetchCurrentEnvironmentCivilizationContextInspectionDetail,
   fetchCurrentEnvironmentCivilizationContextInspectionPage,
+  fetchCurrentEnvironmentCivilizationCorrespondencePage,
+  fetchCurrentEnvironmentCivilizationCorrespondenceThread,
   fetchCurrentEnvironmentCivilizationNoteBody,
   fetchCurrentEnvironmentCivilizationNotesPage,
   fetchEnvironmentCivilizationOverview,
@@ -620,6 +624,163 @@ export function useCivilizationRetainedMailPage(
       ? null
       : civilizationRetainedMailPageAtom(
           civilizationProjectPageKey([environmentId, projectId, cursor, limit]),
+        );
+  return useEnvironmentQuery(atom);
+}
+
+export interface CivilizationCorrespondenceFilters {
+  readonly participantThreadId?: ThreadId | undefined;
+  readonly senderThreadId?: ThreadId | undefined;
+  readonly recipientThreadId?: ThreadId | undefined;
+  readonly replyRelation?: CivilizationCorrespondenceReplyRelation | undefined;
+  readonly replyToMessageId?: CivilizationMessageId | undefined;
+  readonly acknowledged?: boolean | undefined;
+  readonly terminal?: boolean | undefined;
+  readonly deliveryEpoch?: number | undefined;
+  readonly from?: string | undefined;
+  readonly to?: string | undefined;
+}
+
+const civilizationCorrespondencePageAtom = Atom.family((serializedKey: string) => {
+  const [
+    rawEnvironmentId,
+    rawProjectId,
+    rawParticipantThreadId,
+    rawSenderThreadId,
+    rawRecipientThreadId,
+    rawReplyRelation,
+    rawReplyToMessageId,
+    rawAcknowledged,
+    rawTerminal,
+    rawDeliveryEpoch,
+    rawFrom,
+    rawTo,
+    rawCursor,
+    rawLimit,
+  ] = JSON.parse(serializedKey) as [
+    string,
+    string,
+    string | null,
+    string | null,
+    string | null,
+    CivilizationCorrespondenceReplyRelation | null,
+    string | null,
+    boolean | null,
+    boolean | null,
+    number | null,
+    string | null,
+    string | null,
+    string | null,
+    number,
+  ];
+  const environmentId = rawEnvironmentId as EnvironmentId;
+  const projectId = ProjectId.make(rawProjectId);
+  return connectionAtomRuntime
+    .atom((get) => {
+      const prepared = Option.getOrNull(
+        get(environmentSession.preparedConnectionValueAtom(environmentId)),
+      );
+      if (prepared === null) return Effect.never;
+      return fetchCurrentEnvironmentCivilizationCorrespondencePage({
+        prepared,
+        projectId,
+        ...(rawParticipantThreadId === null
+          ? {}
+          : { participantThreadId: ThreadId.make(rawParticipantThreadId) }),
+        ...(rawSenderThreadId === null ? {} : { senderThreadId: ThreadId.make(rawSenderThreadId) }),
+        ...(rawRecipientThreadId === null
+          ? {}
+          : { recipientThreadId: ThreadId.make(rawRecipientThreadId) }),
+        ...(rawReplyRelation === null ? {} : { replyRelation: rawReplyRelation }),
+        ...(rawReplyToMessageId === null
+          ? {}
+          : { replyToMessageId: rawReplyToMessageId as CivilizationMessageId }),
+        ...(rawAcknowledged === null ? {} : { acknowledged: rawAcknowledged }),
+        ...(rawTerminal === null ? {} : { terminal: rawTerminal }),
+        ...(rawDeliveryEpoch === null ? {} : { deliveryEpoch: rawDeliveryEpoch }),
+        ...(rawFrom === null ? {} : { from: rawFrom }),
+        ...(rawTo === null ? {} : { to: rawTo }),
+        ...(rawCursor === null ? {} : { cursor: rawCursor as CivilizationCorrespondenceCursor }),
+        limit: rawLimit,
+      });
+    })
+    .pipe(Atom.setIdleTTL(60_000), Atom.withLabel(`civilization-correspondence:${serializedKey}`));
+});
+
+export function useCivilizationCorrespondencePage(
+  environmentId: EnvironmentId | null,
+  projectId: ProjectId | null,
+  filters: CivilizationCorrespondenceFilters,
+  cursor: CivilizationCorrespondenceCursor | null,
+  limit: number,
+) {
+  const atom =
+    environmentId === null || projectId === null
+      ? null
+      : civilizationCorrespondencePageAtom(
+          civilizationProjectPageKey([
+            environmentId,
+            projectId,
+            filters.participantThreadId ?? null,
+            filters.senderThreadId ?? null,
+            filters.recipientThreadId ?? null,
+            filters.replyRelation ?? null,
+            filters.replyToMessageId ?? null,
+            filters.acknowledged ?? null,
+            filters.terminal ?? null,
+            filters.deliveryEpoch ?? null,
+            filters.from ?? null,
+            filters.to ?? null,
+            cursor,
+            limit,
+          ]),
+        );
+  return useEnvironmentQuery(atom);
+}
+
+const civilizationCorrespondenceThreadAtom = Atom.family((serializedKey: string) => {
+  const [rawEnvironmentId, rawProjectId, rawMessageId, rawAncestorLimit, rawDescendantLimit] =
+    JSON.parse(serializedKey) as [string, string, string, number, number];
+  const environmentId = rawEnvironmentId as EnvironmentId;
+  const projectId = ProjectId.make(rawProjectId);
+  return connectionAtomRuntime
+    .atom((get) => {
+      const prepared = Option.getOrNull(
+        get(environmentSession.preparedConnectionValueAtom(environmentId)),
+      );
+      if (prepared === null) return Effect.never;
+      return fetchCurrentEnvironmentCivilizationCorrespondenceThread({
+        prepared,
+        projectId,
+        messageId: rawMessageId as CivilizationMessageId,
+        ancestorLimit: rawAncestorLimit,
+        descendantLimit: rawDescendantLimit,
+      });
+    })
+    .pipe(
+      Atom.setIdleTTL(60_000),
+      Atom.withLabel(`civilization-correspondence-thread:${serializedKey}`),
+    );
+});
+
+export function useCivilizationCorrespondenceThread(
+  environmentId: EnvironmentId | null,
+  projectId: ProjectId | null,
+  messageId: CivilizationMessageId | null,
+  ancestorLimit: number,
+  descendantLimit: number,
+) {
+  const atom =
+    environmentId === null || projectId === null || messageId === null
+      ? null
+      : civilizationCorrespondenceThreadAtom(
+          civilizationProjectPageKey([
+            environmentId,
+            projectId,
+            messageId,
+            ancestorLimit,
+            descendantLimit,
+          ]),
         );
   return useEnvironmentQuery(atom);
 }

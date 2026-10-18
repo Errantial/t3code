@@ -1053,9 +1053,11 @@ export const SETTINGS_SEARCH_ITEMS = [
   },
   {
     id: "civilization-retained-mail",
-    title: "Civilization retained mail",
+    title: "Civilization correspondence history",
     to: "/settings/civilization",
-    searchTerms: ["retained mail admin inbox message metadata body expiry acknowledgment"],
+    searchTerms: [
+      "correspondence history retained mail admin inbox message metadata body reply chain participant lifecycle epoch expiry acknowledgment",
+    ],
   },
   {
     id: "civilization-data-retention",

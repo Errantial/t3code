@@ -3,6 +3,11 @@ import {
   CIVILIZATION_MAX_MESSAGE_BYTES,
   type CivilizationAdminMailPage,
   CivilizationAgentAccessError,
+  CivilizationCorrespondenceCursor,
+  type CivilizationCorrespondenceHistoryPage,
+  type CivilizationCorrespondenceReplyRelation,
+  type CivilizationCorrespondenceThreadEntry,
+  type CivilizationCorrespondenceThreadPage,
   CivilizationInboxCursor,
   type CivilizationInboxPage,
   type CivilizationMailAcknowledgeResult,
@@ -29,6 +34,7 @@ import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as NodeCrypto from "node:crypto";
@@ -40,6 +46,7 @@ import { makeCivilizationDiagnostics } from "./Diagnostics.ts";
 import { resolveCivilizationProviderCapability } from "./ProviderCapability.ts";
 
 const CURSOR_VERSION = 1 as const;
+const CORRESPONDENCE_MAX_ANCESTORS = 32;
 const LIVE_RUN_STATUSES = new Set(["preparing", "queued", "starting", "running", "waiting"]);
 
 type MailTerminalReason =
@@ -109,6 +116,7 @@ type PrincipalRow = {
 
 type ProjectStateRow = {
   readonly mail_revision: number;
+  readonly mail_history_revision: number;
   readonly retained_message_count: number;
   readonly retained_body_bytes: number;
 };
@@ -139,6 +147,7 @@ type MessageRow = {
   readonly terminal_at: string | null;
   readonly terminal_reason: MailTerminalReason | null;
 };
+type MessageSummaryRow = Omit<MessageRow, "body">;
 
 type ReceiptRow = {
   readonly project_id: ProjectId;
@@ -177,6 +186,48 @@ interface AdminInboxCursorPayload {
   readonly revision: number;
   readonly afterAcceptedAt: string;
   readonly afterMessageId: string;
+}
+
+interface CorrespondenceCursorPayload {
+  readonly v: 1;
+  readonly kind: "correspondence";
+  readonly projectId: ProjectId;
+  readonly revision: number;
+  readonly participantThreadId: ThreadId | null;
+  readonly senderThreadId: ThreadId | null;
+  readonly recipientThreadId: ThreadId | null;
+  readonly replyRelation: CivilizationCorrespondenceReplyRelation;
+  readonly replyToMessageId: string | null;
+  readonly acknowledged: boolean | null;
+  readonly terminal: boolean | null;
+  readonly deliveryEpoch: number | null;
+  readonly from: string | null;
+  readonly to: string | null;
+  readonly afterAcceptedAt: string;
+  readonly afterMessageId: string;
+}
+
+export interface CorrespondenceHistoryInput {
+  readonly projectId: ProjectId;
+  readonly participantThreadId?: ThreadId | undefined;
+  readonly senderThreadId?: ThreadId | undefined;
+  readonly recipientThreadId?: ThreadId | undefined;
+  readonly replyRelation?: CivilizationCorrespondenceReplyRelation | undefined;
+  readonly replyToMessageId?: CivilizationMessageIdType | undefined;
+  readonly acknowledged?: boolean | undefined;
+  readonly terminal?: boolean | undefined;
+  readonly deliveryEpoch?: number | undefined;
+  readonly from?: string | undefined;
+  readonly to?: string | undefined;
+  readonly cursor?: string | undefined;
+  readonly limit?: number | undefined;
+}
+
+export interface CorrespondenceThreadInput {
+  readonly projectId: ProjectId;
+  readonly messageId: CivilizationMessageIdType;
+  readonly ancestorLimit?: number | undefined;
+  readonly descendantLimit?: number | undefined;
 }
 
 export interface CivilizationMailCaller {
@@ -282,7 +333,7 @@ const payloadHash = (value: unknown) =>
 
 const newMessageId = () => CivilizationMessageId.make(`mail:${NodeCrypto.randomUUID()}`);
 
-const messageSummary = (row: MessageRow): CivilizationMailSummary => ({
+const messageSummary = (row: MessageSummaryRow): CivilizationMailSummary => ({
   messageId: CivilizationMessageId.make(row.message_id),
   senderThreadId: row.sender_thread_id,
   senderNameAtSend: row.sender_name_at_send,
@@ -385,6 +436,78 @@ const decodeAdminInboxCursor = (
       "The Civilization administrative inbox cursor is invalid or stale.",
     );
   }
+};
+
+const encodeCorrespondenceCursor = (payload: Omit<CorrespondenceCursorPayload, "v" | "kind">) =>
+  CivilizationCorrespondenceCursor.make(
+    Buffer.from(
+      JSON.stringify({ v: CURSOR_VERSION, kind: "correspondence", ...payload }),
+      "utf8",
+    ).toString("base64url"),
+  );
+
+const correspondenceFilterIdentity = (input: CorrespondenceHistoryInput) => ({
+  participantThreadId: input.participantThreadId ?? null,
+  senderThreadId: input.senderThreadId ?? null,
+  recipientThreadId: input.recipientThreadId ?? null,
+  replyRelation: input.replyRelation ?? "any",
+  replyToMessageId: input.replyToMessageId ?? null,
+  acknowledged: input.acknowledged ?? null,
+  terminal: input.terminal ?? null,
+  deliveryEpoch: input.deliveryEpoch ?? null,
+  from: input.from ?? null,
+  to: input.to ?? null,
+});
+
+const decodeCorrespondenceCursor = (
+  cursor: string | undefined,
+  input: CorrespondenceHistoryInput,
+  revision: number,
+): CorrespondenceCursorPayload | undefined => {
+  if (cursor === undefined) return undefined;
+  try {
+    const bytes = Buffer.from(cursor, "base64url");
+    if (bytes.length === 0 || bytes.toString("base64url") !== cursor) throw new Error("cursor");
+    const parsed = JSON.parse(bytes.toString("utf8")) as Partial<CorrespondenceCursorPayload>;
+    const filters = correspondenceFilterIdentity(input);
+    if (
+      parsed.v !== CURSOR_VERSION ||
+      parsed.kind !== "correspondence" ||
+      parsed.projectId !== input.projectId ||
+      parsed.revision !== revision ||
+      parsed.participantThreadId !== filters.participantThreadId ||
+      parsed.senderThreadId !== filters.senderThreadId ||
+      parsed.recipientThreadId !== filters.recipientThreadId ||
+      parsed.replyRelation !== filters.replyRelation ||
+      parsed.replyToMessageId !== filters.replyToMessageId ||
+      parsed.acknowledged !== filters.acknowledged ||
+      parsed.terminal !== filters.terminal ||
+      parsed.deliveryEpoch !== filters.deliveryEpoch ||
+      parsed.from !== filters.from ||
+      parsed.to !== filters.to ||
+      typeof parsed.afterAcceptedAt !== "string" ||
+      typeof parsed.afterMessageId !== "string"
+    ) {
+      throw new Error("cursor mismatch");
+    }
+    return parsed as CorrespondenceCursorPayload;
+  } catch {
+    throw invalid("invalid_cursor", "The Civilization correspondence cursor is invalid or stale.");
+  }
+};
+
+const normalizeCorrespondenceTime = (value: string | undefined): string | undefined => {
+  if (value === undefined) return undefined;
+  const parsed = DateTime.make(value);
+  if (Option.isNone(parsed)) {
+    throw invalid("invalid_cursor", "Correspondence time filters must be valid timestamps.");
+  }
+  return DateTime.formatIso(parsed.value);
+};
+
+const compareMessageRows = (left: MessageSummaryRow, right: MessageSummaryRow): number => {
+  const byTime = right.accepted_at.localeCompare(left.accepted_at);
+  return byTime !== 0 ? byTime : right.message_id.localeCompare(left.message_id);
 };
 
 const threadKind = (citizen: CitizenMailRow): "root" | "fork" | "subagent" | undefined =>
@@ -1150,10 +1273,10 @@ const make = Effect.gen(function* () {
       }),
     );
     const time = yield* currentTime(sql);
-    const rows = yield* sql<MessageRow>`
+    const rows = yield* sql<MessageSummaryRow>`
       SELECT message_id, project_id, sender_thread_id, sender_name_at_send,
              sender_citizen_epoch, sender_run_id, recipient_thread_id, recipient_delivery_epoch,
-             reply_to_message_id, body, body_bytes, accepted_runtime_mode,
+             reply_to_message_id, body_bytes, accepted_runtime_mode,
              accepted_interaction_mode, accepted_environment_revision, accepted_project_revision,
              accepted_at, expires_at, terminal_retention_days, first_offered_at, last_offered_at,
              offer_count, acknowledged_at, terminal_at, terminal_reason
@@ -1745,6 +1868,405 @@ const make = Effect.gen(function* () {
     } satisfies CivilizationAdminMailPage;
   });
 
+  const listCorrespondenceHistory = Effect.fn("CivilizationMail.listCorrespondenceHistory")(
+    function* (input: CorrespondenceHistoryInput) {
+      return yield* sql.withTransaction(
+        Effect.gen(function* () {
+          const effective = yield* getEffectiveCivilizationConfig(input.projectId).pipe(
+            Effect.provideService(SqlClient.SqlClient, sql),
+          );
+          const limit = yield* mailSync(() => {
+            if (
+              input.limit !== undefined &&
+              (!Number.isSafeInteger(input.limit) || input.limit < 1)
+            ) {
+              throw invalid(
+                "invalid_cursor",
+                "Correspondence history limit must be a positive integer.",
+              );
+            }
+            if (
+              input.deliveryEpoch !== undefined &&
+              (!Number.isSafeInteger(input.deliveryEpoch) || input.deliveryEpoch < 0)
+            ) {
+              throw invalid(
+                "invalid_cursor",
+                "Correspondence delivery epoch must be a non-negative integer.",
+              );
+            }
+            return Math.min(
+              input.limit ?? effective.config.operations.inboxPageSize,
+              effective.config.operations.inboxPageSize,
+            );
+          });
+          const normalized = yield* mailSync(() => {
+            const from = normalizeCorrespondenceTime(input.from);
+            const to = normalizeCorrespondenceTime(input.to);
+            if (from !== undefined && to !== undefined && from >= to) {
+              throw invalid(
+                "invalid_cursor",
+                "Correspondence time filters must define a non-empty ascending range.",
+              );
+            }
+            const replyRelation = input.replyRelation ?? "any";
+            if (
+              (replyRelation === "replies_to" && input.replyToMessageId === undefined) ||
+              (replyRelation !== "replies_to" && input.replyToMessageId !== undefined)
+            ) {
+              throw invalid(
+                "invalid_cursor",
+                "Correspondence reply filters must pair replies_to with a parent message id.",
+              );
+            }
+            return {
+              ...input,
+              replyRelation,
+              ...(from === undefined ? { from: undefined } : { from }),
+              ...(to === undefined ? { to: undefined } : { to }),
+            } satisfies CorrespondenceHistoryInput;
+          });
+          const state = (yield* sql<{ readonly mail_history_revision: number }>`
+            SELECT mail_history_revision FROM civilization_project_state
+            WHERE project_id = ${input.projectId} LIMIT 1
+          `)[0] ?? { mail_history_revision: 0 };
+          const cursor = yield* mailSync(() =>
+            decodeCorrespondenceCursor(normalized.cursor, normalized, state.mail_history_revision),
+          );
+          const queryLimit = limit + 1;
+
+          const queryBranch = Effect.fn("CivilizationMail.queryCorrespondenceBranch")(function* (
+            participantColumn?: "sender_thread_id" | "recipient_thread_id",
+          ) {
+            const clauses = ["project_id = ?"];
+            const params: Array<unknown> = [normalized.projectId];
+            if (participantColumn !== undefined && normalized.participantThreadId !== undefined) {
+              clauses.push(`${participantColumn} = ?`);
+              params.push(normalized.participantThreadId);
+            }
+            if (normalized.senderThreadId !== undefined) {
+              clauses.push("sender_thread_id = ?");
+              params.push(normalized.senderThreadId);
+            }
+            if (normalized.recipientThreadId !== undefined) {
+              clauses.push("recipient_thread_id = ?");
+              params.push(normalized.recipientThreadId);
+            }
+            if (normalized.replyRelation === "root") {
+              clauses.push("reply_to_message_id IS NULL");
+            } else if (normalized.replyRelation === "replies_to") {
+              clauses.push("reply_to_message_id = ?");
+              params.push(normalized.replyToMessageId!);
+            }
+            if (normalized.acknowledged !== undefined) {
+              clauses.push(
+                normalized.acknowledged ? "acknowledged_at IS NOT NULL" : "acknowledged_at IS NULL",
+              );
+            }
+            if (normalized.terminal !== undefined) {
+              clauses.push(normalized.terminal ? "terminal_at IS NOT NULL" : "terminal_at IS NULL");
+            }
+            if (normalized.deliveryEpoch !== undefined) {
+              clauses.push("recipient_delivery_epoch = ?");
+              params.push(normalized.deliveryEpoch);
+            }
+            if (normalized.from !== undefined) {
+              clauses.push("accepted_at >= ?");
+              params.push(normalized.from);
+            }
+            if (normalized.to !== undefined) {
+              clauses.push("accepted_at < ?");
+              params.push(normalized.to);
+            }
+            if (cursor !== undefined) {
+              clauses.push("(accepted_at < ? OR (accepted_at = ? AND message_id < ?))");
+              params.push(cursor.afterAcceptedAt, cursor.afterAcceptedAt, cursor.afterMessageId);
+            }
+            params.push(queryLimit);
+            return yield* sql.unsafe<MessageSummaryRow>(
+              `SELECT message_id, project_id, sender_thread_id, sender_name_at_send,
+                      sender_citizen_epoch, sender_run_id, recipient_thread_id,
+                      recipient_delivery_epoch, reply_to_message_id, body_bytes,
+                      accepted_runtime_mode, accepted_interaction_mode,
+                      accepted_environment_revision, accepted_project_revision,
+                      accepted_at, expires_at, terminal_retention_days,
+                      first_offered_at, last_offered_at, offer_count,
+                      acknowledged_at, terminal_at, terminal_reason
+               FROM civilization_messages
+               WHERE ${clauses.join(" AND ")}
+               ORDER BY accepted_at DESC, message_id DESC
+               LIMIT ?`,
+              params,
+            );
+          });
+
+          const rows =
+            normalized.participantThreadId === undefined
+              ? yield* queryBranch()
+              : (() => undefined)();
+          const mergedRows =
+            normalized.participantThreadId === undefined
+              ? (rows as ReadonlyArray<MessageSummaryRow>)
+              : yield* Effect.gen(function* () {
+                  const [sent, received] = yield* Effect.all([
+                    queryBranch("sender_thread_id"),
+                    queryBranch("recipient_thread_id"),
+                  ]);
+                  const byId = new Map<string, MessageSummaryRow>();
+                  for (const row of sent) byId.set(row.message_id, row);
+                  for (const row of received) byId.set(row.message_id, row);
+                  return [...byId.values()].sort(compareMessageRows).slice(0, queryLimit);
+                });
+
+          const messages: Array<CivilizationMailSummary> = [];
+          let byteLimited = false;
+          for (const row of mergedRows.slice(0, limit)) {
+            const candidate = messageSummary(row);
+            const filters = correspondenceFilterIdentity(normalized);
+            const candidatePage = {
+              projectId: normalized.projectId,
+              revision: state.mail_history_revision,
+              messages: [...messages, candidate],
+              nextCursor: encodeCorrespondenceCursor({
+                projectId: normalized.projectId,
+                revision: state.mail_history_revision,
+                ...filters,
+                afterAcceptedAt: row.accepted_at,
+                afterMessageId: row.message_id,
+              }),
+              partial: true,
+            } satisfies CivilizationCorrespondenceHistoryPage;
+            if (responseBytes(candidatePage) > effective.config.operations.responseBodyBytes) {
+              byteLimited = true;
+              break;
+            }
+            messages.push(candidate);
+          }
+          if (mergedRows.length > 0 && messages.length === 0) {
+            return yield* invalid(
+              "response_too_large",
+              "The configured Civilization response-body limit cannot fit one correspondence entry.",
+            );
+          }
+          const partial = byteLimited || mergedRows.length > messages.length;
+          const last = messages.length === 0 ? undefined : mergedRows[messages.length - 1];
+          return {
+            projectId: normalized.projectId,
+            revision: state.mail_history_revision,
+            messages,
+            nextCursor:
+              !partial || last === undefined
+                ? null
+                : encodeCorrespondenceCursor({
+                    projectId: normalized.projectId,
+                    revision: state.mail_history_revision,
+                    ...correspondenceFilterIdentity(normalized),
+                    afterAcceptedAt: last.accepted_at,
+                    afterMessageId: last.message_id,
+                  }),
+            partial,
+          } satisfies CivilizationCorrespondenceHistoryPage;
+        }),
+      );
+    },
+  );
+
+  const readCorrespondenceThread = Effect.fn("CivilizationMail.readCorrespondenceThread")(
+    function* (input: CorrespondenceThreadInput) {
+      return yield* sql.withTransaction(
+        Effect.gen(function* () {
+          const effective = yield* getEffectiveCivilizationConfig(input.projectId).pipe(
+            Effect.provideService(SqlClient.SqlClient, sql),
+          );
+          const { ancestorLimit, descendantLimit } = yield* mailSync(() => {
+            const ancestor = Math.min(input.ancestorLimit ?? 12, CORRESPONDENCE_MAX_ANCESTORS);
+            const descendant = Math.min(
+              input.descendantLimit ?? effective.config.operations.inboxPageSize,
+              effective.config.operations.inboxPageSize,
+            );
+            if (
+              !Number.isSafeInteger(ancestor) ||
+              ancestor < 1 ||
+              !Number.isSafeInteger(descendant) ||
+              descendant < 1
+            ) {
+              throw invalid(
+                "invalid_cursor",
+                "Correspondence traversal limits must be positive integers.",
+              );
+            }
+            return { ancestorLimit: ancestor, descendantLimit: descendant };
+          });
+          const state = (yield* sql<{ readonly mail_history_revision: number }>`
+            SELECT mail_history_revision FROM civilization_project_state
+            WHERE project_id = ${input.projectId} LIMIT 1
+          `)[0] ?? { mail_history_revision: 0 };
+          const selected = (yield* sql<MessageSummaryRow>`
+            SELECT message_id, project_id, sender_thread_id, sender_name_at_send,
+                   sender_citizen_epoch, sender_run_id, recipient_thread_id,
+                   recipient_delivery_epoch, reply_to_message_id, body_bytes,
+                   accepted_runtime_mode, accepted_interaction_mode,
+                   accepted_environment_revision, accepted_project_revision,
+                   accepted_at, expires_at, terminal_retention_days,
+                   first_offered_at, last_offered_at, offer_count,
+                   acknowledged_at, terminal_at, terminal_reason
+            FROM civilization_messages
+            WHERE project_id = ${input.projectId} AND message_id = ${input.messageId}
+            LIMIT 1
+          `)[0];
+          if (selected === undefined) {
+            return yield* new CivilizationMailNotFoundError({
+              code: "civilization_mail_not_found",
+              messageId: input.messageId,
+            });
+          }
+
+          type TraversalRow = MessageSummaryRow & {
+            readonly traversal_depth: number;
+            readonly parent_exists: number;
+          };
+          const ancestors = yield* sql.unsafe<TraversalRow>(
+            `WITH RECURSIVE ancestors AS (
+               SELECT message_id, project_id, sender_thread_id, sender_name_at_send,
+                      sender_citizen_epoch, sender_run_id, recipient_thread_id,
+                      recipient_delivery_epoch, reply_to_message_id, body_bytes,
+                      accepted_runtime_mode, accepted_interaction_mode,
+                      accepted_environment_revision, accepted_project_revision,
+                      accepted_at, expires_at, terminal_retention_days,
+                      first_offered_at, last_offered_at, offer_count,
+                      acknowledged_at, terminal_at, terminal_reason, 0 AS traversal_depth
+               FROM civilization_messages
+               WHERE project_id = ? AND message_id = ?
+               UNION ALL
+               SELECT p.message_id, p.project_id, p.sender_thread_id, p.sender_name_at_send,
+                      p.sender_citizen_epoch, p.sender_run_id, p.recipient_thread_id,
+                      p.recipient_delivery_epoch, p.reply_to_message_id, p.body_bytes,
+                      p.accepted_runtime_mode, p.accepted_interaction_mode,
+                      p.accepted_environment_revision, p.accepted_project_revision,
+                      p.accepted_at, p.expires_at, p.terminal_retention_days,
+                      p.first_offered_at, p.last_offered_at, p.offer_count,
+                      p.acknowledged_at, p.terminal_at, p.terminal_reason,
+                      a.traversal_depth + 1
+               FROM civilization_messages p
+               JOIN ancestors a
+                 ON p.project_id = a.project_id AND p.message_id = a.reply_to_message_id
+               WHERE a.traversal_depth < ?
+             )
+             SELECT a.*,
+                    CASE WHEN a.reply_to_message_id IS NULL THEN 1 ELSE EXISTS(
+                      SELECT 1 FROM civilization_messages p
+                      WHERE p.project_id = a.project_id AND p.message_id = a.reply_to_message_id
+                    ) END AS parent_exists
+             FROM ancestors a
+             WHERE a.traversal_depth > 0
+             ORDER BY a.traversal_depth DESC
+             LIMIT ?`,
+            [input.projectId, input.messageId, ancestorLimit, ancestorLimit],
+          );
+          const ancestorById = new Set(ancestors.map((row) => row.message_id));
+          const selectedParentExists =
+            selected.reply_to_message_id === null
+              ? true
+              : ancestorById.has(selected.reply_to_message_id) ||
+                (yield* sql<{ readonly count: number }>`
+                  SELECT COUNT(*) AS count FROM civilization_messages
+                  WHERE project_id = ${input.projectId}
+                    AND message_id = ${selected.reply_to_message_id}
+                `)[0]?.count === 1;
+          const farthestAncestor = ancestors[0];
+          const rootStatus =
+            ancestors.length === 0
+              ? selected.reply_to_message_id === null
+                ? ("resolved" as const)
+                : selectedParentExists
+                  ? ("depth_limit" as const)
+                  : ("missing_parent" as const)
+              : farthestAncestor?.reply_to_message_id === null
+                ? ("resolved" as const)
+                : farthestAncestor?.parent_exists === 0
+                  ? ("missing_parent" as const)
+                  : ("depth_limit" as const);
+          const ancestorTruncated = rootStatus === "depth_limit";
+
+          const descendants = yield* sql.unsafe<TraversalRow & { readonly sort_path: string }>(
+            `WITH RECURSIVE descendants AS (
+               SELECT m.message_id, m.project_id, m.sender_thread_id, m.sender_name_at_send,
+                      m.sender_citizen_epoch, m.sender_run_id, m.recipient_thread_id,
+                      m.recipient_delivery_epoch, m.reply_to_message_id, m.body_bytes,
+                      m.accepted_runtime_mode, m.accepted_interaction_mode,
+                      m.accepted_environment_revision, m.accepted_project_revision,
+                      m.accepted_at, m.expires_at, m.terminal_retention_days,
+                      m.first_offered_at, m.last_offered_at, m.offer_count,
+                      m.acknowledged_at, m.terminal_at, m.terminal_reason,
+                      1 AS traversal_depth,
+                      (m.accepted_at || ':' || m.message_id) AS sort_path
+               FROM civilization_messages m
+               WHERE m.project_id = ? AND m.reply_to_message_id = ?
+               UNION ALL
+               SELECT m.message_id, m.project_id, m.sender_thread_id, m.sender_name_at_send,
+                      m.sender_citizen_epoch, m.sender_run_id, m.recipient_thread_id,
+                      m.recipient_delivery_epoch, m.reply_to_message_id, m.body_bytes,
+                      m.accepted_runtime_mode, m.accepted_interaction_mode,
+                      m.accepted_environment_revision, m.accepted_project_revision,
+                      m.accepted_at, m.expires_at, m.terminal_retention_days,
+                      m.first_offered_at, m.last_offered_at, m.offer_count,
+                      m.acknowledged_at, m.terminal_at, m.terminal_reason,
+                      d.traversal_depth + 1,
+                      (d.sort_path || '/' || m.accepted_at || ':' || m.message_id)
+               FROM civilization_messages m
+               JOIN descendants d
+                 ON m.project_id = d.project_id AND m.reply_to_message_id = d.message_id
+               ORDER BY traversal_depth ASC, accepted_at ASC, message_id ASC
+               LIMIT ?
+             )
+             SELECT d.*, 1 AS parent_exists
+             FROM descendants d
+             ORDER BY d.traversal_depth ASC, d.accepted_at ASC, d.message_id ASC
+             LIMIT ?`,
+            [input.projectId, input.messageId, descendantLimit + 1, descendantLimit + 1],
+          );
+          const descendantsTruncated = descendants.length > descendantLimit;
+          const boundedDescendants = descendants.slice(0, descendantLimit);
+          const entries: Array<CivilizationCorrespondenceThreadEntry> = [
+            ...ancestors.map((row) => ({
+              message: messageSummary(row),
+              relation: "ancestor" as const,
+              depth: -row.traversal_depth,
+              unresolvedParent: row.parent_exists === 0,
+            })),
+            {
+              message: messageSummary(selected),
+              relation: "selected" as const,
+              depth: 0,
+              unresolvedParent: !selectedParentExists,
+            },
+            ...boundedDescendants.map((row) => ({
+              message: messageSummary(row),
+              relation: "descendant" as const,
+              depth: row.traversal_depth,
+              unresolvedParent: false,
+            })),
+          ];
+          const page = {
+            projectId: input.projectId,
+            revision: state.mail_history_revision,
+            selectedMessageId: input.messageId,
+            entries,
+            rootStatus,
+            ancestorTruncated,
+            descendantsTruncated,
+          } satisfies CivilizationCorrespondenceThreadPage;
+          if (responseBytes(page) > effective.config.operations.responseBodyBytes) {
+            return yield* invalid(
+              "response_too_large",
+              "The configured Civilization response-body limit cannot fit this correspondence thread view.",
+            );
+          }
+          return page;
+        }),
+      );
+    },
+  );
+
   const cleanupProject = Effect.fn("CivilizationMail.cleanupProject")(function* (
     projectId: ProjectId,
   ) {
@@ -1825,6 +2347,8 @@ const make = Effect.gen(function* () {
     offerInboxForContext,
     listAdminMail,
     readAdminMessage,
+    listCorrespondenceHistory,
+    readCorrespondenceThread,
     cleanupProject,
   } as const;
 });
@@ -1843,6 +2367,8 @@ const unavailableService = {
   offerInboxForContext: () => unavailable(),
   listAdminMail: () => unavailable(),
   readAdminMessage: () => unavailable(),
+  listCorrespondenceHistory: () => unavailable(),
+  readCorrespondenceThread: () => unavailable(),
   cleanupProject: () => unavailable(),
 } satisfies CivilizationMailServiceShape;
 
