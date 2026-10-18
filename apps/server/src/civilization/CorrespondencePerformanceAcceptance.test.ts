@@ -1,5 +1,5 @@
 // @effect-diagnostics nodeBuiltinImport:off -- Acceptance samples process RSS for bounded correspondence reads.
-import { ProjectId, ThreadId } from "@t3tools/contracts";
+import { CIVILIZATION_CONFIG_VERSION, ProjectId, ThreadId } from "@t3tools/contracts";
 import { assert, it } from "@effect/vitest";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 import * as Effect from "effect/Effect";
@@ -13,7 +13,7 @@ import * as MailService from "./MailService.ts";
 
 const PROJECT_ID = ProjectId.make("project:correspondence:performance");
 const TARGET_PARTICIPANT = ThreadId.make("thread:correspondence:0007");
-const MESSAGE_COUNT = 10_000;
+const MESSAGE_COUNT = 100_000;
 const PAGE_SIZE = 50;
 const SAMPLES = 60;
 const P95_BUDGET_MS = 100;
@@ -46,11 +46,12 @@ const mail = MailService.layer.pipe(Layer.provide(dependencies));
 const testLayer = Layer.mergeAll(dependencies, mail);
 
 it.effect(
-  "keeps retained-correspondence page and anchored-thread reads bounded at the configured 10k ceiling",
+  "keeps retained-correspondence page and anchored-thread reads bounded at the max configured 100k ceiling",
   () =>
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
       const service = yield* MailService.CivilizationMailService;
+      const configService = yield* ConfigService.CivilizationConfigService;
       yield* runMigrations();
       yield* sql`
         INSERT INTO projection_projects (
@@ -60,11 +61,19 @@ it.effect(
           '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z', NULL
         )
       `;
+      yield* configService.set({
+        projectId: PROJECT_ID,
+        expectedRevision: 0,
+        override: {
+          version: CIVILIZATION_CONFIG_VERSION,
+          messaging: { retainedMessageCount: MESSAGE_COUNT },
+        },
+      });
       yield* sql`
         WITH digits(n) AS (VALUES (0),(1),(2),(3),(4),(5),(6),(7),(8),(9)),
         numbers(n) AS (
-          SELECT a.n + 10*b.n + 100*c.n + 1000*d.n
-          FROM digits a CROSS JOIN digits b CROSS JOIN digits c CROSS JOIN digits d
+          SELECT a.n + 10*b.n + 100*c.n + 1000*d.n + 10000*e.n
+          FROM digits a CROSS JOIN digits b CROSS JOIN digits c CROSS JOIN digits d CROSS JOIN digits e
         )
         INSERT INTO civilization_messages (
           message_id, project_id, sender_thread_id, sender_name_at_send,
@@ -143,6 +152,7 @@ it.effect(
 
       const pageSamples: number[] = [];
       const participantSamples: number[] = [];
+      const selectiveSamples: number[] = [];
       const threadSamples: number[] = [];
       const rssSamples: number[] = [];
       let maxBytes = 0;
@@ -161,6 +171,18 @@ it.effect(
         );
         participantSamples.push(participant.elapsedMs);
         maxBytes = Math.max(maxBytes, Buffer.byteLength(JSON.stringify(participant.value), "utf8"));
+        const selective = yield* timed(
+          service.listCorrespondenceHistory({
+            projectId: PROJECT_ID,
+            participantThreadId: TARGET_PARTICIPANT,
+            deliveryEpoch: 7,
+            acknowledged: false,
+            terminal: false,
+            limit: PAGE_SIZE,
+          }),
+        );
+        selectiveSamples.push(selective.elapsedMs);
+        maxBytes = Math.max(maxBytes, Buffer.byteLength(JSON.stringify(selective.value), "utf8"));
         const thread = yield* timed(
           service.readCorrespondenceThread({
             projectId: PROJECT_ID,
@@ -176,6 +198,7 @@ it.effect(
 
       assert.isAtMost(percentile(pageSamples, 0.95), P95_BUDGET_MS);
       assert.isAtMost(percentile(participantSamples, 0.95), P95_BUDGET_MS);
+      assert.isAtMost(percentile(selectiveSamples, 0.95), P95_BUDGET_MS);
       assert.isAtMost(percentile(threadSamples, 0.95), P95_BUDGET_MS);
       assert.isAtMost(maxBytes, MAX_RESPONSE_BYTES);
       const plateauStart =
