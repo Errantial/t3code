@@ -117,7 +117,7 @@ const bodyUnavailableMessage = (detail: CivilizationContextInspectionDetail): st
 };
 
 const formatDate = (value: string | null): string => {
-  if (value === null) return "?";
+  if (value === null) return "—";
   const date = new Date(value);
   return Number.isNaN(date.valueOf()) ? value : date.toLocaleString();
 };
@@ -165,7 +165,7 @@ function MetadataValue({
   return (
     <div className="min-w-0">
       <div className="text-2xs uppercase tracking-wide text-muted-foreground">{label}</div>
-      <div className="wrap-anywhere text-xs text-foreground">{value ?? "?"}</div>
+      <div className="wrap-anywhere text-xs text-foreground">{value ?? "—"}</div>
     </div>
   );
 }
@@ -210,14 +210,14 @@ function DetailDialog({
         <DialogHeader>
           <DialogTitle>Civilization historical context</DialogTitle>
           <DialogDescription>
-            Exact host-side record for one provider-turn attempt. ?Provider start accepted? means T3
+            Exact host-side record for one provider-turn attempt. “Provider start accepted” means T3
             handed the turn to the adapter successfully; it does not claim downstream model
             consumption.
           </DialogDescription>
         </DialogHeader>
         <DialogPanel>
           {loading ? (
-            <div className="text-sm text-muted-foreground">Loading sensitive detail?</div>
+            <div className="text-sm text-muted-foreground">Loading sensitive detail…</div>
           ) : null}
           {message === null ? null : <div className="text-sm text-destructive">{message}</div>}
           {detail === null ? null : (
@@ -249,7 +249,7 @@ function DetailDialog({
                       <div key={key} className="rounded-md border border-border/70 p-3 text-xs">
                         <div className="font-medium capitalize">{key}</div>
                         <div className="text-muted-foreground">
-                          {section.included} included ? {section.omitted} omitted ?{" "}
+                          {section.included} included · {section.omitted} omitted ·{" "}
                           {section.candidates} candidates
                         </div>
                       </div>
@@ -583,7 +583,7 @@ export function CivilizationContextInspector({
           </div>
         )}
         {page.isPending && page.data === null ? (
-          <div className="text-sm text-muted-foreground">Loading historical context metadata?</div>
+          <div className="text-sm text-muted-foreground">Loading historical context metadata…</div>
         ) : null}
         {!page.isPending && page.data !== null && rows.length === 0 ? (
           <div className="rounded-md border border-border/70 p-3 text-sm text-muted-foreground">
@@ -610,13 +610,13 @@ export function CivilizationContextInspector({
                         {row.threadId}
                       </Button>
                     )}{" "}
-                    ? run {row.runId} ? attempt {row.attemptId} ? provider turn{" "}
+                    · run {row.runId} · attempt {row.attemptId} · provider turn{" "}
                     {row.providerTurnOrdinal}
                   </div>
                   <div className="text-xs text-muted-foreground">
-                    {row.packetBytes} B ? roster {row.composition.roster.included}/
-                    {row.composition.roster.candidates} ? notes {row.composition.notes.included}/
-                    {row.composition.notes.candidates} ? inbox {row.composition.inbox.included}/
+                    {row.packetBytes} B · roster {row.composition.roster.included}/
+                    {row.composition.roster.candidates} · notes {row.composition.notes.included}/
+                    {row.composition.notes.candidates} · inbox {row.composition.inbox.included}/
                     {row.composition.inbox.candidates}
                   </div>
                   {row.suppressionReason === null ? null : (

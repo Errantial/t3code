@@ -217,6 +217,10 @@ describe("Civilization context inspector", () => {
     expect(text()).toContain(String(runId));
     expect(text()).toContain(String(attemptId));
     expect(text()).toContain("provider turn");
+    expect(text()).toContain("· run");
+    expect(text()).toContain("· roster");
+    expect(text()).not.toContain("? run");
+    expect(text()).not.toContain(" B ? roster");
     expect(text()).toContain("Detail requires settings:write");
     expect(text()).not.toContain(packetText);
     expect(testState.sensitiveCalls).toEqual([]);
@@ -309,6 +313,9 @@ describe("Civilization context inspector", () => {
     const packetPre = renderer?.root.findAllByType("pre")[0];
     expect(packetPre?.props.children).toBe(packetText);
     expect(text()).toContain("Provider start accepted");
+    expect(text()).toContain("“Provider start accepted”");
+    expect(text()).toContain(" included · ");
+    expect(text()).toContain(" omitted ·");
     expect(text()).toContain("Packet budget");
     expect(text()).toContain("Provenance");
     expect(buttonNamed("Copy")).toBeDefined();
