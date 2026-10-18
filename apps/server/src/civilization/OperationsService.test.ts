@@ -168,11 +168,12 @@ it.effect(
       const operations = yield* OperationsService.CivilizationOperationsService;
       yield* setup;
       const exported = yield* operations.exportProjectData(projectId);
-      assert.equal(exported.schemaVersion, 1);
+      assert.equal(exported.schemaVersion, 2);
       assert.equal(exported.projectRevision, 1);
       assert.equal(exported.citizens.length, 2);
       assert.equal(exported.notes.length, 2);
       assert.equal(exported.mail.length, 2);
+      assert.equal(exported.chronicle.length, 4);
       assert.equal(exported.limitations.mode, "inspection_backup_only");
       assert.isTrue(exported.limitations.inspectionBackupOnly);
       assert.isFalse(exported.limitations.restorable);
@@ -191,6 +192,11 @@ it.effect(
       assert.notInclude(serialized, "providerCredential");
       assert.notInclude(serialized, "historical-packet-secret");
       assert.notInclude(serialized, "inspection:secret");
+      const serializedChronicle = JSON.stringify(exported.chronicle);
+      assert.notInclude(serializedChronicle, "note-body-one");
+      assert.notInclude(serializedChronicle, "mail-body-one");
+      assert.notInclude(serializedChronicle, "private rich style text");
+      assert.notInclude(serializedChronicle, "historical-packet-secret");
     }).pipe(Effect.provide(Layer.fresh(layer))),
 );
 
@@ -207,6 +213,7 @@ it.effect("previews exact purge counts/body bytes and rejects a stale preview", 
       noteBodyBytes: 16,
       messages: 2,
       messageBodyBytes: 21,
+      chronicleEntries: 4,
       contextReferences: 1,
       contextInspections: 1,
       receipts: 1,

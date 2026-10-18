@@ -45,6 +45,7 @@ import {
 import { Input } from "../ui/input";
 import { Switch } from "../ui/switch";
 import { SettingsRow, SettingsSection } from "./settingsLayout";
+import { CivilizationChronicle } from "./CivilizationChronicle";
 import { CivilizationDataRetention } from "./CivilizationDataRetention";
 import { CivilizationLineageExplorer } from "./CivilizationLineageExplorer";
 
@@ -581,6 +582,13 @@ export function CivilizationProjectInspection({
           onClose={() => setLineageFocusThreadId(null)}
         />
       )}
+
+      <CivilizationChronicle
+        environmentId={environmentId}
+        projectId={projectId}
+        pageSize={censusLimit}
+        onViewLineage={setLineageFocusThreadId}
+      />
 
       <SettingsSection title={`Notes · ${targetLabel}`} id="civilization-notes">
         <SettingsRow

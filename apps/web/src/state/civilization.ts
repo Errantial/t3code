@@ -1,5 +1,7 @@
 import {
   type CivilizationCensusCursor,
+  type CivilizationChronicleCursor,
+  type CivilizationChronicleKind,
   type CivilizationLineageCursor,
   type CivilizationContextInspectionCursor,
   type CivilizationContextInspectionId,
@@ -21,6 +23,7 @@ import {
 } from "@t3tools/contracts";
 import {
   fetchCurrentEnvironmentCivilizationCensusPage,
+  fetchCurrentEnvironmentCivilizationChroniclePage,
   fetchCurrentEnvironmentCivilizationLineageNeighborhood,
   fetchCurrentEnvironmentCivilizationContextInspectionDetail,
   fetchCurrentEnvironmentCivilizationContextInspectionPage,
@@ -310,6 +313,78 @@ export function useCivilizationCensusPage(
       ? null
       : civilizationCensusPageAtom(
           civilizationProjectPageKey([environmentId, projectId, cursor, limit]),
+        );
+  return useEnvironmentQuery(atom);
+}
+
+const civilizationChroniclePageAtom = Atom.family((serializedKey: string) => {
+  const [
+    rawEnvironmentId,
+    rawProjectId,
+    rawKind,
+    rawThreadId,
+    rawFrom,
+    rawTo,
+    rawCursor,
+    rawLimit,
+  ] = JSON.parse(serializedKey) as [
+    string,
+    string,
+    CivilizationChronicleKind | null,
+    string | null,
+    string | null,
+    string | null,
+    string | null,
+    number,
+  ];
+  const environmentId = rawEnvironmentId as EnvironmentId;
+  const projectId = ProjectId.make(rawProjectId);
+  return connectionAtomRuntime
+    .atom((get) => {
+      const prepared = Option.getOrNull(
+        get(environmentSession.preparedConnectionValueAtom(environmentId)),
+      );
+      if (prepared === null) return Effect.never;
+      return fetchCurrentEnvironmentCivilizationChroniclePage({
+        prepared,
+        projectId,
+        ...(rawKind === null ? {} : { kind: rawKind }),
+        ...(rawThreadId === null ? {} : { threadId: ThreadId.make(rawThreadId) }),
+        ...(rawFrom === null ? {} : { from: rawFrom }),
+        ...(rawTo === null ? {} : { to: rawTo }),
+        ...(rawCursor === null ? {} : { cursor: rawCursor as CivilizationChronicleCursor }),
+        limit: rawLimit,
+      });
+    })
+    .pipe(Atom.setIdleTTL(60_000), Atom.withLabel(`civilization-chronicle:${serializedKey}`));
+});
+
+export function useCivilizationChroniclePage(
+  environmentId: EnvironmentId | null,
+  projectId: ProjectId | null,
+  filters: {
+    readonly kind?: CivilizationChronicleKind | undefined;
+    readonly threadId?: ThreadId | undefined;
+    readonly from?: string | undefined;
+    readonly to?: string | undefined;
+  },
+  cursor: CivilizationChronicleCursor | null,
+  limit: number,
+) {
+  const atom =
+    environmentId === null || projectId === null
+      ? null
+      : civilizationChroniclePageAtom(
+          civilizationProjectPageKey([
+            environmentId,
+            projectId,
+            filters.kind ?? null,
+            filters.threadId ?? null,
+            filters.from ?? null,
+            filters.to ?? null,
+            cursor,
+            limit,
+          ]),
         );
   return useEnvironmentQuery(atom);
 }

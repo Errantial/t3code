@@ -70,6 +70,7 @@ const make = Effect.gen(function* () {
           OR EXISTS (SELECT 1 FROM civilization_context_references r WHERE r.project_id = p.project_id)
           OR EXISTS (SELECT 1 FROM civilization_context_inspections i WHERE i.project_id = p.project_id)
           OR EXISTS (SELECT 1 FROM civilization_messages m WHERE m.project_id = p.project_id)
+          OR EXISTS (SELECT 1 FROM civilization_chronicle_entries h WHERE h.project_id = p.project_id)
           OR EXISTS (SELECT 1 FROM civilization_mail_operation_receipts o WHERE o.project_id = p.project_id)
           OR EXISTS (SELECT 1 FROM civilization_mail_quota_windows q WHERE q.project_id = p.project_id)
           OR EXISTS (SELECT 1 FROM civilization_project_config pc WHERE pc.project_id = p.project_id)

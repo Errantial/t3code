@@ -1,6 +1,8 @@
 import {
   CivilizationAgentAccessError,
   type CivilizationCensusCursor,
+  type CivilizationChronicleCursor,
+  type CivilizationChronicleKind,
   type CivilizationLineageCursor,
   type CivilizationContextInspectionCursor,
   type CivilizationContextInspectionId,
@@ -367,6 +369,42 @@ export const fetchEnvironmentCivilizationLineageNeighborhood = Effect.fn(
     }),
   );
 });
+/** Read one bounded Chronicle page. */
+export const fetchEnvironmentCivilizationChroniclePage = Effect.fn(
+  "clientRuntime.state.fetchEnvironmentCivilizationChroniclePage",
+)(function* (
+  input: CivilizationEnvironmentRequestInput & {
+    readonly projectId: ProjectId;
+    readonly kind?: CivilizationChronicleKind | undefined;
+    readonly threadId?: ThreadId | undefined;
+    readonly from?: string | undefined;
+    readonly to?: string | undefined;
+    readonly cursor?: CivilizationChronicleCursor | undefined;
+    readonly limit?: number | undefined;
+  },
+) {
+  const query = {
+    projectId: input.projectId,
+    ...(input.kind === undefined ? {} : { kind: input.kind }),
+    ...(input.threadId === undefined ? {} : { threadId: input.threadId }),
+    ...(input.from === undefined ? {} : { from: input.from }),
+    ...(input.to === undefined ? {} : { to: input.to }),
+    ...(input.cursor === undefined ? {} : { cursor: input.cursor }),
+    ...(input.limit === undefined ? {} : { limit: String(input.limit) }),
+  };
+  const endpoint = { query };
+  return yield* preserveCivilizationConfigErrors(
+    executeAuthenticatedEnvironmentHttpRequest({
+      ...input,
+      group: "civilization",
+      method: "GET",
+      url: (urls) => urls.chronicle(endpoint),
+      timeoutMs: input.timeoutMs ?? DEFAULT_CIVILIZATION_READ_TIMEOUT_MS,
+      request: ({ client, headers }) => client.chronicle({ ...endpoint, headers }),
+    }),
+  );
+});
+
 export const fetchEnvironmentCivilizationNotesPage = Effect.fn(
   "clientRuntime.state.fetchEnvironmentCivilizationNotesPage",
 )(function* (
@@ -784,6 +822,22 @@ export const fetchCurrentEnvironmentCivilizationLineageNeighborhood = Effect.fn(
   const auth = yield* currentCivilizationAuth;
   return yield* fetchEnvironmentCivilizationLineageNeighborhood({ ...input, ...auth });
 });
+export const fetchCurrentEnvironmentCivilizationChroniclePage = Effect.fn(
+  "clientRuntime.state.fetchCurrentEnvironmentCivilizationChroniclePage",
+)(function* (input: {
+  readonly prepared: PreparedConnection;
+  readonly projectId: ProjectId;
+  readonly kind?: CivilizationChronicleKind | undefined;
+  readonly threadId?: ThreadId | undefined;
+  readonly from?: string | undefined;
+  readonly to?: string | undefined;
+  readonly cursor?: CivilizationChronicleCursor | undefined;
+  readonly limit?: number | undefined;
+}) {
+  const auth = yield* currentCivilizationAuth;
+  return yield* fetchEnvironmentCivilizationChroniclePage({ ...input, ...auth });
+});
+
 export const fetchCurrentEnvironmentCivilizationNotesPage = Effect.fn(
   "clientRuntime.state.fetchCurrentEnvironmentCivilizationNotesPage",
 )(function* (input: {

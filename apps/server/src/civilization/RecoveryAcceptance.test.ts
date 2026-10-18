@@ -538,7 +538,7 @@ it.effect(
       const migrated = yield* runMigrations();
       assert.deepEqual(
         migrated.map(([id]) => id),
-        [65, 66, 67, 68, 69, 70, 71],
+        [65, 66, 67, 68, 69, 70, 71, 72, 73],
       );
       assert.deepEqual(
         (yield* sql<{

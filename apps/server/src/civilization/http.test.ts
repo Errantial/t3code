@@ -2,6 +2,7 @@ import {
   AuthSessionId,
   CIVILIZATION_CONFIG_VERSION,
   CivilizationCensusCursor,
+  CivilizationChronicleCursor,
   CivilizationLineageCursor,
   CivilizationInboxCursor,
   CivilizationMessageId,
@@ -33,6 +34,7 @@ import * as HttpRouter from "effect/http/HttpRouter";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as AdministrationService from "./AdministrationService.ts";
 import * as CitizenService from "./CitizenService.ts";
+import * as ChronicleService from "./ChronicleService.ts";
 import * as ConfigService from "./ConfigService.ts";
 import * as CivilizationHttp from "./http.ts";
 import * as KnowledgeService from "./KnowledgeService.ts";
@@ -105,6 +107,11 @@ const fakeMail = MailService.CivilizationMailService.of({
   readAdminMessage: () => Effect.die("unused admin mail read"),
   cleanupProject: () => Effect.die("unused mail cleanup"),
 });
+const fakeChronicle = ChronicleService.CivilizationChronicleService.of({
+  list: ({ projectId }) =>
+    Effect.succeed({ projectId, revision: 0, entries: [], nextCursor: null, partial: false }),
+  record: () => Effect.die("unused chronicle record"),
+});
 const fakeOperations = OperationsService.CivilizationOperationsService.of({
   exportProjectData: () => Effect.die("unused project data export"),
   previewPurge: () => Effect.die("unused purge preview"),
@@ -121,6 +128,7 @@ const makeRoutes = (
   knowledge: KnowledgeService.CivilizationKnowledgeServiceShape = fakeKnowledge,
   mail: MailService.CivilizationMailServiceShape = fakeMail,
   operations: OperationsService.CivilizationOperationsServiceShape = fakeOperations,
+  chronicle: ChronicleService.CivilizationChronicleServiceShape = fakeChronicle,
 ) => {
   const fakeCitizens = CitizenService.CivilizationCitizenService.of({
     adoptExisting: () =>
@@ -150,6 +158,7 @@ const makeRoutes = (
       Layer.succeed(AdministrationService.CivilizationAdministrationService, fakeAdministration),
     ),
     Layer.provide(Layer.succeed(KnowledgeService.CivilizationKnowledgeService, knowledge)),
+    Layer.provide(Layer.succeed(ChronicleService.CivilizationChronicleService, chronicle)),
     Layer.provide(Layer.succeed(MailService.CivilizationMailService, mail)),
     Layer.provide(Layer.succeed(OperationsService.CivilizationOperationsService, operations)),
     Layer.provide(HttpPlatform.layer),
@@ -247,6 +256,18 @@ it.effect(
               projectId: "project:read-only",
               focus: { threadId: "thread:read-only" },
               parentAvailability: "none",
+            });
+
+            const chronicleResponse = await server.handler(
+              new Request(
+                "http://127.0.0.1/api/civilization/chronicle?projectId=project%3Aread-only",
+              ),
+              requestContext,
+            );
+            expect(chronicleResponse.status).toBe(200);
+            expect(await chronicleResponse.json()).toMatchObject({
+              projectId: "project:read-only",
+              entries: [],
             });
 
             const inspectionListResponse = await server.handler(
@@ -358,6 +379,85 @@ it.effect("rejects malformed Civilization context-inspector numeric filters", ()
           }
         }),
       (server) => Effect.promise(() => server.dispose()),
+    );
+  }),
+);
+
+it.effect("maps bounded Chronicle filters and rejects malformed limits", () =>
+  Effect.gen(function* () {
+    const adoptionCalls = yield* Ref.make(0);
+    const projectId = ProjectId.make("project:civilization:http-chronicle");
+    const threadId = ThreadId.make("thread:civilization:http-chronicle");
+    const listInput = yield* Ref.make<ChronicleService.ChronicleListInput | null>(null);
+    const chronicle = ChronicleService.CivilizationChronicleService.of({
+      ...fakeChronicle,
+      list: (input) =>
+        Ref.set(listInput, input).pipe(
+          Effect.as({
+            projectId,
+            revision: 9,
+            entries: [],
+            nextCursor: CivilizationChronicleCursor.make("chronicle-next"),
+            partial: true,
+          }),
+        ),
+    });
+
+    return yield* Effect.acquireUseRelease(
+      Effect.sync(() =>
+        HttpRouter.toWebHandler(
+          makeRoutes(
+            adoptionCalls,
+            ["orchestration:read"],
+            fakeKnowledge,
+            fakeMail,
+            fakeOperations,
+            chronicle,
+          ),
+          { disableLogger: true },
+        ),
+      ),
+      (server) =>
+        Effect.tryPromise(async () => {
+          const response = await server.handler(
+            new Request(
+              `http://127.0.0.1/api/civilization/chronicle?projectId=${encodeURIComponent(projectId)}&kind=child_joined&threadId=${encodeURIComponent(threadId)}&from=${encodeURIComponent("2026-10-17T18:00:00.000Z")}&to=${encodeURIComponent("2026-10-17T22:00:00.000Z")}&cursor=chronicle-cursor&limit=7`,
+            ),
+            requestContext,
+          );
+          expect(response.status).toBe(200);
+          expect(await response.json()).toMatchObject({
+            revision: 9,
+            nextCursor: "chronicle-next",
+            partial: true,
+          });
+
+          for (const limit of ["0", "abc"]) {
+            const invalid = await server.handler(
+              new Request(
+                `http://127.0.0.1/api/civilization/chronicle?projectId=${encodeURIComponent(projectId)}&limit=${limit}`,
+              ),
+              requestContext,
+            );
+            expect(invalid.status).toBe(400);
+          }
+        }),
+      (server) => Effect.promise(() => server.dispose()),
+    ).pipe(
+      Effect.andThen(Ref.get(listInput)),
+      Effect.tap((input) =>
+        Effect.sync(() => {
+          expect(input).toEqual({
+            projectId,
+            kind: "child_joined",
+            threadId,
+            from: "2026-10-17T18:00:00.000Z",
+            to: "2026-10-17T22:00:00.000Z",
+            cursor: "chronicle-cursor",
+            limit: 7,
+          });
+        }),
+      ),
     );
   }),
 );

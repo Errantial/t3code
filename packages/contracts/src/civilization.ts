@@ -572,6 +572,125 @@ export const CivilizationLineageNeighborhood = Schema.Struct({
 });
 export type CivilizationLineageNeighborhood = typeof CivilizationLineageNeighborhood.Type;
 
+export const CivilizationChronicleEntryId = TrimmedNonEmptyString.pipe(
+  Schema.brand("CivilizationChronicleEntryId"),
+);
+export type CivilizationChronicleEntryId = typeof CivilizationChronicleEntryId.Type;
+
+export const CivilizationChronicleCursor = TrimmedNonEmptyString.pipe(
+  Schema.brand("CivilizationChronicleCursor"),
+);
+export type CivilizationChronicleCursor = typeof CivilizationChronicleCursor.Type;
+
+export const CivilizationChronicleKind = Schema.Literals([
+  "citizen_joined",
+  "citizen_adopted",
+  "child_joined",
+  "citizen_settled",
+  "citizen_returned",
+  "citizen_archived",
+  "citizen_deleted",
+  "identity_reassigned",
+  "note_created",
+  "note_resolved",
+  "mail_sent",
+  "mail_acknowledged",
+  "mail_terminal",
+]);
+export type CivilizationChronicleKind = typeof CivilizationChronicleKind.Type;
+
+export const CivilizationChronicleSourceKind = Schema.Literals([
+  "host_event",
+  "civilization_mutation",
+]);
+export type CivilizationChronicleSourceKind = typeof CivilizationChronicleSourceKind.Type;
+
+const CivilizationChronicleEntryBase = {
+  entryId: CivilizationChronicleEntryId,
+  projectId: ProjectId,
+  primaryThreadId: Schema.NullOr(ThreadId),
+  secondaryThreadId: Schema.NullOr(ThreadId),
+  citizenEpoch: Schema.NullOr(Schema.Number),
+  citizenRevision: Schema.NullOr(Schema.Number),
+  sourceKind: CivilizationChronicleSourceKind,
+  sourceId: TrimmedNonEmptyString,
+  sourceSequence: Schema.NullOr(Schema.Number),
+  occurredAt: IsoDateTime,
+} as const;
+const CivilizationChronicleEmptyMetadata = Schema.Struct({});
+const CivilizationChronicleRelationshipMetadata = Schema.Struct({
+  relationship: TrimmedNonEmptyString,
+});
+const CivilizationChronicleIdentityMetadata = Schema.Struct({
+  nameEntryId: TrimmedNonEmptyString,
+  profileEntryId: TrimmedNonEmptyString,
+});
+const CivilizationChronicleNoteCreatedMetadata = Schema.Struct({
+  noteId: TrimmedNonEmptyString,
+  category: TrimmedNonEmptyString,
+});
+const CivilizationChronicleNoteMetadata = Schema.Struct({ noteId: TrimmedNonEmptyString });
+const CivilizationChronicleMailMetadata = Schema.Struct({ messageId: TrimmedNonEmptyString });
+const CivilizationChronicleMailTerminalMetadata = Schema.Struct({
+  messageId: TrimmedNonEmptyString,
+  terminalReason: TrimmedNonEmptyString,
+});
+
+export const CivilizationChronicleEntry = Schema.Union([
+  Schema.Struct({
+    ...CivilizationChronicleEntryBase,
+    kind: Schema.Literals([
+      "citizen_joined",
+      "citizen_adopted",
+      "citizen_settled",
+      "citizen_returned",
+      "citizen_archived",
+      "citizen_deleted",
+    ]),
+    metadata: CivilizationChronicleEmptyMetadata,
+  }),
+  Schema.Struct({
+    ...CivilizationChronicleEntryBase,
+    kind: Schema.Literal("child_joined"),
+    metadata: CivilizationChronicleRelationshipMetadata,
+  }),
+  Schema.Struct({
+    ...CivilizationChronicleEntryBase,
+    kind: Schema.Literal("identity_reassigned"),
+    metadata: CivilizationChronicleIdentityMetadata,
+  }),
+  Schema.Struct({
+    ...CivilizationChronicleEntryBase,
+    kind: Schema.Literal("note_created"),
+    metadata: CivilizationChronicleNoteCreatedMetadata,
+  }),
+  Schema.Struct({
+    ...CivilizationChronicleEntryBase,
+    kind: Schema.Literal("note_resolved"),
+    metadata: CivilizationChronicleNoteMetadata,
+  }),
+  Schema.Struct({
+    ...CivilizationChronicleEntryBase,
+    kind: Schema.Literals(["mail_sent", "mail_acknowledged"]),
+    metadata: CivilizationChronicleMailMetadata,
+  }),
+  Schema.Struct({
+    ...CivilizationChronicleEntryBase,
+    kind: Schema.Literal("mail_terminal"),
+    metadata: CivilizationChronicleMailTerminalMetadata,
+  }),
+]);
+export type CivilizationChronicleEntry = typeof CivilizationChronicleEntry.Type;
+
+export const CivilizationChroniclePage = Schema.Struct({
+  projectId: ProjectId,
+  revision: Schema.Number,
+  entries: Schema.Array(CivilizationChronicleEntry),
+  nextCursor: Schema.NullOr(CivilizationChronicleCursor),
+  partial: Schema.Boolean,
+});
+export type CivilizationChroniclePage = typeof CivilizationChroniclePage.Type;
+
 export const CivilizationNoteId = TrimmedNonEmptyString.pipe(Schema.brand("CivilizationNoteId"));
 export type CivilizationNoteId = typeof CivilizationNoteId.Type;
 
@@ -984,7 +1103,7 @@ export const CivilizationCitizenTitleResult = Schema.Struct({
 });
 export type CivilizationCitizenTitleResult = typeof CivilizationCitizenTitleResult.Type;
 
-export const CIVILIZATION_EXPORT_SCHEMA_VERSION = 1 as const;
+export const CIVILIZATION_EXPORT_SCHEMA_VERSION = 2 as const;
 
 export const CivilizationExportLimitations = Schema.Struct({
   mode: Schema.Literal("inspection_backup_only"),
@@ -1005,6 +1124,7 @@ export const CivilizationProjectDataExport = Schema.Struct({
   citizens: Schema.Array(Schema.Unknown),
   notes: Schema.Array(Schema.Unknown),
   mail: Schema.Array(Schema.Unknown),
+  chronicle: Schema.Array(Schema.Unknown),
 });
 export type CivilizationProjectDataExport = typeof CivilizationProjectDataExport.Type;
 
@@ -1014,6 +1134,7 @@ export const CivilizationPurgeCounts = Schema.Struct({
   noteBodyBytes: Schema.Number,
   messages: Schema.Number,
   messageBodyBytes: Schema.Number,
+  chronicleEntries: Schema.Number,
   contextReferences: Schema.Number,
   contextInspections: Schema.Number,
   receipts: Schema.Number,
@@ -1031,6 +1152,7 @@ export const CivilizationPurgePreview = Schema.Struct({
   censusRevision: Schema.Number,
   notesRevision: Schema.Number,
   mailRevision: Schema.Number,
+  chronicleRevision: Schema.Number,
   counts: CivilizationPurgeCounts,
   limitations: CivilizationExportLimitations,
   warnings: Schema.Array(Schema.String),

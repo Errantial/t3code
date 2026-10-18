@@ -126,6 +126,7 @@ describe("searchSettings", () => {
     ["civilization inheritance", "civilization-config"],
     ["citizen census", "civilization-citizens"],
     ["ancestral hall", "civilization-lineage"],
+    ["civilization chronicle", "civilization-chronicle"],
     ["resolved notes", "civilization-notes"],
     ["retained mail body", "civilization-retained-mail"],
     ["purge project data", "civilization-data-retention"],

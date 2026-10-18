@@ -15,6 +15,7 @@ import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
 
 import type { EventSinkPersistenceParticipant } from "../orchestration-v2/EventSink.ts";
+import { recordChronicleEntry } from "./ChronicleService.ts";
 import {
   getEffectiveCivilizationConfig,
   normalizeCivilizationName,
@@ -32,6 +33,7 @@ type CitizenLifecycleRow = {
   readonly delivery_deleted: number;
   readonly last_applied_sequence: number;
   readonly title_managed: number;
+  readonly revision: number;
   readonly preserved_title: string | null;
   readonly last_managed_title: string | null;
   readonly pending_title_command_id: string | null;
@@ -146,6 +148,8 @@ export const enrollCivilizationThread = Effect.fn("civilization.enrollThread")(f
   readonly sequence: number;
   readonly thread: OrchestrationV2AppThread;
   readonly adoption: boolean;
+  readonly chronicleSourceId?: string | undefined;
+  readonly chronicleOccurredAt?: string | undefined;
 }) {
   const { thread } = input;
   const sql = yield* SqlClient.SqlClient;
@@ -230,6 +234,29 @@ export const enrollCivilizationThread = Effect.fn("civilization.enrollThread")(f
       1, ${createdAt}, ${updatedAt}
     )
   `;
+  const chronicleBase = {
+    projectId: thread.projectId,
+    primaryThreadId: thread.id,
+    citizenEpoch: 0,
+    citizenRevision: 1,
+    sourceKind: input.adoption ? ("civilization_mutation" as const) : ("host_event" as const),
+    sourceId: input.chronicleSourceId ?? `adoption:${thread.id}:${input.sequence}`,
+    sourceSequence: input.sequence,
+    occurredAt: input.chronicleOccurredAt ?? DateTime.formatIso(yield* DateTime.now),
+  };
+  if (thread.lineage.parentThreadId === null || thread.lineage.relationshipToParent === null) {
+    yield* recordChronicleEntry({
+      ...chronicleBase,
+      kind: input.adoption ? "citizen_adopted" : "citizen_joined",
+    });
+  } else {
+    yield* recordChronicleEntry({
+      ...chronicleBase,
+      kind: "child_joined",
+      secondaryThreadId: thread.lineage.parentThreadId,
+      metadata: { relationship: thread.lineage.relationshipToParent },
+    });
+  }
   return true;
 });
 
@@ -245,13 +272,15 @@ export const reconcileCivilizationStoredEvent = Effect.fn("civilization.reconcil
         sequence: stored.sequence,
         thread: stored.event.payload,
         adoption: false,
+        chronicleSourceId: stored.event.id,
+        chronicleOccurredAt: DateTime.formatIso(stored.event.occurredAt),
       });
     }
     const thread = isAppThread(stored.event.payload) ? stored.event.payload : undefined;
     const row = (yield* sql<CitizenLifecycleRow>`
       SELECT thread_id, epoch, closed, deleted,
              delivery_epoch, delivery_settled, delivery_archived, delivery_deleted,
-             last_applied_sequence, title_managed,
+             last_applied_sequence, title_managed, revision,
              preserved_title, last_managed_title,
              pending_title_command_id, pending_managed_title, pending_title_topic
       FROM civilization_citizens
@@ -329,6 +358,32 @@ export const reconcileCivilizationStoredEvent = Effect.fn("civilization.reconcil
         updated_at = ${DateTime.formatIso(thread.updatedAt)}
     WHERE thread_id = ${stored.event.threadId}
   `;
+    const chronicleKind =
+      stored.event.type === "thread.settled"
+        ? "citizen_settled"
+        : stored.event.type === "thread.unsettled"
+          ? "citizen_returned"
+          : stored.event.type === "thread.archived"
+            ? "citizen_archived"
+            : stored.event.type === "thread.unarchived"
+              ? "citizen_returned"
+              : stored.event.type === "thread.deleted"
+                ? "citizen_deleted"
+                : null;
+    if (chronicleKind !== null) {
+      yield* recordChronicleEntry({
+        projectId: thread.projectId,
+        kind: chronicleKind,
+        primaryThreadId: thread.id,
+        citizenEpoch: row.epoch + (changedLifecycle ? 1 : 0),
+        citizenRevision: row.revision + (citizenStateChanged ? 1 : 0),
+        sourceKind: "host_event",
+        sourceId: stored.event.id,
+        sourceSequence: stored.sequence,
+        occurredAt: DateTime.formatIso(stored.event.occurredAt),
+      });
+    }
+
     if (terminalReason !== null) {
       const terminalAt = DateTime.formatIso(stored.event.occurredAt);
       yield* sql`

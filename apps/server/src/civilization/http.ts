@@ -2,6 +2,7 @@ import {
   AuthOrchestrationReadScope,
   AuthSettingsWriteScope,
   CivilizationCensusCursor,
+  CivilizationChronicleCursor,
   CivilizationLineageCursor,
   CivilizationInboxCursor,
   CivilizationNotesCursor,
@@ -23,6 +24,7 @@ import * as ConfigService from "./ConfigService.ts";
 import * as CitizenService from "./CitizenService.ts";
 import * as AdministrationService from "./AdministrationService.ts";
 import * as ContextService from "./ContextService.ts";
+import * as ChronicleService from "./ChronicleService.ts";
 import * as KnowledgeService from "./KnowledgeService.ts";
 import * as MailService from "./MailService.ts";
 import * as OperationsService from "./OperationsService.ts";
@@ -94,6 +96,7 @@ export const layer = HttpApiBuilder.group(
     const citizens = yield* CitizenService.CivilizationCitizenService;
     const administration = yield* AdministrationService.CivilizationAdministrationService;
     const context = yield* ContextService.CivilizationContextService;
+    const chronicle = yield* ChronicleService.CivilizationChronicleService;
     const knowledge = yield* KnowledgeService.CivilizationKnowledgeService;
     const mail = yield* MailService.CivilizationMailService;
     const operations = yield* OperationsService.CivilizationOperationsService;
@@ -285,6 +288,42 @@ export const layer = HttpApiBuilder.group(
               Effect.catchTags({
                 SqlError: (cause) => failEnvironmentInternal("internal_error", cause),
                 CivilizationKnowledgeInvalidError: (cause) =>
+                  Effect.fail(new EnvironmentHttpBadRequestError({ message: cause.message })),
+              }),
+            );
+        }),
+      )
+      .handle(
+        "chronicle",
+        Effect.fn("environment.civilization.chronicle")(function* (args) {
+          yield* authorizeRead(args.endpoint.name);
+          const limitResult = parseOptionalPositiveInteger(args.query.limit);
+          if (!limitResult.ok) {
+            return yield* new EnvironmentHttpBadRequestError({
+              message: "limit must be a positive integer.",
+            });
+          }
+          return yield* chronicle
+            .list({
+              projectId: args.query.projectId,
+              ...(args.query.kind === undefined ? {} : { kind: args.query.kind }),
+              ...(args.query.threadId === undefined ? {} : { threadId: args.query.threadId }),
+              ...(args.query.from === undefined ? {} : { from: args.query.from }),
+              ...(args.query.to === undefined ? {} : { to: args.query.to }),
+              ...(args.query.cursor === undefined ? {} : { cursor: args.query.cursor }),
+              ...(limitResult.value === undefined ? {} : { limit: limitResult.value }),
+            })
+            .pipe(
+              Effect.map((page) => ({
+                ...page,
+                nextCursor:
+                  page.nextCursor === null
+                    ? null
+                    : CivilizationChronicleCursor.make(page.nextCursor),
+              })),
+              Effect.catchTags({
+                SqlError: (cause) => failEnvironmentInternal("internal_error", cause),
+                CivilizationChronicleInvalidError: (cause) =>
                   Effect.fail(new EnvironmentHttpBadRequestError({ message: cause.message })),
               }),
             );

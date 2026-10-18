@@ -1040,6 +1040,12 @@ export const SETTINGS_SEARCH_ITEMS = [
     searchTerms: ["ancestral hall lineage ancestry descendants parent children generation family"],
   },
   {
+    id: "civilization-chronicle",
+    title: "Civilization Chronicle",
+    to: "/settings/civilization",
+    searchTerms: ["chronicle history timeline achievements provenance civilization events"],
+  },
+  {
     id: "civilization-notes",
     title: "Civilization notes",
     to: "/settings/civilization",

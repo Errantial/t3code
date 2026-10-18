@@ -85,6 +85,9 @@ import {
   CivilizationAdminMailRecord,
   CivilizationCensusCursor,
   CivilizationCensusPage,
+  CivilizationChronicleCursor,
+  CivilizationChronicleKind,
+  CivilizationChroniclePage,
   CivilizationLineageCursor,
   CivilizationLineageNeighborhood,
   CivilizationCapabilitiesResult,
@@ -746,6 +749,16 @@ const EnvironmentCivilizationLineageQuery = Schema.Struct({
   limit: Schema.optionalKey(TrimmedNonEmptyString),
 });
 
+const EnvironmentCivilizationChronicleQuery = Schema.Struct({
+  projectId: ProjectId,
+  kind: Schema.optionalKey(CivilizationChronicleKind),
+  threadId: Schema.optionalKey(ThreadId),
+  from: Schema.optionalKey(TrimmedNonEmptyString),
+  to: Schema.optionalKey(TrimmedNonEmptyString),
+  cursor: Schema.optionalKey(CivilizationChronicleCursor),
+  limit: Schema.optionalKey(TrimmedNonEmptyString),
+});
+
 const EnvironmentCivilizationNotesQuery = Schema.Struct({
   projectId: ProjectId,
   cursor: Schema.optionalKey(CivilizationNotesCursor),
@@ -979,6 +992,14 @@ class EnvironmentCivilizationHttpApi extends HttpApiGroup.make("civilization")
       headers: OptionalBearerHeaders,
       query: EnvironmentCivilizationLineageQuery,
       success: CivilizationLineageNeighborhood,
+      error: EnvironmentCivilizationKnowledgeReadErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.get("chronicle", "/api/civilization/chronicle", {
+      headers: OptionalBearerHeaders,
+      query: EnvironmentCivilizationChronicleQuery,
+      success: CivilizationChroniclePage,
       error: EnvironmentCivilizationKnowledgeReadErrors,
     }).middleware(EnvironmentAuthenticatedAuth),
   )
