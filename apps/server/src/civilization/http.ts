@@ -201,6 +201,22 @@ export const layer = HttpApiBuilder.group(
         }),
       )
       .handle(
+        "citizenDetail",
+        Effect.fn("environment.civilization.citizenDetail")(function* (args) {
+          yield* authorizeRead(args.endpoint.name);
+          return yield* citizens
+            .getCitizenDetail({
+              projectId: args.query.projectId,
+              threadId: args.query.threadId,
+            })
+            .pipe(
+              Effect.catchTags({
+                SqlError: (cause) => failEnvironmentInternal("internal_error", cause),
+              }),
+            );
+        }),
+      )
+      .handle(
         "citizenReassignmentPreview",
         Effect.fn("environment.civilization.citizenReassignmentPreview")(function* (args) {
           yield* authorizeSettingsWrite(args.endpoint.name);

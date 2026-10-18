@@ -94,6 +94,18 @@ const enableManagedAdoption = Effect.fn("CitizenService.test.enableManagedAdopti
   });
 });
 
+const enableRichDetail = Effect.fn("CitizenService.test.enableRichDetail")(function* () {
+  const config = yield* ConfigService.CivilizationConfigService;
+  yield* config.set({
+    expectedRevision: 0,
+    override: {
+      version: CIVILIZATION_CONFIG_VERSION,
+      participation: { enabled: true, adoption: "all_existing" },
+      personalities: { rendering: "rich" },
+    },
+  });
+});
+
 it.effect(
   "explicitly adopts current projections, remains idempotent, and excludes deleted threads",
   () =>
@@ -177,6 +189,108 @@ it.effect("adopts all existing projections across bounded 100-row batches", () =
     const second = yield* citizens.adoptExisting({ projectId });
     assert.deepEqual(second, { candidates: 0, adopted: 0, skipped: 0 });
   }).pipe(Effect.provide(Layer.fresh(layer))),
+);
+
+it.effect(
+  "reads one exact persisted citizen detail without provider work and rejects project mismatch",
+  () =>
+    Effect.gen(function* () {
+      const sink = yield* EventSink.EventSinkV2;
+      const citizens = yield* CitizenService.CivilizationCitizenService;
+      const sql = yield* SqlClient.SqlClient;
+      const now = yield* DateTime.now;
+      const projectId = ProjectId.make("project:civilization:detail");
+      const threadId = ThreadId.make("thread:civilization:detail");
+      const thread = makeThread(threadId, projectId, now, { title: "Host detail title" });
+      yield* sink.write({
+        events: [
+          {
+            id: EventId.make("event:civilization:detail:create"),
+            type: "thread.created",
+            threadId,
+            occurredAt: now,
+            payload: thread,
+          },
+        ],
+      });
+      yield* enableRichDetail();
+      assert.deepEqual(yield* citizens.adoptExisting({ projectId }), {
+        candidates: 1,
+        adopted: 1,
+        skipped: 0,
+      });
+
+      yield* sql`
+        UPDATE civilization_citizens
+        SET name_base = 'Stored base name',
+            profile_label = 'Stored base personality',
+            profile_traits_json = '["careful","concise"]',
+            profile_style_text = 'Stored base style.',
+            profile_rich_label = 'Stored Rich Persona',
+            profile_rich_traits_json = '["deliberate","precise"]',
+            profile_rich_axiom = 'Stored axiom.',
+            profile_rich_voice = 'Stored voice.',
+            profile_rich_style_text = 'Stored rich style.',
+            title_managed = 1,
+            preserved_title = 'Preserved manual title',
+            last_managed_title = 'Prior managed title',
+            title_topic = 'Stored topic'
+        WHERE thread_id = ${threadId}
+      `;
+      const outboxBefore = (yield* sql<{ readonly count: number }>`
+        SELECT COUNT(*) AS count FROM orchestration_v2_effect_outbox
+      `)[0]!.count;
+
+      const detail = yield* citizens.getCitizenDetail({ projectId, threadId });
+      assert.equal(detail.threadId, threadId);
+      assert.equal(detail.projectId, projectId);
+      assert.equal(detail.identity.baseName, "Stored base name");
+      assert.equal(detail.host.threadTitle, "Host detail title");
+      assert.equal(detail.host.providerInstanceId, providerInstanceId);
+      assert.equal(detail.presentation.rendering, "rich");
+      assert.equal(detail.presentation.label, "Stored Rich Persona");
+      assert.deepEqual(detail.personality.base, {
+        label: "Stored base personality",
+        traits: ["careful", "concise"],
+        styleText: "Stored base style.",
+      });
+      assert.deepEqual(detail.personality.rich, {
+        label: "Stored Rich Persona",
+        traits: ["deliberate", "precise"],
+        axiom: "Stored axiom.",
+        voice: "Stored voice.",
+        styleText: "Stored rich style.",
+      });
+      assert.deepEqual(detail.lifecycle, {
+        state: "open",
+        epoch: 0,
+        closed: false,
+        deleted: false,
+      });
+      assert.isTrue(detail.title.managed);
+      assert.equal(detail.title.topic, "Stored topic");
+      assert.equal(detail.title.preservedTitle, "Preserved manual title");
+      assert.equal(detail.title.lastManagedTitle, "Prior managed title");
+      assert.equal(
+        detail.title.managedTitlePreview,
+        `[${detail.identity.displayName}] Stored topic`,
+      );
+      const outboxAfter = (yield* sql<{ readonly count: number }>`
+        SELECT COUNT(*) AS count FROM orchestration_v2_effect_outbox
+      `)[0]!.count;
+      assert.equal(outboxAfter, outboxBefore);
+
+      const mismatch = yield* citizens
+        .getCitizenDetail({
+          projectId: ProjectId.make("project:civilization:detail:wrong"),
+          threadId,
+        })
+        .pipe(Effect.flip);
+      assert.equal(mismatch._tag, "CivilizationCitizenNotFoundError");
+      if (mismatch._tag === "CivilizationCitizenNotFoundError") {
+        assert.equal(mismatch.threadId, threadId);
+      }
+    }).pipe(Effect.provide(Layer.fresh(layer))),
 );
 
 it.effect("queues replay-safe managed title application for managed adoption", () =>

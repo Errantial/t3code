@@ -31,6 +31,7 @@ import {
 } from "../ui/dialog";
 import { Input } from "../ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../ui/select";
+import { CivilizationCitizenLink } from "./CivilizationCitizenLink";
 import { SettingsRow, SettingsSection } from "./settingsLayout";
 
 interface CivilizationCorrespondenceHistoryProps {
@@ -38,6 +39,7 @@ interface CivilizationCorrespondenceHistoryProps {
   readonly projectId: ProjectId;
   readonly pageSize: number;
   readonly allowSensitiveActions: boolean;
+  readonly onViewCitizen?: ((threadId: ThreadIdType) => void) | undefined;
   readonly onViewLineage?: ((threadId: ThreadIdType) => void) | undefined;
   readonly initialParticipantThreadId?: ThreadIdType | undefined;
   readonly initialMessageId?: CivilizationMessageId | undefined;
@@ -52,38 +54,41 @@ const formatDate = (value: string | null): string =>
 const triState = (value: BooleanFilter): boolean | undefined =>
   value === "any" ? undefined : value === "yes";
 
-function CitizenLink({
-  threadId,
-  onViewLineage,
-}: {
-  readonly threadId: ThreadIdType;
-  readonly onViewLineage?: ((threadId: ThreadIdType) => void) | undefined;
-}) {
-  return onViewLineage === undefined ? (
-    <span className="wrap-anywhere">{threadId}</span>
-  ) : (
-    <Button size="xs" variant="ghost" onClick={() => onViewLineage(threadId)}>
-      {threadId}
-    </Button>
-  );
-}
-
 function MessageFacts({
   message,
+  citizenNames,
+  onViewCitizen,
   onViewLineage,
 }: {
   readonly message: CivilizationMailSummary;
+  readonly citizenNames: ReadonlyMap<ThreadIdType, string>;
+  readonly onViewCitizen?: ((threadId: ThreadIdType) => void) | undefined;
   readonly onViewLineage?: ((threadId: ThreadIdType) => void) | undefined;
 }) {
   return (
     <div className="min-w-0 space-y-1 text-xs text-muted-foreground">
       <div className="font-medium text-sm text-foreground">
-        {message.senderNameAtSend} →{" "}
-        <CitizenLink threadId={message.recipientThreadId} onViewLineage={onViewLineage} />
+        <CivilizationCitizenLink
+          threadId={message.senderThreadId}
+          name={message.senderNameAtSend}
+          onViewCitizen={onViewCitizen}
+          secondary={citizenNames.has(message.senderThreadId) ? "name at send" : undefined}
+        />{" "}
+        →{" "}
+        <CivilizationCitizenLink
+          threadId={message.recipientThreadId}
+          name={citizenNames.get(message.recipientThreadId) ?? String(message.recipientThreadId)}
+          onViewCitizen={onViewCitizen}
+          secondary={citizenNames.has(message.recipientThreadId) ? "current" : undefined}
+        />
       </div>
       <div className="wrap-anywhere">
-        sender <CitizenLink threadId={message.senderThreadId} onViewLineage={onViewLineage} /> ·
-        epoch {message.senderCitizenEpoch}
+        sender {message.senderThreadId} · epoch {message.senderCitizenEpoch}
+        {onViewCitizen !== undefined || onViewLineage === undefined ? null : (
+          <Button size="xs" variant="ghost" onClick={() => onViewLineage(message.senderThreadId)}>
+            Lineage
+          </Button>
+        )}
       </div>
       <div>
         recipient delivery epoch {message.recipientDeliveryEpoch} · {message.bodyBytes} bytes
@@ -111,6 +116,7 @@ export function CivilizationCorrespondenceHistory({
   projectId,
   pageSize,
   allowSensitiveActions,
+  onViewCitizen,
   onViewLineage,
   initialParticipantThreadId,
   initialMessageId,
@@ -160,6 +166,12 @@ export function CivilizationCorrespondenceHistory({
     selectedMessageId,
     12,
     pageSize,
+  );
+  const pageCitizenNames = new Map(
+    (page.data?.citizenReferences ?? []).map((reference) => [reference.threadId, reference.name]),
+  );
+  const threadCitizenNames = new Map(
+    (thread.data?.citizenReferences ?? []).map((reference) => [reference.threadId, reference.name]),
   );
 
   const applyFilters = () => {
@@ -341,7 +353,12 @@ export function CivilizationCorrespondenceHistory({
                 key={message.messageId}
                 className="flex flex-wrap items-start justify-between gap-3 rounded-lg border border-border/70 p-3"
               >
-                <MessageFacts message={message} onViewLineage={onViewLineage} />
+                <MessageFacts
+                  message={message}
+                  citizenNames={pageCitizenNames}
+                  onViewCitizen={onViewCitizen}
+                  onViewLineage={onViewLineage}
+                />
                 <div className="flex gap-2">
                   {onViewChronicleSource === undefined ? null : (
                     <Button
@@ -434,7 +451,12 @@ export function CivilizationCorrespondenceHistory({
                       {entry.relation} · depth {entry.depth}
                       {entry.unresolvedParent ? " · missing parent" : ""}
                     </div>
-                    <MessageFacts message={entry.message} onViewLineage={onViewLineage} />
+                    <MessageFacts
+                      message={entry.message}
+                      citizenNames={threadCitizenNames}
+                      onViewCitizen={onViewCitizen}
+                      onViewLineage={onViewLineage}
+                    />
                   </li>
                 ))}
               </ol>

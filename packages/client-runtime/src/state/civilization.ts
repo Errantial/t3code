@@ -345,6 +345,28 @@ export const fetchEnvironmentCivilizationCensusPage = Effect.fn(
   );
 });
 
+/** Read one exact citizen detail record without fetching any sensitive bodies. */
+export const fetchEnvironmentCivilizationCitizenDetail = Effect.fn(
+  "clientRuntime.state.fetchEnvironmentCivilizationCitizenDetail",
+)(function* (
+  input: CivilizationEnvironmentRequestInput & {
+    readonly projectId: ProjectId;
+    readonly threadId: ThreadId;
+  },
+) {
+  const endpoint = { query: { projectId: input.projectId, threadId: input.threadId } };
+  return yield* preserveCivilizationConfigErrors(
+    executeAuthenticatedEnvironmentHttpRequest({
+      ...input,
+      group: "civilization",
+      method: "GET",
+      url: (urls) => urls.citizenDetail(endpoint),
+      timeoutMs: input.timeoutMs ?? DEFAULT_CIVILIZATION_READ_TIMEOUT_MS,
+      request: ({ client, headers }) => client.citizenDetail({ ...endpoint, headers }),
+    }),
+  );
+});
+
 /** Read one revision-consistent note metadata page without fetching note bodies. */
 /** Read one bounded lineage neighborhood. */
 export const fetchEnvironmentCivilizationLineageNeighborhood = Effect.fn(
@@ -676,6 +698,7 @@ export const fetchEnvironmentCivilizationCorrespondencePage = Effect.fn(
   input: CivilizationEnvironmentRequestInput & {
     readonly projectId: ProjectId;
     readonly participantThreadId?: ThreadId | undefined;
+    readonly counterpartyThreadId?: ThreadId | undefined;
     readonly senderThreadId?: ThreadId | undefined;
     readonly recipientThreadId?: ThreadId | undefined;
     readonly replyRelation?: CivilizationCorrespondenceReplyRelation | undefined;
@@ -694,6 +717,9 @@ export const fetchEnvironmentCivilizationCorrespondencePage = Effect.fn(
     ...(input.participantThreadId === undefined
       ? {}
       : { participantThreadId: input.participantThreadId }),
+    ...(input.counterpartyThreadId === undefined
+      ? {}
+      : { counterpartyThreadId: input.counterpartyThreadId }),
     ...(input.senderThreadId === undefined ? {} : { senderThreadId: input.senderThreadId }),
     ...(input.recipientThreadId === undefined
       ? {}
@@ -987,6 +1013,17 @@ export const fetchCurrentEnvironmentCivilizationCensusPage = Effect.fn(
   return yield* fetchEnvironmentCivilizationCensusPage({ ...input, ...auth });
 });
 
+export const fetchCurrentEnvironmentCivilizationCitizenDetail = Effect.fn(
+  "clientRuntime.state.fetchCurrentEnvironmentCivilizationCitizenDetail",
+)(function* (input: {
+  readonly prepared: PreparedConnection;
+  readonly projectId: ProjectId;
+  readonly threadId: ThreadId;
+}) {
+  const auth = yield* currentCivilizationAuth;
+  return yield* fetchEnvironmentCivilizationCitizenDetail({ ...input, ...auth });
+});
+
 export const fetchCurrentEnvironmentCivilizationLineageNeighborhood = Effect.fn(
   "clientRuntime.state.fetchCurrentEnvironmentCivilizationLineageNeighborhood",
 )(function* (input: {
@@ -1131,6 +1168,7 @@ export const fetchCurrentEnvironmentCivilizationCorrespondencePage = Effect.fn(
   readonly prepared: PreparedConnection;
   readonly projectId: ProjectId;
   readonly participantThreadId?: ThreadId | undefined;
+  readonly counterpartyThreadId?: ThreadId | undefined;
   readonly senderThreadId?: ThreadId | undefined;
   readonly recipientThreadId?: ThreadId | undefined;
   readonly replyRelation?: CivilizationCorrespondenceReplyRelation | undefined;

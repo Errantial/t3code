@@ -662,6 +662,10 @@ function CivilizationTargetOverview({
     readonly threadId: ThreadId;
     readonly nonce: number;
   } | null>(null);
+  const [requestedCitizen, setRequestedCitizen] = useState<{
+    readonly threadId: ThreadId;
+    readonly nonce: number;
+  } | null>(null);
   useEffect(() => {
     if (lastInitialInspectionFiltersKey.current === initialInspectionFiltersKey) return;
     lastInitialInspectionFiltersKey.current = initialInspectionFiltersKey;
@@ -674,6 +678,9 @@ function CivilizationTargetOverview({
   };
   const viewLineage = (threadId: ThreadId) => {
     setRequestedLineage((current) => ({ threadId, nonce: (current?.nonce ?? 0) + 1 }));
+  };
+  const viewCitizen = (threadId: ThreadId) => {
+    setRequestedCitizen((current) => ({ threadId, nonce: (current?.nonce ?? 0) + 1 }));
   };
   const runConfigAction: CivilizationConfigRunner = useAtomSet(civilizationConfigAction, {
     mode: "promise",
@@ -1892,6 +1899,7 @@ function CivilizationTargetOverview({
               projectId={target.projectId}
               targetLabel={target.label}
               initialFilters={inspectionFilters}
+              onViewCitizen={viewCitizen}
               onViewLineage={viewLineage}
             />
           </div>
@@ -1903,6 +1911,7 @@ function CivilizationTargetOverview({
             allowSensitiveActions={allowSensitiveProjectActions}
             onViewContext={(threadId) => viewContext({ threadId })}
             requestedLineage={requestedLineage}
+            requestedCitizen={requestedCitizen}
           />
         </>
       )}

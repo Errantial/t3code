@@ -28,6 +28,7 @@ import {
 } from "@t3tools/contracts";
 import {
   fetchCurrentEnvironmentCivilizationAchievementPage,
+  fetchCurrentEnvironmentCivilizationCitizenDetail,
   fetchCurrentEnvironmentCivilizationCensusPage,
   fetchCurrentEnvironmentCivilizationChroniclePage,
   fetchCurrentEnvironmentCivilizationContextAnalytics,
@@ -768,6 +769,40 @@ export function useCivilizationRetainedMailPage(
       ? null
       : civilizationRetainedMailPageAtom(
           civilizationProjectPageKey([environmentId, projectId, cursor, limit]),
+        );
+  return useEnvironmentQuery(atom);
+}
+
+const civilizationCitizenDetailAtom = Atom.family((serializedKey: string) => {
+  const [rawEnvironmentId, rawProjectId, rawThreadId] = JSON.parse(serializedKey) as [
+    string,
+    string,
+    string,
+  ];
+  const environmentId = rawEnvironmentId as EnvironmentId;
+  const projectId = ProjectId.make(rawProjectId);
+  const threadId = ThreadId.make(rawThreadId);
+  return connectionAtomRuntime
+    .atom((get) => {
+      const prepared = Option.getOrNull(
+        get(environmentSession.preparedConnectionValueAtom(environmentId)),
+      );
+      if (prepared === null) return Effect.never;
+      return fetchCurrentEnvironmentCivilizationCitizenDetail({ prepared, projectId, threadId });
+    })
+    .pipe(Atom.setIdleTTL(30_000), Atom.withLabel(`civilization-citizen-detail:${serializedKey}`));
+});
+
+export function useCivilizationCitizenDetail(
+  environmentId: EnvironmentId | null,
+  projectId: ProjectId | null,
+  threadId: ThreadId | null,
+) {
+  const atom =
+    environmentId === null || projectId === null || threadId === null
+      ? null
+      : civilizationCitizenDetailAtom(
+          civilizationProjectPageKey([environmentId, projectId, threadId]),
         );
   return useEnvironmentQuery(atom);
 }

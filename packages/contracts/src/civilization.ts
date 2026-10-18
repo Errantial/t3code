@@ -531,6 +531,69 @@ export const CivilizationCitizenSummary = Schema.Struct({
 });
 export type CivilizationCitizenSummary = typeof CivilizationCitizenSummary.Type;
 
+export const CivilizationCitizenDetail = Schema.Struct({
+  threadId: ThreadId,
+  projectId: ProjectId,
+  identity: Schema.Struct({
+    nameEntryId: Schema.String,
+    namePoolId: Schema.String,
+    baseName: Schema.String,
+    displayName: Schema.String,
+  }),
+  personality: Schema.Struct({
+    profileEntryId: Schema.String,
+    profilePoolId: Schema.String,
+    base: Schema.Struct({
+      label: Schema.String,
+      traits: Schema.Array(Schema.String),
+      styleText: Schema.String,
+    }),
+    rich: Schema.Struct({
+      label: Schema.String,
+      traits: Schema.Array(Schema.String),
+      axiom: Schema.String,
+      voice: Schema.String,
+      styleText: Schema.String,
+    }),
+  }),
+  presentation: Schema.Struct({
+    rendering: Schema.Literals(["off", "mild", "rich"]),
+    label: Schema.NullOr(Schema.String),
+  }),
+  host: Schema.Struct({
+    threadTitle: Schema.String,
+    providerInstanceId: ProviderInstanceId,
+  }),
+  lineage: Schema.Struct({
+    generation: Schema.Number,
+    status: CivilizationLineageStatus,
+    parentThreadId: Schema.NullOr(ThreadId),
+    relationshipToParent: CivilizationRelationshipToParent,
+  }),
+  lifecycle: Schema.Struct({
+    state: Schema.Literals(["open", "settled", "archived", "deleted"]),
+    epoch: Schema.Number,
+    closed: Schema.Boolean,
+    deleted: Schema.Boolean,
+  }),
+  observedOnly: Schema.Boolean,
+  title: Schema.Struct({
+    managed: Schema.Boolean,
+    topic: Schema.String,
+    preservedTitle: Schema.NullOr(Schema.String),
+    lastManagedTitle: Schema.NullOr(Schema.String),
+    managedTitlePreview: Schema.String,
+  }),
+  revision: Schema.Number,
+});
+export type CivilizationCitizenDetail = typeof CivilizationCitizenDetail.Type;
+
+export const CivilizationCitizenNameReference = Schema.Struct({
+  threadId: ThreadId,
+  name: Schema.String,
+});
+export type CivilizationCitizenNameReference = typeof CivilizationCitizenNameReference.Type;
+
 export const CivilizationCensusCursor = TrimmedNonEmptyString.pipe(
   Schema.brand("CivilizationCensusCursor"),
 );
@@ -686,6 +749,7 @@ export const CivilizationChroniclePage = Schema.Struct({
   projectId: ProjectId,
   revision: Schema.Number,
   entries: Schema.Array(CivilizationChronicleEntry),
+  citizenReferences: Schema.optional(Schema.Array(CivilizationCitizenNameReference)),
   nextCursor: Schema.NullOr(CivilizationChronicleCursor),
   partial: Schema.Boolean,
 });
@@ -724,6 +788,7 @@ export const CivilizationAchievementPage = Schema.Struct({
   projectId: ProjectId,
   revision: Schema.Number,
   awards: Schema.Array(CivilizationAchievementAward),
+  citizenReferences: Schema.optional(Schema.Array(CivilizationCitizenNameReference)),
   nextCursor: Schema.NullOr(CivilizationAchievementCursor),
   partial: Schema.Boolean,
 });
@@ -949,6 +1014,7 @@ export const CivilizationCorrespondenceHistoryPage = Schema.Struct({
   projectId: ProjectId,
   revision: Schema.Number,
   messages: Schema.Array(CivilizationMailSummary),
+  citizenReferences: Schema.optional(Schema.Array(CivilizationCitizenNameReference)),
   nextCursor: Schema.NullOr(CivilizationCorrespondenceCursor),
   partial: Schema.Boolean,
 });
@@ -976,6 +1042,7 @@ export const CivilizationCorrespondenceThreadPage = Schema.Struct({
   revision: Schema.Number,
   selectedMessageId: CivilizationMessageId,
   entries: Schema.Array(CivilizationCorrespondenceThreadEntry),
+  citizenReferences: Schema.optional(Schema.Array(CivilizationCitizenNameReference)),
   rootStatus: Schema.Literals(["resolved", "missing_parent", "depth_limit"]),
   ancestorTruncated: Schema.Boolean,
   descendantsTruncated: Schema.Boolean,
@@ -1104,6 +1171,7 @@ export type CivilizationContextInspectionDetail = typeof CivilizationContextInsp
 export const CivilizationContextInspectionPage = Schema.Struct({
   projectId: ProjectId,
   inspections: Schema.Array(CivilizationContextInspectionSummary),
+  citizenReferences: Schema.optional(Schema.Array(CivilizationCitizenNameReference)),
   nextCursor: Schema.NullOr(CivilizationContextInspectionCursor),
   partial: Schema.Boolean,
 });

@@ -33,6 +33,7 @@ import {
 } from "../ui/dialog";
 import { Input } from "../ui/input";
 import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
+import { CivilizationCitizenLink } from "./CivilizationCitizenLink";
 import { SettingsSection } from "./settingsLayout";
 
 interface CivilizationContextInspectorProps {
@@ -40,6 +41,7 @@ interface CivilizationContextInspectorProps {
   readonly projectId: ProjectId;
   readonly targetLabel: string;
   readonly initialFilters?: CivilizationContextInspectionFilters | undefined;
+  readonly onViewCitizen?: ((threadId: ThreadId) => void) | undefined;
   readonly onViewLineage?: ((threadId: ThreadId) => void) | undefined;
 }
 
@@ -345,6 +347,7 @@ export function CivilizationContextInspector({
   projectId,
   targetLabel,
   initialFilters,
+  onViewCitizen,
   onViewLineage,
 }: CivilizationContextInspectorProps) {
   const canWrite = useEnvironmentScope(environmentId, AuthSettingsWriteScope);
@@ -382,6 +385,9 @@ export function CivilizationContextInspector({
     filters,
     cursor,
     PAGE_SIZE,
+  );
+  const citizenNames = new Map(
+    (page.data?.citizenReferences ?? []).map((reference) => [reference.threadId, reference.name]),
   );
 
   const rows = page.data?.inspections ?? [];
@@ -603,11 +609,20 @@ export function CivilizationContextInspector({
                   </div>
                   <div className="wrap-anywhere text-xs text-muted-foreground">
                     thread{" "}
-                    {onViewLineage === undefined ? (
-                      row.threadId
-                    ) : (
-                      <Button size="xs" variant="ghost" onClick={() => onViewLineage(row.threadId)}>
-                        {row.threadId}
+                    <CivilizationCitizenLink
+                      threadId={row.threadId}
+                      name={citizenNames.get(row.threadId) ?? String(row.threadId)}
+                      onViewCitizen={onViewCitizen}
+                      secondary={citizenNames.has(row.threadId) ? String(row.threadId) : undefined}
+                    />{" "}
+                    {onViewCitizen !== undefined || onViewLineage === undefined ? null : (
+                      <Button
+                        size="xs"
+                        variant="ghost"
+                        aria-label={`View lineage ${row.threadId}`}
+                        onClick={() => onViewLineage(row.threadId)}
+                      >
+                        Lineage
                       </Button>
                     )}{" "}
                     · run {row.runId} · attempt {row.attemptId} · provider turn{" "}

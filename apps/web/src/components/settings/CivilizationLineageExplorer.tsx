@@ -9,6 +9,7 @@ import { useState } from "react";
 
 import { useCivilizationLineageNeighborhood } from "../../state/civilization";
 import { Button } from "../ui/button";
+import { CivilizationCitizenLink } from "./CivilizationCitizenLink";
 import { SettingsRow, SettingsSection } from "./settingsLayout";
 
 interface CivilizationLineageExplorerProps {
@@ -17,6 +18,7 @@ interface CivilizationLineageExplorerProps {
   readonly initialThreadId: ThreadId;
   readonly pageSize: number;
   readonly onClose: () => void;
+  readonly onViewCitizen?: ((threadId: ThreadId) => void) | undefined;
   readonly onViewChronicle?: ((threadId: ThreadId) => void) | undefined;
   readonly onViewCorrespondence?: ((threadId: ThreadId) => void) | undefined;
   readonly onViewContext?: ((threadId: ThreadId) => void) | undefined;
@@ -26,27 +28,35 @@ function CitizenLineageButton({
   citizen,
   relation,
   onFocus,
+  onViewCitizen,
 }: {
   readonly citizen: CivilizationCitizenSummary;
   readonly relation: string;
   readonly onFocus: (threadId: ThreadId) => void;
+  readonly onViewCitizen?: ((threadId: ThreadId) => void) | undefined;
 }) {
   return (
-    <Button
-      size="sm-multiline"
-      variant="outline"
-      className="w-full justify-start text-left"
-      aria-label={`${relation}: ${citizen.name}`}
-      onClick={() => onFocus(citizen.threadId)}
-    >
-      <span className="min-w-0">
-        <span className="block font-medium">{citizen.name}</span>
-        <span className="block wrap-anywhere text-xs text-muted-foreground">
+    <div className="flex items-center justify-between gap-2 rounded-md border border-border/70 p-2">
+      <div className="min-w-0">
+        <CivilizationCitizenLink
+          threadId={citizen.threadId}
+          name={citizen.name}
+          onViewCitizen={onViewCitizen}
+        />
+        <div className="wrap-anywhere text-xs text-muted-foreground">
           generation {citizen.generation} · {citizen.closed ? "closed" : "active"}
           {citizen.observedOnly ? " · provider-owned" : ""}
-        </span>
-      </span>
-    </Button>
+        </div>
+      </div>
+      <Button
+        size="xs"
+        variant="outline"
+        aria-label={`Focus ${relation}: ${citizen.name}`}
+        onClick={() => onFocus(citizen.threadId)}
+      >
+        Focus
+      </Button>
+    </div>
   );
 }
 
@@ -71,6 +81,7 @@ export function CivilizationLineageExplorer({
   initialThreadId,
   pageSize,
   onClose,
+  onViewCitizen,
   onViewChronicle,
   onViewCorrespondence,
   onViewContext,
@@ -139,6 +150,7 @@ export function CivilizationLineageExplorer({
                     citizen={lineage.data.parent}
                     relation="Parent"
                     onFocus={focus}
+                    onViewCitizen={onViewCitizen}
                   />
                 )}
               </div>
@@ -146,7 +158,13 @@ export function CivilizationLineageExplorer({
                 <div className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
                   Focus citizen
                 </div>
-                <div className="mt-1 text-base font-semibold">{lineage.data.focus.name}</div>
+                <div className="mt-1 text-base font-semibold">
+                  <CivilizationCitizenLink
+                    threadId={lineage.data.focus.threadId}
+                    name={lineage.data.focus.name}
+                    onViewCitizen={onViewCitizen}
+                  />
+                </div>
                 <div className="wrap-anywhere text-xs text-muted-foreground">
                   generation {lineage.data.focus.generation} · {lineage.data.focus.lineageStatus} ·
                   rev {lineage.data.focus.revision}
@@ -172,7 +190,7 @@ export function CivilizationLineageExplorer({
                       variant="outline"
                       onClick={() => onViewCorrespondence(lineage.data!.focus.threadId)}
                     >
-                      Correspondence
+                      Messages
                     </Button>
                   )}
                   {onViewContext === undefined ? null : (
@@ -206,6 +224,7 @@ export function CivilizationLineageExplorer({
                       citizen={child}
                       relation={child.relationshipToParent ?? "Child"}
                       onFocus={focus}
+                      onViewCitizen={onViewCitizen}
                     />
                   </div>
                 ))

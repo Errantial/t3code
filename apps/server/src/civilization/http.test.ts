@@ -165,6 +165,55 @@ const makeRoutes = (
     reconcileExisting: () =>
       Effect.succeed({ citizenCount: 0, caughtUpCitizenCount: 0, appliedEventCount: 0 }),
     getCitizen: () => Effect.succeed(null),
+    getCitizenDetail: ({ projectId, threadId }) =>
+      Effect.succeed({
+        threadId,
+        projectId,
+        identity: {
+          nameEntryId: "ada",
+          namePoolId: "default-names",
+          baseName: "Ada",
+          displayName: "Ada",
+        },
+        personality: {
+          profileEntryId: "calm",
+          profilePoolId: "default-profiles",
+          base: { label: "Calm", traits: ["calm"], styleText: "Calm style." },
+          rich: {
+            label: "Stoic Architect",
+            traits: ["deliberate"],
+            axiom: "Build carefully.",
+            voice: "Measured.",
+            styleText: "Architectural style.",
+          },
+        },
+        presentation: { rendering: "rich" as const, label: "Stoic Architect" },
+        host: {
+          threadTitle: "[Ada] Read only",
+          providerInstanceId: ProviderInstanceId.make("codex"),
+        },
+        lineage: {
+          generation: 0,
+          status: "resolved" as const,
+          parentThreadId: null,
+          relationshipToParent: null,
+        },
+        lifecycle: {
+          state: "open" as const,
+          epoch: 0,
+          closed: false,
+          deleted: false,
+        },
+        observedOnly: false,
+        title: {
+          managed: true,
+          topic: "Read only",
+          preservedTitle: null,
+          lastManagedTitle: "[Ada] Read only",
+          managedTitlePreview: "[Ada] Read only",
+        },
+        revision: 1,
+      }),
   });
   const auth = Layer.succeed(EnvironmentAuthenticatedAuth, (effect) =>
     effect.pipe(
@@ -272,6 +321,22 @@ it.effect(
             );
             expect(capabilityResponse.status).toBe(200);
             expect(await capabilityResponse.json()).toEqual({ providers: [] });
+
+            const citizenDetailResponse = await server.handler(
+              new Request(
+                "http://127.0.0.1/api/civilization/citizens/detail?projectId=project%3Aread-only&threadId=thread%3Aread-only",
+              ),
+              requestContext,
+            );
+            expect(citizenDetailResponse.status).toBe(200);
+            expect(await citizenDetailResponse.json()).toMatchObject({
+              projectId: "project:read-only",
+              threadId: "thread:read-only",
+              identity: { displayName: "Ada" },
+              presentation: { rendering: "rich", label: "Stoic Architect" },
+              host: { threadTitle: "[Ada] Read only", providerInstanceId: "codex" },
+              title: { managedTitlePreview: "[Ada] Read only" },
+            });
 
             const lineageResponse = await server.handler(
               new Request(

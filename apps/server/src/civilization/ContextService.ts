@@ -15,6 +15,7 @@ import {
   type CivilizationContextReference,
   type CivilizationContextResponse,
   type CivilizationContextSuppressionReason,
+  type CivilizationCitizenNameReference,
   type CivilizationMailBody,
   type CivilizationNoteId,
   type ProjectId,
@@ -125,6 +126,11 @@ type NoteRow = {
   readonly accepted_interaction_mode: ProviderInteractionMode;
   readonly revision: number;
   readonly updated_at: string;
+};
+
+type CitizenNameRow = {
+  readonly thread_id: ThreadId;
+  readonly name_display: string;
 };
 
 const renderPacket = (payload: unknown) => {
@@ -466,6 +472,23 @@ const make = Effect.gen(function* () {
   const adapters = yield* ProviderAdapterRegistry.ProviderAdapterRegistryV2;
   const mail = yield* MailService.CivilizationMailService;
 
+  const loadCitizenReferences = Effect.fn("CivilizationContextService.loadCitizenReferences")(
+    function* (projectId: ProjectId, threadIds: ReadonlyArray<ThreadId>) {
+      const uniqueThreadIds = [...new Set(threadIds)].sort((left, right) =>
+        String(left).localeCompare(String(right)),
+      );
+      if (uniqueThreadIds.length === 0)
+        return [] as ReadonlyArray<CivilizationCitizenNameReference>;
+      const rows = yield* sql<CitizenNameRow>`
+        SELECT thread_id, name_display
+        FROM civilization_citizens
+        WHERE project_id = ${projectId} AND thread_id IN ${sql.in(uniqueThreadIds)}
+        ORDER BY thread_id ASC
+      `;
+      return rows.map((row) => ({ threadId: row.thread_id, name: row.name_display }));
+    },
+  );
+
   const persistInspection = Effect.fn("CivilizationContextService.persistInspection")(
     function* (input: {
       readonly turn: CivilizationContextForTurnInput;
@@ -573,6 +596,7 @@ const make = Effect.gen(function* () {
   const listInspections = Effect.fn("CivilizationContextService.listInspections")(function* (
     input: CivilizationContextInspectionListInput,
   ) {
+    const effective = yield* config.getEffective(input.projectId);
     const limit = Math.trunc(input.limit ?? 50);
     if (limit < 1 || limit > 100) {
       return yield* new CivilizationContextInspectionInvalidError({ reason: "invalid_limit" });
@@ -627,15 +651,51 @@ const make = Effect.gen(function* () {
       LIMIT ${limit + 1}
     `;
     const pageRows = rows.slice(0, limit);
+    const citizenReferences = yield* loadCitizenReferences(
+      input.projectId,
+      pageRows.map((row) => row.thread_id),
+    );
+    const inspections: Array<CivilizationContextInspectionSummary> = [];
+    let byteLimited = false;
+    for (const row of pageRows) {
+      const candidate = inspectionSummary(row);
+      const candidateInspections = [...inspections, candidate];
+      const includedThreadIds = new Set(
+        candidateInspections.map((inspection) => inspection.threadId),
+      );
+      const candidatePage = {
+        projectId: input.projectId,
+        inspections: candidateInspections,
+        citizenReferences: citizenReferences.filter((reference) =>
+          includedThreadIds.has(reference.threadId),
+        ),
+        nextCursor: encodeInspectionCursor(row),
+        partial: true,
+      } satisfies CivilizationContextInspectionPage;
+      if (
+        Buffer.byteLength(JSON.stringify(candidatePage), "utf8") >
+        effective.config.operations.responseBodyBytes
+      ) {
+        byteLimited = true;
+        break;
+      }
+      inspections.push(candidate);
+    }
+    if (rows.length > 0 && inspections.length === 0) {
+      return yield* new CivilizationContextInspectionInvalidError({ reason: "response_too_large" });
+    }
+    const partial = byteLimited || rows.length > inspections.length;
+    const last = inspections.length === 0 ? undefined : pageRows[inspections.length - 1];
+    const includedThreadIds = new Set(inspections.map((inspection) => inspection.threadId));
     return {
       projectId: input.projectId,
-      inspections: pageRows.map(inspectionSummary),
-      nextCursor:
-        rows.length > limit && pageRows.length > 0
-          ? encodeInspectionCursor(pageRows.at(-1)!)
-          : null,
-      partial: rows.length > limit,
-    } satisfies CivilizationContextInspectionPage;
+      inspections,
+      citizenReferences: citizenReferences.filter((reference) =>
+        includedThreadIds.has(reference.threadId),
+      ),
+      nextCursor: partial && last !== undefined ? encodeInspectionCursor(last) : null,
+      partial,
+    } as CivilizationContextInspectionPage;
   });
 
   const analytics = Effect.fn("CivilizationContextService.analytics")(function* (

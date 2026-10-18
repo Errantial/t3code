@@ -49,6 +49,7 @@ vi.mock("../../state/civilization", () => ({
         projectId,
         revision: 2,
         awards: [award],
+        citizenReferences: [{ threadId: childId, name: "Child Grace" }],
         nextCursor: null,
         partial: false,
       },
@@ -64,6 +65,10 @@ vi.mock("../../state/civilization", () => ({
         projectId,
         revision: 3,
         entries: [entry],
+        citizenReferences: [
+          { threadId: childId, name: "Child Grace" },
+          { threadId: parentId, name: "Root Ada" },
+        ],
         nextCursor: null,
         partial: false,
       },
@@ -133,6 +138,8 @@ describe("Civilization Chronicle", () => {
     expect(rendered).toContain("First descendant");
     expect(rendered).toContain("relationship ");
     expect(rendered).toContain("fork");
+    expect(rendered).toContain("Child Grace");
+    expect(rendered).toContain("Root Ada");
     expect(rendered).not.toContain("body");
     const chronicleCall = testState.calls.find((call) => call[0] === "chronicle");
     expect(chronicleCall?.slice(1, 6)).toEqual([
@@ -145,7 +152,7 @@ describe("Civilization Chronicle", () => {
 
     const child = renderer!.root
       .findAllByType("button")
-      .find((button) => button.props.children === childId);
+      .find((button) => button.props["aria-label"] === `View lineage ${childId}`);
     expect(child).toBeDefined();
     await act(() => child!.props.onClick());
     expect(onViewLineage).toHaveBeenCalledWith(childId);

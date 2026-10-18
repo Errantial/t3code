@@ -18,12 +18,14 @@ import {
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../ui/select";
+import { CivilizationCitizenLink } from "./CivilizationCitizenLink";
 import { SettingsRow, SettingsSection } from "./settingsLayout";
 
 interface CivilizationChronicleProps {
   readonly environmentId: EnvironmentId;
   readonly projectId: ProjectId;
   readonly pageSize: number;
+  readonly onViewCitizen?: ((threadId: ThreadId) => void) | undefined;
   readonly onViewLineage?: ((threadId: ThreadId) => void) | undefined;
   readonly initialThreadId?: ThreadId | undefined;
   readonly initialSourceId?: string | undefined;
@@ -74,27 +76,50 @@ const achievementLabel = (achievementId: CivilizationAchievementId): string =>
 
 function ChronicleThreadLink({
   threadId,
+  name,
+  onViewCitizen,
   onViewLineage,
 }: {
   readonly threadId: ThreadId;
+  readonly name?: string | null | undefined;
+  readonly onViewCitizen?: ((threadId: ThreadId) => void) | undefined;
   readonly onViewLineage?: ((threadId: ThreadId) => void) | undefined;
 }) {
-  return onViewLineage === undefined ? (
-    <span className="wrap-anywhere">{threadId}</span>
-  ) : (
-    <Button size="xs" variant="ghost" onClick={() => onViewLineage(threadId)}>
-      {threadId}
-    </Button>
+  return (
+    <span className="inline-flex flex-wrap items-center gap-1">
+      <CivilizationCitizenLink
+        threadId={threadId}
+        name={name ?? String(threadId)}
+        onViewCitizen={onViewCitizen}
+        secondary={name == null ? undefined : String(threadId)}
+      />
+      {onViewCitizen !== undefined || onViewLineage === undefined ? null : (
+        <Button
+          size="xs"
+          variant="ghost"
+          aria-label={`View lineage ${threadId}`}
+          onClick={() => onViewLineage(threadId)}
+        >
+          Lineage
+        </Button>
+      )}
+    </span>
   );
 }
 
 function ChronicleEntry({
   entry,
+  citizenName,
+  relatedCitizenName,
+  onViewCitizen,
   onViewLineage,
   onViewNote,
   onViewCorrespondence,
 }: {
   readonly entry: CivilizationChronicleEntry;
+  readonly citizenName?: string | undefined;
+  readonly relatedCitizenName?: string | undefined;
+  readonly onViewCitizen?: ((threadId: ThreadId) => void) | undefined;
   readonly onViewLineage?: ((threadId: ThreadId) => void) | undefined;
   readonly onViewNote?: ((noteId: string) => void) | undefined;
   readonly onViewCorrespondence?: ((messageId: string) => void) | undefined;
@@ -116,13 +141,20 @@ function ChronicleEntry({
             {entry.primaryThreadId === null ? (
               "project"
             ) : (
-              <ChronicleThreadLink threadId={entry.primaryThreadId} onViewLineage={onViewLineage} />
+              <ChronicleThreadLink
+                threadId={entry.primaryThreadId}
+                name={citizenName}
+                onViewCitizen={onViewCitizen}
+                onViewLineage={onViewLineage}
+              />
             )}
             {entry.secondaryThreadId === null ? null : (
               <>
                 {" · related "}
                 <ChronicleThreadLink
                   threadId={entry.secondaryThreadId}
+                  name={relatedCitizenName}
+                  onViewCitizen={onViewCitizen}
                   onViewLineage={onViewLineage}
                 />
               </>
@@ -158,9 +190,13 @@ function ChronicleEntry({
 
 function AchievementAward({
   award,
+  citizenName,
+  onViewCitizen,
   onViewLineage,
 }: {
   readonly award: CivilizationAchievementAward;
+  readonly citizenName?: string | undefined;
+  readonly onViewCitizen?: ((threadId: ThreadId) => void) | undefined;
   readonly onViewLineage?: ((threadId: ThreadId) => void) | undefined;
 }) {
   return (
@@ -172,7 +208,12 @@ function AchievementAward({
             {award.subjectThreadId === null ? (
               "project"
             ) : (
-              <ChronicleThreadLink threadId={award.subjectThreadId} onViewLineage={onViewLineage} />
+              <ChronicleThreadLink
+                threadId={award.subjectThreadId}
+                name={citizenName}
+                onViewCitizen={onViewCitizen}
+                onViewLineage={onViewLineage}
+              />
             )}
             {` · definition v${award.definitionVersion}`}
           </div>
@@ -190,6 +231,7 @@ export function CivilizationChronicle({
   environmentId,
   projectId,
   pageSize,
+  onViewCitizen,
   onViewLineage,
   initialThreadId,
   initialSourceId,
@@ -230,6 +272,15 @@ export function CivilizationChronicle({
   );
   const achievementNextCursor = achievements.data?.nextCursor ?? null;
   const nextCursor = page.data?.nextCursor ?? null;
+  const chronicleNames = new Map(
+    (page.data?.citizenReferences ?? []).map((reference) => [reference.threadId, reference.name]),
+  );
+  const achievementNames = new Map(
+    (achievements.data?.citizenReferences ?? []).map((reference) => [
+      reference.threadId,
+      reference.name,
+    ]),
+  );
 
   const resetPaging = () => {
     setCursor(null);
@@ -291,7 +342,17 @@ export function CivilizationChronicle({
             ) : null}
             <ol className="space-y-2" aria-label="Civilization achievements">
               {achievements.data?.awards.map((award) => (
-                <AchievementAward key={award.awardId} award={award} onViewLineage={onViewLineage} />
+                <AchievementAward
+                  key={award.awardId}
+                  award={award}
+                  citizenName={
+                    award.subjectThreadId === null
+                      ? undefined
+                      : achievementNames.get(award.subjectThreadId)
+                  }
+                  onViewCitizen={onViewCitizen}
+                  onViewLineage={onViewLineage}
+                />
               ))}
             </ol>
             <div className="flex flex-wrap items-center gap-2">
@@ -410,6 +471,17 @@ export function CivilizationChronicle({
             <ChronicleEntry
               key={entry.entryId}
               entry={entry}
+              citizenName={
+                entry.primaryThreadId === null
+                  ? undefined
+                  : chronicleNames.get(entry.primaryThreadId)
+              }
+              relatedCitizenName={
+                entry.secondaryThreadId === null
+                  ? undefined
+                  : chronicleNames.get(entry.secondaryThreadId)
+              }
+              onViewCitizen={onViewCitizen}
               onViewLineage={onViewLineage}
               onViewNote={onViewNote}
               onViewCorrespondence={onViewCorrespondence}

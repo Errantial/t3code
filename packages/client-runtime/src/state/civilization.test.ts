@@ -13,6 +13,7 @@ import {
   RunId,
   ThreadId,
   type CivilizationCapabilitiesResult,
+  type CivilizationCitizenDetail,
   type CivilizationContextAnalyticsResult,
   type CivilizationEffectiveConfig,
   type CivilizationStatus,
@@ -38,6 +39,7 @@ import {
   exportEnvironmentCivilizationConfig,
   fetchEnvironmentCivilizationAchievementPage,
   fetchEnvironmentCivilizationCensusPage,
+  fetchEnvironmentCivilizationCitizenDetail,
   fetchEnvironmentCivilizationChroniclePage,
   fetchEnvironmentCivilizationCorrespondencePage,
   fetchEnvironmentCivilizationCorrespondenceThread,
@@ -46,6 +48,7 @@ import {
   fetchEnvironmentCivilizationConfig,
   fetchEnvironmentCivilizationConfigDescription,
   fetchCurrentEnvironmentCivilizationContextAnalytics,
+  fetchCurrentEnvironmentCivilizationCitizenDetail,
   fetchEnvironmentCivilizationContextAnalytics,
   fetchEnvironmentCivilizationContextInspectionDetail,
   fetchEnvironmentCivilizationContextInspectionPage,
@@ -132,6 +135,53 @@ const CONTEXT_ANALYTICS = {
   appliedDiagnosticRetentionDays: 7,
   buckets: [],
 } satisfies CivilizationContextAnalyticsResult;
+const CITIZEN_DETAIL = {
+  threadId: ThreadId.make("thread:civilization-ui:detail"),
+  projectId: PROJECT_ID,
+  identity: {
+    nameEntryId: "ada",
+    namePoolId: "default-names",
+    baseName: "Ada",
+    displayName: "Ada",
+  },
+  personality: {
+    profileEntryId: "calm",
+    profilePoolId: "default-profiles",
+    base: {
+      label: "Calm",
+      traits: ["calm", "concise"],
+      styleText: "Prefer a calm, concise style.",
+    },
+    rich: {
+      label: "Stoic Architect",
+      traits: ["deliberate", "composed", "structural"],
+      axiom: "Build carefully.",
+      voice: "Measured.",
+      styleText: "Use a stoic architectural voice.",
+    },
+  },
+  presentation: { rendering: "rich", label: "Stoic Architect" },
+  host: {
+    threadTitle: "[Ada] Detail topic",
+    providerInstanceId: ProviderInstanceId.make("codex"),
+  },
+  lineage: {
+    generation: 1,
+    status: "resolved",
+    parentThreadId: ThreadId.make("thread:civilization-ui:parent"),
+    relationshipToParent: "fork",
+  },
+  lifecycle: { state: "open", epoch: 2, closed: false, deleted: false },
+  observedOnly: false,
+  title: {
+    managed: true,
+    topic: "Detail topic",
+    preservedTitle: "Detail topic",
+    lastManagedTitle: "[Ada] Detail topic",
+    managedTitlePreview: "[Ada] Detail topic",
+  },
+  revision: 7,
+} satisfies CivilizationCitizenDetail;
 
 function responseFor(url: string) {
   const parsed = new URL(url);
@@ -150,6 +200,50 @@ function responseFor(url: string) {
 }
 
 describe("Civilization environment HTTP reads", () => {
+  it.effect("fetches exact bounded citizen detail through direct and current auth paths", () =>
+    Effect.gen(function* () {
+      const calls: string[] = [];
+      const fetchFn: typeof fetch = async (request) => {
+        const url = String(request);
+        calls.push(url);
+        return new URL(url).pathname === "/api/civilization/citizens/detail"
+          ? Response.json(CITIZEN_DETAIL)
+          : new Response("not found", { status: 404 });
+      };
+      const provide = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
+        effect.pipe(Effect.provide(RpcHttp.layerRemoteHttpClient(fetchFn)));
+      const auth = {
+        prepared: PREPARED,
+        signer: Option.none(),
+        remoteAuthorization: Option.none(),
+      };
+
+      const direct = yield* provide(
+        fetchEnvironmentCivilizationCitizenDetail({
+          ...auth,
+          projectId: PROJECT_ID,
+          threadId: CITIZEN_DETAIL.threadId,
+        }),
+      );
+      expect(direct).toEqual(CITIZEN_DETAIL);
+      const directUrl = new URL(calls[0]!);
+      expect(directUrl.pathname).toBe("/api/civilization/citizens/detail");
+      expect([...directUrl.searchParams.keys()].sort()).toEqual(["projectId", "threadId"]);
+      expect(directUrl.searchParams.get("projectId")).toBe(PROJECT_ID);
+      expect(directUrl.searchParams.get("threadId")).toBe(CITIZEN_DETAIL.threadId);
+
+      const current = yield* provide(
+        fetchCurrentEnvironmentCivilizationCitizenDetail({
+          prepared: PREPARED,
+          projectId: PROJECT_ID,
+          threadId: CITIZEN_DETAIL.threadId,
+        }),
+      );
+      expect(current).toEqual(CITIZEN_DETAIL);
+      expect(new URL(calls[1]!).searchParams.get("threadId")).toBe(CITIZEN_DETAIL.threadId);
+    }),
+  );
+
   it.effect(
     "maps only bounded context analytics metadata filters for direct and current reads",
     () =>
@@ -229,6 +323,7 @@ describe("Civilization environment HTTP reads", () => {
         const messageId = CivilizationMessageId.make("mail:client-runtime:correspondence");
         const parentId = CivilizationMessageId.make("mail:client-runtime:parent");
         const participantThreadId = ThreadId.make("thread:client-runtime:participant");
+        const counterpartyThreadId = ThreadId.make("thread:client-runtime:counterparty");
         const senderThreadId = ThreadId.make("thread:client-runtime:sender");
         const recipientThreadId = ThreadId.make("thread:client-runtime:recipient");
         const fetchFn: typeof fetch = async (request) => {
@@ -273,6 +368,7 @@ describe("Civilization environment HTTP reads", () => {
             ...auth,
             projectId: PROJECT_ID,
             participantThreadId,
+            counterpartyThreadId,
             senderThreadId,
             recipientThreadId,
             replyRelation: "replies_to",
@@ -289,6 +385,7 @@ describe("Civilization environment HTTP reads", () => {
         expect(historyUrl.pathname).toBe("/api/civilization/correspondence");
         expect(historyUrl.searchParams.get("projectId")).toBe(PROJECT_ID);
         expect(historyUrl.searchParams.get("participantThreadId")).toBe(participantThreadId);
+        expect(historyUrl.searchParams.get("counterpartyThreadId")).toBe(counterpartyThreadId);
         expect(historyUrl.searchParams.get("senderThreadId")).toBe(senderThreadId);
         expect(historyUrl.searchParams.get("recipientThreadId")).toBe(recipientThreadId);
         expect(historyUrl.searchParams.get("replyRelation")).toBe("replies_to");

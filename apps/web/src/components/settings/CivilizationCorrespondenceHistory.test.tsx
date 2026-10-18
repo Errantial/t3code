@@ -64,7 +64,17 @@ vi.mock("../../state/civilization", () => ({
   useCivilizationCorrespondencePage: (...args: unknown[]) => {
     testState.pageCalls.push(args);
     return {
-      data: { projectId, revision: 4, messages: [message], nextCursor: null, partial: false },
+      data: {
+        projectId,
+        revision: 4,
+        messages: [message],
+        citizenReferences: [
+          { threadId: senderId, name: "Ada Current" },
+          { threadId: recipientId, name: "Grace" },
+        ],
+        nextCursor: null,
+        partial: false,
+      },
       error: null,
       isPending: false,
       refresh: vi.fn(),
@@ -82,6 +92,10 @@ vi.mock("../../state/civilization", () => ({
               revision: 4,
               selectedMessageId: messageId,
               entries: [{ message, relation: "selected", depth: 0, unresolvedParent: false }],
+              citizenReferences: [
+                { threadId: senderId, name: "Ada Current" },
+                { threadId: recipientId, name: "Grace" },
+              ],
               rootStatus: "resolved",
               ancestorTruncated: false,
               descendantsTruncated: false,
@@ -167,6 +181,7 @@ describe("Civilization correspondence history", () => {
     expect(rendered).toContain("Correspondence history");
     expect(rendered).toContain("epoch 3");
     expect(rendered).toContain("recipient delivery epoch 7");
+    expect(rendered).toContain("Grace");
     expect(rendered).toContain("acknowledged");
     expect(rendered).toContain("terminal no");
     expect(rendered).toContain(

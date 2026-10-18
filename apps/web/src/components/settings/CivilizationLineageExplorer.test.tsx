@@ -148,7 +148,7 @@ describe("Civilization Ancestral Hall", () => {
 
     const childButton = renderer!.root
       .findAllByType("button")
-      .find((button) => button.props["aria-label"] === "fork: Child Grace");
+      .find((button) => button.props["aria-label"] === "Focus fork: Child Grace");
     expect(childButton).toBeDefined();
     await act(() => childButton!.props.onClick());
 
@@ -170,6 +170,7 @@ describe("Civilization Ancestral Hall", () => {
     const onViewChronicle = vi.fn();
     const onViewCorrespondence = vi.fn();
     const onViewContext = vi.fn();
+    const onViewCitizen = vi.fn();
     await act(() => {
       renderer = create(
         <CivilizationLineageExplorer
@@ -178,6 +179,7 @@ describe("Civilization Ancestral Hall", () => {
           initialThreadId={rootId}
           pageSize={50}
           onClose={vi.fn()}
+          onViewCitizen={onViewCitizen}
           onViewChronicle={onViewChronicle}
           onViewCorrespondence={onViewCorrespondence}
           onViewContext={onViewContext}
@@ -186,7 +188,7 @@ describe("Civilization Ancestral Hall", () => {
     });
     for (const [label, callback] of [
       ["Chronicle", onViewChronicle],
-      ["Correspondence", onViewCorrespondence],
+      ["Messages", onViewCorrespondence],
       ["Context", onViewContext],
     ] as const) {
       const button = renderer!.root
@@ -195,5 +197,12 @@ describe("Civilization Ancestral Hall", () => {
       await act(() => button!.props.onClick());
       expect(callback).toHaveBeenCalledWith(rootId);
     }
+
+    const citizenButton = renderer!.root
+      .findAllByType("button")
+      .find((candidate) => candidate.props["aria-label"] === "View citizen Root Ada");
+    expect(citizenButton).toBeDefined();
+    await act(() => citizenButton!.props.onClick());
+    expect(onViewCitizen).toHaveBeenCalledWith(rootId);
   });
 });

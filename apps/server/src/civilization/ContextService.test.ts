@@ -1370,6 +1370,7 @@ it.effect(
       assert.lengthOf(firstPage.inspections, 1);
       assert.isTrue(firstPage.partial);
       assert.isNotNull(firstPage.nextCursor);
+      assert.deepEqual(firstPage.citizenReferences, [{ threadId: callerThreadId, name: "Caller" }]);
       const secondPage = yield* service.listInspections({
         projectId,
         limit: 1,

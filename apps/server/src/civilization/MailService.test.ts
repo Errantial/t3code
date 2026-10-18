@@ -267,6 +267,9 @@ it.effect("lists correspondence with revision-bound filters without reading bodi
     const c = ThreadId.make("thread:mail:correspondence:c");
     yield* seedProject(projectId);
     yield* enableFeature();
+    yield* seedActor(projectId, { threadId: a, runId: RunId.make("run:correspondence:a") });
+    yield* seedActor(projectId, { threadId: b, runId: RunId.make("run:correspondence:b") });
+    yield* seedActor(projectId, { threadId: c, runId: RunId.make("run:correspondence:c") });
     yield* insertRetainedMessage({
       messageId: "mail:correspondence:root",
       projectId,
@@ -315,6 +318,10 @@ it.effect("lists correspondence with revision-bound filters without reading bodi
       "time windows are canonical and half-open",
     );
     assert.notInclude(JSON.stringify(participant), "retained-history-body");
+    assert.deepEqual(participant.citizenReferences, [
+      { threadId: a, name: `Citizen ${a}` },
+      { threadId: b, name: `Citizen ${b}` },
+    ]);
 
     const roots = yield* service.listCorrespondenceHistory({
       projectId,
@@ -413,6 +420,8 @@ it.effect(
       const b = ThreadId.make("thread:mail:thread:b");
       yield* seedProject(projectId);
       yield* enableFeature();
+      yield* seedActor(projectId, { threadId: a, runId: RunId.make("run:thread:a") });
+      yield* seedActor(projectId, { threadId: b, runId: RunId.make("run:thread:b") });
       yield* insertRetainedMessage({
         messageId: "mail:thread:root",
         projectId,
@@ -482,6 +491,10 @@ it.effect(
         "wide descendants use deterministic breadth-first accepted-time order",
       );
       assert.notInclude(JSON.stringify(segment), "retained-history-body");
+      assert.deepEqual(segment.citizenReferences, [
+        { threadId: a, name: `Citizen ${a}` },
+        { threadId: b, name: `Citizen ${b}` },
+      ]);
 
       const depthLimited = yield* service.readCorrespondenceThread({
         projectId,

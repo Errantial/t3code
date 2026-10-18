@@ -5,6 +5,7 @@ import {
   CivilizationAchievementCursor,
   type CivilizationAchievementId,
   type CivilizationAchievementPage,
+  type CivilizationCitizenNameReference,
   CivilizationChronicleCursor,
   CivilizationChronicleEntry,
   CivilizationChronicleEntryId,
@@ -91,6 +92,11 @@ interface AchievementCursorPayload {
   readonly threadId: string | null;
   readonly afterAwardedAt: string;
   readonly afterAwardId: string;
+}
+
+interface CitizenNameRow {
+  readonly thread_id: ThreadId;
+  readonly name_display: string;
 }
 
 export interface AchievementListInput {
@@ -315,6 +321,45 @@ export const recordChronicleEntry = Effect.fn("CivilizationChronicle.record")(fu
 const make = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
 
+  const loadCitizenReferences = Effect.fn("CivilizationChronicle.loadCitizenReferences")(function* (
+    projectId: ProjectId,
+    threadIds: ReadonlyArray<ThreadId>,
+  ) {
+    const uniqueThreadIds = [...new Set(threadIds)].sort((left, right) =>
+      String(left).localeCompare(String(right)),
+    );
+    if (uniqueThreadIds.length === 0) return [] as ReadonlyArray<CivilizationCitizenNameReference>;
+    const rows = yield* sql<CitizenNameRow>`
+        SELECT thread_id, name_display
+        FROM civilization_citizens
+        WHERE project_id = ${projectId} AND thread_id IN ${sql.in(uniqueThreadIds)}
+        ORDER BY thread_id ASC
+      `;
+    return rows.map((row) => ({ threadId: row.thread_id, name: row.name_display }));
+  });
+
+  const referencesForChronicleEntries = (
+    entries: ReadonlyArray<CivilizationChronicleEntry>,
+    references: ReadonlyArray<CivilizationCitizenNameReference>,
+  ) => {
+    const included = new Set<ThreadId>();
+    for (const entry of entries) {
+      if (entry.primaryThreadId !== null) included.add(entry.primaryThreadId);
+      if (entry.secondaryThreadId !== null) included.add(entry.secondaryThreadId);
+    }
+    return references.filter((reference) => included.has(reference.threadId));
+  };
+
+  const referencesForAchievements = (
+    awards: ReadonlyArray<CivilizationAchievementAward>,
+    references: ReadonlyArray<CivilizationCitizenNameReference>,
+  ) => {
+    const included = new Set(
+      awards.flatMap((award) => (award.subjectThreadId === null ? [] : [award.subjectThreadId])),
+    );
+    return references.filter((reference) => included.has(reference.threadId));
+  };
+
   const list = Effect.fn("CivilizationChronicle.list")(function* (input: ChronicleListInput) {
     return yield* sql.withTransaction(
       Effect.gen(function* () {
@@ -481,10 +526,20 @@ const make = Effect.gen(function* () {
                 `;
           rows = mergeBoundedRows(primary, secondary, queryLimit);
         }
+        const pageRows = rows.slice(0, limit);
+        const citizenReferences = yield* loadCitizenReferences(
+          input.projectId,
+          pageRows.flatMap((row) =>
+            [row.primary_thread_id, row.secondary_thread_id].filter(
+              (threadId): threadId is ThreadId => threadId !== null,
+            ),
+          ),
+        );
         const entries: Array<CivilizationChronicleEntry> = [];
         let byteLimited = false;
-        for (const row of rows.slice(0, limit)) {
+        for (const row of pageRows) {
           const candidate = rowToEntry(row);
+          const candidateEntries = [...entries, candidate];
           const nextCursor = encodeCursor({
             v: CURSOR_VERSION,
             projectId: input.projectId,
@@ -500,7 +555,8 @@ const make = Effect.gen(function* () {
           const candidatePage: CivilizationChroniclePage = {
             projectId: input.projectId,
             revision: state.chronicle_revision,
-            entries: [...entries, candidate],
+            entries: candidateEntries,
+            citizenReferences: referencesForChronicleEntries(candidateEntries, citizenReferences),
             nextCursor,
             partial: true,
           };
@@ -525,6 +581,7 @@ const make = Effect.gen(function* () {
           projectId: input.projectId,
           revision: state.chronicle_revision,
           entries,
+          citizenReferences: referencesForChronicleEntries(entries, citizenReferences),
           nextCursor:
             !partial || last === undefined
               ? null
@@ -541,7 +598,7 @@ const make = Effect.gen(function* () {
                   afterEntryId: last.entry_id,
                 }),
           partial,
-        } satisfies CivilizationChroniclePage;
+        } as CivilizationChroniclePage;
       }),
     );
   });
@@ -603,14 +660,23 @@ const make = Effect.gen(function* () {
                 ORDER BY awarded_at DESC, award_id DESC
                 LIMIT ${queryLimit}
               `;
+        const pageRows = rows.slice(0, limit);
+        const citizenReferences = yield* loadCitizenReferences(
+          input.projectId,
+          pageRows.flatMap((row) =>
+            row.subject_thread_id === null ? [] : [row.subject_thread_id],
+          ),
+        );
         const awards: Array<CivilizationAchievementAward> = [];
         let byteLimited = false;
-        for (const row of rows.slice(0, limit)) {
+        for (const row of pageRows) {
           const candidate = rowToAchievement(row);
+          const candidateAwards = [...awards, candidate];
           const candidatePage: CivilizationAchievementPage = {
             projectId: input.projectId,
             revision: state.achievement_revision,
-            awards: [...awards, candidate],
+            awards: candidateAwards,
+            citizenReferences: referencesForAchievements(candidateAwards, citizenReferences),
             nextCursor: encodeAchievementCursor({
               v: ACHIEVEMENT_CURSOR_VERSION,
               projectId: input.projectId,
@@ -642,6 +708,7 @@ const make = Effect.gen(function* () {
           projectId: input.projectId,
           revision: state.achievement_revision,
           awards,
+          citizenReferences: referencesForAchievements(awards, citizenReferences),
           nextCursor:
             !partial || last === undefined
               ? null
@@ -654,7 +721,7 @@ const make = Effect.gen(function* () {
                   afterAwardId: last.award_id,
                 }),
           partial,
-        } satisfies CivilizationAchievementPage;
+        } as CivilizationAchievementPage;
       }),
     );
   });

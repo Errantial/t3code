@@ -21,11 +21,43 @@ const serviceLayer = layer.pipe(Layer.provide(database));
 const testLayer = Layer.mergeAll(database, serviceLayer);
 const isInvalid = Schema.is(CivilizationChronicleInvalidError);
 
+const seedCitizenName = Effect.fn("ChronicleService.test.seedCitizenName")(function* (
+  threadId: ThreadId,
+  name: string,
+) {
+  const sql = yield* SqlClient.SqlClient;
+  yield* sql`
+    INSERT INTO civilization_citizens (
+      thread_id, project_id, parent_thread_id, relationship_to_parent, root_thread_id,
+      generation, lineage_status, observed_only, birth_sequence, last_applied_sequence,
+      name_entry_id, name_generator_version, name_base, name_display, name_key, name_pool_id,
+      name_environment_revision, name_project_revision,
+      profile_entry_id, profile_label, profile_traits_json, profile_style_text, profile_pool_id,
+      profile_rich_label, profile_rich_traits_json, profile_rich_axiom, profile_rich_voice,
+      profile_rich_style_text, profile_environment_revision, profile_project_revision,
+      title_managed, preserved_title, last_managed_title, title_topic,
+      pending_title_command_id, pending_managed_title, pending_title_topic,
+      epoch, closed, deleted, revision, created_at, updated_at
+    ) VALUES (
+      ${threadId}, ${projectId}, NULL, NULL, ${threadId},
+      0, 'resolved', 0, 1, 1,
+      ${`name:${threadId}`}, 1, ${name}, ${name}, ${threadId}, 'main',
+      1, 0,
+      'calm', 'Calm', '[]', '', 'profiles',
+      'Calm Architect', '["calm"]', 'Be calm.', 'Calm.', 'Stay calm.', 1, 0,
+      0, ${name}, NULL, ${name},
+      NULL, NULL, NULL,
+      0, 0, 0, 1, '2026-10-17T20:00:00.000Z', '2026-10-17T20:00:00.000Z'
+    )
+  `;
+});
+
 it.effect("records provenance idempotently and pages Chronicle by stable revision", () =>
   Effect.gen(function* () {
     yield* runMigrations();
     const service = yield* CivilizationChronicleService;
     const sql = yield* SqlClient.SqlClient;
+    yield* seedCitizenName(citizenId, "Ada Chronicle");
 
     const source = {
       projectId,
@@ -75,6 +107,7 @@ it.effect("records provenance idempotently and pages Chronicle by stable revisio
     );
     assert.isTrue(first.partial);
     assert.isNotNull(first.nextCursor);
+    assert.deepEqual(first.citizenReferences, [{ threadId: citizenId, name: "Ada Chronicle" }]);
     const second = yield* service.list({ projectId, limit: 2, cursor: first.nextCursor! });
     assert.deepEqual(
       second.entries.map((entry) => entry.kind),
@@ -215,6 +248,8 @@ it.effect("pages achievement awards by stable revision and binds citizen filters
     const service = yield* CivilizationChronicleService;
     const sql = yield* SqlClient.SqlClient;
     const otherCitizenId = ThreadId.make("thread:chronicle:achievement-other");
+    yield* seedCitizenName(citizenId, "Ada Achievement");
+    yield* seedCitizenName(otherCitizenId, "Grace Achievement");
     yield* sql`
       INSERT INTO civilization_achievement_awards (
         award_id, project_id, achievement_id, definition_version, subject_thread_id,
@@ -235,6 +270,10 @@ it.effect("pages achievement awards by stable revision and binds citizen filters
     );
     assert.isTrue(first.partial);
     assert.isNotNull(first.nextCursor);
+    assert.deepEqual(first.citizenReferences, [
+      { threadId: otherCitizenId, name: "Grace Achievement" },
+      { threadId: citizenId, name: "Ada Achievement" },
+    ]);
     const second = yield* service.listAchievements({
       projectId,
       limit: 2,

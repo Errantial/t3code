@@ -112,6 +112,7 @@ vi.mock("../../state/civilization", () => ({
       data: {
         projectId,
         inspections: [summary],
+        citizenReferences: [{ threadId, name: "Inspector Ada" }],
         nextCursor: null,
         partial: false,
       },
@@ -259,7 +260,7 @@ describe("Civilization context inspector", () => {
     });
     const lineageButton = renderer!.root
       .findAllByType("button")
-      .find((button) => button.props.children === threadId);
+      .find((button) => button.props["aria-label"] === `View lineage ${threadId}`);
     await act(() => lineageButton!.props.onClick());
     expect(onViewLineage).toHaveBeenCalledWith(threadId);
     expect(testState.sensitiveCalls).toEqual([]);

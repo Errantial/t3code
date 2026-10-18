@@ -3,6 +3,7 @@ import {
   CIVILIZATION_MAX_MESSAGE_BYTES,
   type CivilizationAdminMailPage,
   CivilizationAgentAccessError,
+  type CivilizationCitizenNameReference,
   CivilizationCorrespondenceCursor,
   type CivilizationCorrespondenceHistoryPage,
   type CivilizationCorrespondenceReplyRelation,
@@ -148,6 +149,11 @@ type MessageRow = {
   readonly terminal_reason: MailTerminalReason | null;
 };
 type MessageSummaryRow = Omit<MessageRow, "body">;
+
+type CitizenNameRow = {
+  readonly thread_id: ThreadId;
+  readonly name_display: string;
+};
 
 type ReceiptRow = {
   readonly project_id: ProjectId;
@@ -617,6 +623,35 @@ const make = Effect.gen(function* () {
         LIMIT 1
       `)[0];
   });
+
+  const loadCitizenReferences = Effect.fn("CivilizationMail.loadCitizenReferences")(function* (
+    projectId: ProjectId,
+    threadIds: ReadonlyArray<ThreadId>,
+  ) {
+    const uniqueThreadIds = [...new Set(threadIds)].sort((left, right) =>
+      String(left).localeCompare(String(right)),
+    );
+    if (uniqueThreadIds.length === 0) return [] as ReadonlyArray<CivilizationCitizenNameReference>;
+    const rows = yield* sql<CitizenNameRow>`
+        SELECT thread_id, name_display
+        FROM civilization_citizens
+        WHERE project_id = ${projectId} AND thread_id IN ${sql.in(uniqueThreadIds)}
+        ORDER BY thread_id ASC
+      `;
+    return rows.map((row) => ({ threadId: row.thread_id, name: row.name_display }));
+  });
+
+  const referencesForMessages = (
+    messages: ReadonlyArray<CivilizationMailSummary>,
+    references: ReadonlyArray<CivilizationCitizenNameReference>,
+  ) => {
+    const included = new Set<ThreadId>();
+    for (const message of messages) {
+      included.add(message.senderThreadId);
+      included.add(message.recipientThreadId);
+    }
+    return references.filter((reference) => included.has(reference.threadId));
+  };
 
   const readThread = Effect.fn("CivilizationMail.readThread")(function* (
     projectId: ProjectId,
@@ -2017,15 +2052,22 @@ const make = Effect.gen(function* () {
                   return [...byId.values()].sort(compareMessageRows).slice(0, queryLimit);
                 });
 
+          const pageRows = mergedRows.slice(0, limit);
+          const citizenReferences = yield* loadCitizenReferences(
+            normalized.projectId,
+            pageRows.flatMap((row) => [row.sender_thread_id, row.recipient_thread_id]),
+          );
           const messages: Array<CivilizationMailSummary> = [];
           let byteLimited = false;
-          for (const row of mergedRows.slice(0, limit)) {
+          for (const row of pageRows) {
             const candidate = messageSummary(row);
+            const candidateMessages = [...messages, candidate];
             const filters = correspondenceFilterIdentity(normalized);
             const candidatePage = {
               projectId: normalized.projectId,
               revision: state.mail_history_revision,
-              messages: [...messages, candidate],
+              messages: candidateMessages,
+              citizenReferences: referencesForMessages(candidateMessages, citizenReferences),
               nextCursor: encodeCorrespondenceCursor({
                 projectId: normalized.projectId,
                 revision: state.mail_history_revision,
@@ -2053,6 +2095,7 @@ const make = Effect.gen(function* () {
             projectId: normalized.projectId,
             revision: state.mail_history_revision,
             messages,
+            citizenReferences: referencesForMessages(messages, citizenReferences),
             nextCursor:
               !partial || last === undefined
                 ? null
@@ -2064,7 +2107,7 @@ const make = Effect.gen(function* () {
                     afterMessageId: last.message_id,
                   }),
             partial,
-          } satisfies CivilizationCorrespondenceHistoryPage;
+          } as CivilizationCorrespondenceHistoryPage;
         }),
       );
     },
@@ -2246,15 +2289,26 @@ const make = Effect.gen(function* () {
               unresolvedParent: false,
             })),
           ];
-          const page = {
+          const citizenReferences = yield* loadCitizenReferences(
+            input.projectId,
+            entries.flatMap((entry) => [
+              entry.message.senderThreadId,
+              entry.message.recipientThreadId,
+            ]),
+          );
+          const page: CivilizationCorrespondenceThreadPage = {
             projectId: input.projectId,
             revision: state.mail_history_revision,
             selectedMessageId: input.messageId,
             entries,
+            citizenReferences: referencesForMessages(
+              entries.map((entry) => entry.message),
+              citizenReferences,
+            ),
             rootStatus,
             ancestorTruncated,
             descendantsTruncated,
-          } satisfies CivilizationCorrespondenceThreadPage;
+          };
           if (responseBytes(page) > effective.config.operations.responseBodyBytes) {
             return yield* invalid(
               "response_too_large",

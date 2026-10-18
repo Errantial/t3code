@@ -97,6 +97,7 @@ import {
   CivilizationLineageCursor,
   CivilizationLineageNeighborhood,
   CivilizationCapabilitiesResult,
+  CivilizationCitizenDetail,
   CivilizationCitizenNotFoundError,
   CivilizationCitizenReassignmentPreview,
   CivilizationCitizenReassignmentRequest,
@@ -751,6 +752,10 @@ const EnvironmentCivilizationCensusQuery = Schema.Struct({
   cursor: Schema.optionalKey(CivilizationCensusCursor),
   limit: Schema.optionalKey(TrimmedNonEmptyString),
 });
+const EnvironmentCivilizationCitizenDetailQuery = Schema.Struct({
+  projectId: ProjectId,
+  threadId: ThreadId,
+});
 const EnvironmentCivilizationLineageQuery = Schema.Struct({
   projectId: ProjectId,
   threadId: ThreadId,
@@ -808,6 +813,7 @@ const EnvironmentCivilizationInboxMessageQuery = Schema.Struct({
 const EnvironmentCivilizationCorrespondenceQuery = Schema.Struct({
   projectId: ProjectId,
   participantThreadId: Schema.optionalKey(ThreadId),
+  counterpartyThreadId: Schema.optionalKey(ThreadId),
   senderThreadId: Schema.optionalKey(ThreadId),
   recipientThreadId: Schema.optionalKey(ThreadId),
   replyRelation: Schema.optionalKey(CivilizationCorrespondenceReplyRelation),
@@ -993,6 +999,14 @@ class EnvironmentCivilizationHttpApi extends HttpApiGroup.make("civilization")
       headers: OptionalBearerHeaders,
       query: CivilizationConfigScope,
       success: CivilizationConfigExportResult,
+      error: EnvironmentCivilizationErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.get("citizenDetail", "/api/civilization/citizens/detail", {
+      headers: OptionalBearerHeaders,
+      query: EnvironmentCivilizationCitizenDetailQuery,
+      success: CivilizationCitizenDetail,
       error: EnvironmentCivilizationErrors,
     }).middleware(EnvironmentAuthenticatedAuth),
   )

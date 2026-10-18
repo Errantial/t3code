@@ -129,6 +129,58 @@ vi.mock("../../state/civilization", () => ({
     isPending: false,
     refresh: vi.fn(),
   }),
+  useCivilizationCitizenDetail: (
+    _environmentId: unknown,
+    _projectId: unknown,
+    selected: unknown,
+  ) => ({
+    data:
+      selected === null
+        ? null
+        : {
+            threadId,
+            projectId,
+            identity: {
+              nameEntryId: "ada",
+              namePoolId: "default-names",
+              baseName: "Ada",
+              displayName: "Observed Ada",
+            },
+            personality: {
+              profileEntryId: "calm",
+              profilePoolId: "default-profiles",
+              base: { label: "Calm", traits: ["calm"], styleText: "Calm style" },
+              rich: {
+                label: "Stoic Architect",
+                traits: ["deliberate"],
+                axiom: "Build carefully.",
+                voice: "Measured.",
+                styleText: "Architectural style",
+              },
+            },
+            presentation: { rendering: "off", label: null },
+            host: { threadTitle: "Observed thread", providerInstanceId: "codex" },
+            lineage: {
+              generation: 1,
+              status: "resolved",
+              parentThreadId: null,
+              relationshipToParent: null,
+            },
+            lifecycle: { state: "open", epoch: 2, closed: false, deleted: false },
+            observedOnly: testState.observedOnly,
+            title: {
+              managed: false,
+              topic: "Observed thread",
+              preservedTitle: "Observed thread",
+              lastManagedTitle: null,
+              managedTitlePreview: "[Observed Ada] Observed thread",
+            },
+            revision: 3,
+          },
+    error: null,
+    isPending: false,
+    refresh: vi.fn(),
+  }),
   useCivilizationNotesPage: () => ({
     data: { projectId, revision: 11, notes: [note], nextCursor: null, partial: false },
     error: null,
@@ -202,6 +254,17 @@ vi.mock("./settingsLayout", () => ({
 
 vi.mock("./CivilizationDataRetention", () => ({
   CivilizationDataRetention: () => <div data-testid="civilization-data-retention" />,
+}));
+
+vi.mock("./CivilizationCitizenDetailDialog", () => ({
+  CivilizationCitizenDetailDialog: ({
+    open,
+    canAdminister,
+  }: {
+    open: boolean;
+    canAdminister: boolean;
+  }) =>
+    open ? <div>Citizen detail editor · {canAdminister ? "editable" : "read only"}</div> : null,
 }));
 
 vi.mock("./CivilizationChronicle", () => ({
@@ -315,49 +378,19 @@ describe("Civilization project inspection", () => {
     expect(testState.sensitiveCalls).toEqual([]);
   });
 
-  it("previews with exact captured revisions and blocks apply when settings:write is revoked", async () => {
+  it("opens the shared citizen detail target from the census with write gating", async () => {
     testState.writable = true;
     testState.observedOnly = false;
     await render();
 
-    expect(text()).toContain("Reassign identity");
-    const nameInput = renderer!.root
-      .findAllByType("input")
-      .find((input) => input.props.value === "Observed Ada");
-    expect(nameInput).toBeDefined();
-    await act(() => nameInput!.props.onChange({ currentTarget: { value: "Grace Admin" } }));
-
-    const previewButton = renderer!.root
+    expect(text()).not.toContain("Citizen detail editor");
+    const citizenButton = renderer!.root
       .findAllByType("button")
-      .find((button) => button.props.children === "Preview");
-    expect(previewButton).toBeDefined();
-    await act(async () => {
-      previewButton!.props.onClick();
-      await Promise.resolve();
-    });
-
-    expect(testState.citizenCalls).toHaveLength(1);
-    expect(testState.citizenCalls[0]).toMatchObject({
-      type: "reassignmentPreview",
-      request: {
-        threadId,
-        projectId,
-        expectedCitizenRevision: 3,
-        expectedEnvironmentRevision: 7,
-        expectedProjectRevision: 9,
-        displayName: "Grace Admin",
-      },
-    });
-    expect(text()).toContain("Grace Admin");
-
-    testState.writable = false;
-    const applyButton = renderer!.root
-      .findAllByType("button")
-      .find((button) => button.props.children === "Apply preview");
-    expect(applyButton).toBeDefined();
-    await act(() => applyButton!.props.onClick());
-
-    expect(testState.citizenCalls).toHaveLength(1);
-    expect(text()).toContain("Permission changed before apply");
+      .find((button) => button.props["aria-label"] === "View citizen Observed Ada");
+    expect(citizenButton).toBeDefined();
+    await act(() => citizenButton!.props.onClick());
+    expect(text()).toContain("Citizen detail editor · ");
+    expect(text()).toContain("editable");
+    expect(testState.citizenCalls).toEqual([]);
   });
 });
