@@ -107,11 +107,13 @@ import { CivilizationChronicle } from "./CivilizationChronicle";
 
 let renderer: ReactTestRenderer | undefined;
 const onViewLineage = vi.fn();
+const onViewCitizen = vi.fn();
 
 beforeEach(() => {
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
   testState.calls = [];
   onViewLineage.mockReset();
+  onViewCitizen.mockReset();
 });
 
 afterEach(async () => {
@@ -128,7 +130,7 @@ describe("Civilization Chronicle", () => {
           environmentId={environmentId}
           projectId={projectId}
           pageSize={50}
-          onViewLineage={onViewLineage}
+          onViewCitizen={onViewCitizen}
         />,
       );
     });
@@ -152,10 +154,10 @@ describe("Civilization Chronicle", () => {
 
     const child = renderer!.root
       .findAllByType("button")
-      .find((button) => button.props["aria-label"] === `View lineage ${childId}`);
+      .find((button) => button.props["aria-label"] === "View citizen Child Grace");
     expect(child).toBeDefined();
     await act(() => child!.props.onClick());
-    expect(onViewLineage).toHaveBeenCalledWith(childId);
+    expect(onViewCitizen).toHaveBeenCalledWith(childId);
   });
 
   it("applies a citizen filter as one bounded Chronicle query", async () => {

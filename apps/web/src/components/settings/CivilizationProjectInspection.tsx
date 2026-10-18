@@ -525,6 +525,9 @@ export function CivilizationProjectInspection({
         projectId={projectId}
         pageSize={effective.config.operations.inboxPageSize}
         allowSensitiveActions={allowSensitiveActions}
+        citizenOptions={censusState?.items ?? []}
+        hasMoreCitizenOptions={nextCensusCursor !== null}
+        onLoadMoreCitizenOptions={loadMoreCensus}
         onViewCitizen={viewCitizen}
         onViewLineage={viewLineage}
         initialParticipantThreadId={correspondenceFocusThreadId ?? undefined}

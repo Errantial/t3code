@@ -14,8 +14,12 @@ import * as SqlClient from "effect/sql/SqlClient";
 import * as TestClock from "effect/testing/TestClock";
 
 import * as ProviderAdapterRegistry from "../orchestration-v2/ProviderAdapterRegistry.ts";
+import * as EffectOutbox from "../orchestration-v2/EffectOutbox.ts";
+import * as EventStore from "../orchestration-v2/EventStore.ts";
+import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
 import { runMigrations } from "../persistence/Migrations.ts";
 import * as ChronicleService from "./ChronicleService.ts";
+import * as CitizenService from "./CitizenService.ts";
 import * as ConfigService from "./ConfigService.ts";
 import * as ContextService from "./ContextService.ts";
 import * as KnowledgeService from "./KnowledgeService.ts";
@@ -57,15 +61,29 @@ const providers = (calls: ProviderCalls) =>
 
 const makeLayer = (calls: ProviderCalls) => {
   const providerLayer = providers(calls);
+  const stores = Layer.mergeAll(EventStore.layer, ProjectionStore.layer, EffectOutbox.layer).pipe(
+    Layer.provide(database),
+  );
   const knowledge = KnowledgeService.layer.pipe(Layer.provide(database));
   const chronicle = ChronicleService.layer.pipe(Layer.provide(database));
+  const citizens = CitizenService.layer.pipe(Layer.provide(Layer.mergeAll(database, stores)));
   const mail = MailService.layer.pipe(
     Layer.provide(Layer.mergeAll(database, config, providerLayer)),
   );
   const context = ContextService.layer.pipe(
     Layer.provide(Layer.mergeAll(database, config, providerLayer, mail)),
   );
-  return Layer.mergeAll(database, config, providerLayer, knowledge, chronicle, mail, context);
+  return Layer.mergeAll(
+    database,
+    stores,
+    config,
+    providerLayer,
+    knowledge,
+    citizens,
+    chronicle,
+    mail,
+    context,
+  );
 };
 
 const insertCitizen = Effect.fn("V11ReadSideEffectAcceptance.insertCitizen")(function* (input: {
@@ -385,6 +403,7 @@ it.effect(
     const calls: ProviderCalls = { get: 0, list: 0 };
     return Effect.gen(function* () {
       const knowledge = yield* KnowledgeService.CivilizationKnowledgeService;
+      const citizens = yield* CitizenService.CivilizationCitizenService;
       const chronicle = yield* ChronicleService.CivilizationChronicleService;
       const mail = yield* MailService.CivilizationMailService;
       const context = yield* ContextService.CivilizationContextService;
@@ -422,6 +441,12 @@ it.effect(
         hallFocus.children.map((child) => child.threadId),
         [GRANDCHILD_ID],
       );
+      const citizenDetail = yield* citizens.getCitizenDetail({
+        projectId: PROJECT_ID,
+        threadId: ROOT_ID,
+      });
+      assert.equal(citizenDetail.identity.displayName, "Root");
+      assert.equal(citizenDetail.host.threadTitle, "V11-5 root");
 
       const chronicleFirst = yield* chronicle.list({ projectId: PROJECT_ID, limit: 2 });
       assert.isNotNull(chronicleFirst.nextCursor);
@@ -455,6 +480,17 @@ it.effect(
         limit: 2,
       });
       assert.lengthOf(correspondencePage.messages, 1);
+      const pairConversation = yield* mail.listCorrespondenceHistory({
+        projectId: PROJECT_ID,
+        participantThreadId: CHILD_A_ID,
+        counterpartyThreadId: ROOT_ID,
+        limit: 10,
+      });
+      assert.deepEqual(
+        pairConversation.messages.map((message) => message.messageId),
+        [REPLY_MESSAGE_ID, ROOT_MESSAGE_ID],
+      );
+      assert.notInclude(JSON.stringify(pairConversation), "retained body");
       const thread = yield* mail.readCorrespondenceThread({
         projectId: PROJECT_ID,
         messageId: REPLY_MESSAGE_ID,

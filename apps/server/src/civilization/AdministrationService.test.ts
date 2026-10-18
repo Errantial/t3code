@@ -192,6 +192,26 @@ const enableFeature = Effect.fn("AdministrationService.test.enableFeature")(func
   });
 });
 
+const readReassignmentState = Effect.fn("AdministrationService.test.readReassignmentState")(
+  function* () {
+    const sql = yield* SqlClient.SqlClient;
+    return (yield* sql<{
+      readonly name_entry_id: string;
+      readonly name_display: string;
+      readonly name_key: string;
+      readonly profile_entry_id: string;
+      readonly revision: number;
+      readonly last_managed_title: string | null;
+      readonly pending_title_command_id: string | null;
+    }>`
+      SELECT name_entry_id, name_display, name_key, profile_entry_id, revision,
+             last_managed_title, pending_title_command_id
+      FROM civilization_citizens
+      WHERE thread_id = ${threadId}
+    `)[0]!;
+  },
+);
+
 const makeLayer = (threads: ThreadManagement.ThreadManagementService["Service"]) => {
   const database = SqlitePersistence.layerMemory;
   return Layer.mergeAll(
@@ -277,6 +297,103 @@ it.effect(
           assert.equal(error.reason, "name_conflict");
       }).pipe(Effect.provide(layer));
     }),
+);
+
+it.effect("rejects invalid custom-name formatting without changing citizen state", () =>
+  Effect.gen(function* () {
+    const title = yield* Ref.make("[Ada] Managed topic");
+    const layer = makeLayer(makeThreadService(title, false));
+    yield* Effect.gen(function* () {
+      yield* enableFeature();
+      yield* seedCitizen();
+      const administration = yield* AdministrationService.CivilizationAdministrationService;
+      const before = yield* readReassignmentState();
+
+      const error = yield* administration
+        .applyReassignment({
+          projectId,
+          threadId,
+          expectedCitizenRevision: 1,
+          expectedEnvironmentRevision: 1,
+          expectedProjectRevision: 0,
+          displayName: "Grace\u202e",
+        })
+        .pipe(Effect.flip);
+
+      assert.equal(error._tag, "CivilizationOperationInvalidError");
+      if (error._tag === "CivilizationOperationInvalidError") {
+        assert.equal(error.reason, "invalid_name");
+      }
+      assert.deepEqual(yield* readReassignmentState(), before);
+      assert.equal(yield* Ref.get(title), "[Ada] Managed topic");
+    }).pipe(Effect.provide(layer));
+  }),
+);
+
+it.effect("rejects a stale environment revision without changing citizen state", () =>
+  Effect.gen(function* () {
+    const title = yield* Ref.make("[Ada] Managed topic");
+    const layer = makeLayer(makeThreadService(title, false));
+    yield* Effect.gen(function* () {
+      yield* enableFeature();
+      yield* seedCitizen();
+      const administration = yield* AdministrationService.CivilizationAdministrationService;
+      const before = yield* readReassignmentState();
+
+      const error = yield* administration
+        .applyReassignment({
+          projectId,
+          threadId,
+          expectedCitizenRevision: 1,
+          expectedEnvironmentRevision: 0,
+          expectedProjectRevision: 0,
+          nameEntryId: "grace",
+        })
+        .pipe(Effect.flip);
+
+      assert.isTrue(isConflict(error));
+      if (isConflict(error)) {
+        assert.equal(error.scope, "environment");
+        assert.equal(error.expectedRevision, 0);
+        assert.equal(error.currentRevision, 1);
+      }
+      assert.deepEqual(yield* readReassignmentState(), before);
+      assert.equal(yield* Ref.get(title), "[Ada] Managed topic");
+    }).pipe(Effect.provide(layer));
+  }),
+);
+
+it.effect("rejects a stale project revision without changing citizen state", () =>
+  Effect.gen(function* () {
+    const title = yield* Ref.make("[Ada] Managed topic");
+    const layer = makeLayer(makeThreadService(title, false));
+    yield* Effect.gen(function* () {
+      yield* enableFeature();
+      yield* seedCitizen();
+      const administration = yield* AdministrationService.CivilizationAdministrationService;
+      const before = yield* readReassignmentState();
+
+      const error = yield* administration
+        .applyReassignment({
+          projectId,
+          threadId,
+          expectedCitizenRevision: 1,
+          expectedEnvironmentRevision: 1,
+          expectedProjectRevision: 1,
+          nameEntryId: "grace",
+        })
+        .pipe(Effect.flip);
+
+      assert.isTrue(isConflict(error));
+      if (isConflict(error)) {
+        assert.equal(error.scope, "project");
+        assert.equal(error.expectedRevision, 1);
+        assert.equal(error.currentRevision, 0);
+      }
+      assert.deepEqual(yield* readReassignmentState(), before);
+      assert.equal(yield* Ref.get(title), "[Ada] Managed topic");
+    }).pipe(Effect.provide(layer));
+  }),
 );
 
 it.effect("renames a manual-title citizen without overwriting the host title", () =>

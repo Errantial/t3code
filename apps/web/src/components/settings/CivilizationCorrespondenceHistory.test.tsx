@@ -136,6 +136,7 @@ import { CivilizationCorrespondenceHistory } from "./CivilizationCorrespondenceH
 let renderer: ReactTestRenderer | undefined;
 const onViewLineage = vi.fn();
 const onViewChronicleSource = vi.fn();
+const onViewCitizen = vi.fn();
 
 const renderedText = (value: unknown): string => {
   if (typeof value === "string" || typeof value === "number") return String(value);
@@ -154,6 +155,7 @@ beforeEach(() => {
   testState.writable = true;
   onViewLineage.mockReset();
   onViewChronicleSource.mockReset();
+  onViewCitizen.mockReset();
 });
 
 afterEach(async () => {
@@ -171,7 +173,7 @@ describe("Civilization correspondence history", () => {
           projectId={projectId}
           pageSize={25}
           allowSensitiveActions
-          onViewLineage={onViewLineage}
+          onViewCitizen={onViewCitizen}
           onViewChronicleSource={onViewChronicleSource}
         />,
       );
@@ -179,17 +181,27 @@ describe("Civilization correspondence history", () => {
 
     const rendered = renderedText(renderer?.toJSON());
     expect(rendered).toContain("Correspondence history");
-    expect(rendered).toContain("epoch 3");
-    expect(rendered).toContain("recipient delivery epoch 7");
+    expect(rendered).toContain("sender epoch 3");
+    expect(rendered).toContain("delivery epoch 7");
     expect(rendered).toContain("Grace");
     expect(rendered).toContain("acknowledged");
-    expect(rendered).toContain("terminal no");
+    expect(rendered).toContain("active");
+    expect(rendered).toContain("Advanced filters");
+    expect(rendered).toContain("View message");
     expect(rendered).toContain(
       "cannot send, reply, wake, steer, resume, acknowledge, or impersonate",
     );
     expect(rendered).not.toContain("secret-body-text");
     expect(testState.sensitiveReads).toHaveLength(0);
     expect(testState.threadCalls.at(-1)?.[2]).toBeNull();
+
+    const citizenButton = renderer!.root
+      .findAllByType("button")
+      .find((button) => button.props["aria-label"] === "View citizen Ada");
+    expect(citizenButton).toBeDefined();
+    await act(() => citizenButton!.props.onClick());
+    expect(onViewCitizen).toHaveBeenCalledWith(senderId);
+    expect(testState.sensitiveReads).toHaveLength(0);
 
     const chronicleButton = renderer!.root
       .findAllByType("button")
@@ -205,7 +217,7 @@ describe("Civilization correspondence history", () => {
 
     const bodyButton = renderer!.root
       .findAllByType("button")
-      .find((button) => button.props.children === "Open body");
+      .find((button) => button.props.children === "View message");
     await act(async () => bodyButton!.props.onClick());
     expect(testState.sensitiveReads).toEqual([
       { type: "mailBody", environmentId, projectId, messageId },
@@ -233,7 +245,7 @@ describe("Civilization correspondence history", () => {
     expect(testState.sensitiveReads).toHaveLength(0);
   });
 
-  it("applies a participant filter as one bounded correspondence query", async () => {
+  it("applies an unordered citizen pair as one bounded correspondence query without reading bodies", async () => {
     await act(() => {
       renderer = create(
         <CivilizationCorrespondenceHistory
@@ -248,16 +260,22 @@ describe("Civilization correspondence history", () => {
       .findAllByType("input")
       .find((input) => input.props["aria-label"] === "Correspondence participant thread");
     await act(() => participant!.props.onChange({ currentTarget: { value: senderId } }));
+    const counterparty = renderer!.root
+      .findAllByType("input")
+      .find((input) => input.props["aria-label"] === "Correspondence counterparty thread");
+    await act(() => counterparty!.props.onChange({ currentTarget: { value: recipientId } }));
     const apply = renderer!.root
       .findAllByType("button")
-      .find((button) => button.props.children === "Apply filters");
+      .find((button) => button.props.children === "Apply advanced filters");
     await act(() => apply!.props.onClick());
 
     expect(testState.pageCalls.at(-1)?.[2]).toMatchObject({
       participantThreadId: senderId,
+      counterpartyThreadId: recipientId,
       replyRelation: "any",
     });
     expect(testState.pageCalls.at(-1)?.[4]).toBe(10);
+    expect(testState.sensitiveReads).toHaveLength(0);
   });
 
   it("rechecks settings permission when body inspection is clicked", async () => {
@@ -273,7 +291,7 @@ describe("Civilization correspondence history", () => {
     });
     const bodyButton = renderer!.root
       .findAllByType("button")
-      .find((button) => button.props.children === "Open body");
+      .find((button) => button.props.children === "View message");
     testState.writable = false;
     await act(() => bodyButton!.props.onClick());
     expect(testState.sensitiveReads).toHaveLength(0);

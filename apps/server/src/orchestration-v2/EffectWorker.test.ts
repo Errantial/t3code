@@ -206,15 +206,15 @@ it.effect("applies deterministic thread titles through the authoritative metadat
         getThreadProjection: () =>
           Ref.get(title).pipe(Effect.map((current) => ({ thread: { title: current } }) as never)),
         dispatch: (command) => {
-          assert.equal(command.type, "thread.metadata.update");
-          if (command.type !== "thread.metadata.update" || command.title === undefined) {
+          assert.equal(command.type, "thread.title.converge");
+          if (command.type !== "thread.title.converge") {
             return Effect.die("unexpected command");
           }
           return Effect.gen(function* () {
             const current = yield* Ref.get(title);
             assert.equal(command.expectedTitle, current);
-            yield* Ref.set(title, command.title!);
-            yield* Ref.update(events, (items) => [...items, command.title!]);
+            yield* Ref.set(title, command.title);
+            yield* Ref.update(events, (items) => [...items, command.title]);
             return { sequence: 1, storedEvents: [] } as never;
           });
         },

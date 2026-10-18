@@ -272,6 +272,37 @@ describe("ThreadTitleRegenerationService", () => {
     }),
   );
 
+  it.effect(
+    "allows an internal title convergence write without cancelling an armed regeneration",
+    () =>
+      Effect.gen(function* () {
+        const harness = makeHarness();
+        yield* Effect.gen(function* () {
+          const threads = yield* ThreadManagement.ThreadManagementService;
+          const threadId = yield* createThread({
+            command: "command:title:preserve:create",
+            thread: "thread:title:preserve",
+          });
+          const requestId = yield* armRegeneration({
+            command: "command:title:preserve:arm",
+            threadId,
+          });
+
+          yield* threads.dispatch({
+            type: "thread.title.converge",
+            commandId: CommandId.make("command:title:preserve:managed-prefix"),
+            threadId,
+            expectedTitle: "Seed title",
+            title: "[Ada] Seed title",
+          });
+
+          const projection = yield* threads.getThreadProjection(threadId);
+          assert.equal(projection.thread.title, "[Ada] Seed title");
+          assert.equal(projection.thread.titleRegeneration?.requestId, requestId);
+        }).pipe(Effect.provide(harness.layer));
+      }),
+  );
+
   it.effect("skips execution when the marker was superseded by a newer request", () =>
     Effect.gen(function* () {
       const harness = makeHarness();

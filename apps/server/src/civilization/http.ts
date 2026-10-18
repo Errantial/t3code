@@ -598,6 +598,9 @@ export const layer = HttpApiBuilder.group(
               ...(args.query.participantThreadId === undefined
                 ? {}
                 : { participantThreadId: args.query.participantThreadId }),
+              ...(args.query.counterpartyThreadId === undefined
+                ? {}
+                : { counterpartyThreadId: args.query.counterpartyThreadId }),
               ...(args.query.senderThreadId === undefined
                 ? {}
                 : { senderThreadId: args.query.senderThreadId }),

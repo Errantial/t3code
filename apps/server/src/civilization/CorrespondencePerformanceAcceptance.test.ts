@@ -13,7 +13,9 @@ import * as MailService from "./MailService.ts";
 
 const PROJECT_ID = ProjectId.make("project:correspondence:performance");
 const TARGET_PARTICIPANT = ThreadId.make("thread:correspondence:0007");
+const PAIR_COUNTERPARTY = ThreadId.make("thread:correspondence:0008");
 const MESSAGE_COUNT = 100_000;
+const PAIR_MESSAGE_COUNT = 60_000;
 const PAGE_SIZE = 50;
 const SAMPLES = 60;
 const P95_BUDGET_MS = 100;
@@ -38,7 +40,7 @@ const adapters = Layer.succeed(
   ProviderAdapterRegistry.ProviderAdapterRegistryV2,
   ProviderAdapterRegistry.ProviderAdapterRegistryV2.of({
     get: () => Effect.die("correspondence inspection must not request provider adapters"),
-    list: () => Effect.succeed([]),
+    list: () => Effect.die("correspondence inspection must not list provider adapters"),
   }),
 );
 const dependencies = Layer.mergeAll(database, config, adapters);
@@ -85,9 +87,19 @@ it.effect(
         )
         SELECT
           printf('mail:perf:%05d', n), ${PROJECT_ID},
-          printf('thread:correspondence:%04d', n % 100), printf('Sender %04d', n % 100),
+          CASE
+            WHEN n < ${PAIR_MESSAGE_COUNT} AND n % 2 = 0 THEN ${TARGET_PARTICIPANT}
+            WHEN n < ${PAIR_MESSAGE_COUNT} THEN ${PAIR_COUNTERPARTY}
+            ELSE printf('thread:correspondence:%04d', 100 + (n % 100))
+          END,
+          printf('Sender %04d', n % 100),
           n % 4, printf('run:mail:perf:%05d', n),
-          printf('thread:correspondence:%04d', (n + 1) % 100), n % 8,
+          CASE
+            WHEN n < ${PAIR_MESSAGE_COUNT} AND n % 2 = 0 THEN ${PAIR_COUNTERPARTY}
+            WHEN n < ${PAIR_MESSAGE_COUNT} THEN ${TARGET_PARTICIPANT}
+            ELSE printf('thread:correspondence:%04d', 200 + (n % 100))
+          END,
+          n % 8,
           CASE WHEN n % 10 = 0 THEN NULL ELSE printf('mail:perf:%05d', n - 1) END,
           'x', 1, 'full-access', 'default', 0, 0,
           strftime('%Y-%m-%dT%H:%M:%fZ', '2026-01-01T00:00:00Z', '+' || n || ' seconds'),
@@ -118,15 +130,24 @@ it.effect(
         ORDER BY accepted_at DESC, message_id DESC LIMIT ${PAGE_SIZE + 1}
       `;
       assert.include(senderPlan.map((row) => row.detail).join("\n"), "sender_history_idx");
-      const pairPlan = yield* sql<{ readonly detail: string }>`
+      const pairForwardPlan = yield* sql<{ readonly detail: string }>`
         EXPLAIN QUERY PLAN
         SELECT message_id FROM civilization_messages
         WHERE project_id = ${PROJECT_ID}
-          AND sender_thread_id = 'thread:correspondence:0007'
-          AND recipient_thread_id = 'thread:correspondence:0008'
+          AND sender_thread_id = ${TARGET_PARTICIPANT}
+          AND recipient_thread_id = ${PAIR_COUNTERPARTY}
         ORDER BY accepted_at DESC, message_id DESC LIMIT ${PAGE_SIZE + 1}
       `;
-      assert.include(pairPlan.map((row) => row.detail).join("\n"), "pair_history_idx");
+      assert.include(pairForwardPlan.map((row) => row.detail).join("\n"), "pair_history_idx");
+      const pairReversePlan = yield* sql<{ readonly detail: string }>`
+        EXPLAIN QUERY PLAN
+        SELECT message_id FROM civilization_messages
+        WHERE project_id = ${PROJECT_ID}
+          AND sender_thread_id = ${PAIR_COUNTERPARTY}
+          AND recipient_thread_id = ${TARGET_PARTICIPANT}
+        ORDER BY accepted_at DESC, message_id DESC LIMIT ${PAGE_SIZE + 1}
+      `;
+      assert.include(pairReversePlan.map((row) => row.detail).join("\n"), "pair_history_idx");
       const replyPlan = yield* sql<{ readonly detail: string }>`
         EXPLAIN QUERY PLAN
         SELECT message_id FROM civilization_messages
@@ -135,11 +156,83 @@ it.effect(
       `;
       assert.include(replyPlan.map((row) => row.detail).join("\n"), "reply_history_idx");
 
+      const pairFirst = yield* service.listCorrespondenceHistory({
+        projectId: PROJECT_ID,
+        participantThreadId: TARGET_PARTICIPANT,
+        counterpartyThreadId: PAIR_COUNTERPARTY,
+        limit: PAGE_SIZE,
+      });
+      const pairFirstSwapped = yield* service.listCorrespondenceHistory({
+        projectId: PROJECT_ID,
+        participantThreadId: PAIR_COUNTERPARTY,
+        counterpartyThreadId: TARGET_PARTICIPANT,
+        limit: PAGE_SIZE,
+      });
+      assert.deepEqual(
+        pairFirstSwapped.messages.map((message) => message.messageId),
+        pairFirst.messages.map((message) => message.messageId),
+      );
+      assert.equal(pairFirstSwapped.nextCursor, pairFirst.nextCursor);
+      const pairCursor = pairFirst.nextCursor;
+      if (pairCursor === null) {
+        return yield* Effect.die("dense correspondence pair must have a continued page");
+      }
+      const pairSecond = yield* service.listCorrespondenceHistory({
+        projectId: PROJECT_ID,
+        participantThreadId: PAIR_COUNTERPARTY,
+        counterpartyThreadId: TARGET_PARTICIPANT,
+        cursor: pairCursor,
+        limit: PAGE_SIZE,
+      });
+      const pairMessages = [...pairFirst.messages, ...pairSecond.messages];
+      assert.lengthOf(pairMessages, PAGE_SIZE * 2);
+      assert.equal(
+        new Set(pairMessages.map((message) => message.messageId)).size,
+        pairMessages.length,
+      );
+      for (const message of pairMessages) {
+        assert.isTrue(
+          (message.senderThreadId === TARGET_PARTICIPANT &&
+            message.recipientThreadId === PAIR_COUNTERPARTY) ||
+            (message.senderThreadId === PAIR_COUNTERPARTY &&
+              message.recipientThreadId === TARGET_PARTICIPANT),
+          `unexpected outsider ${message.messageId}`,
+        );
+      }
+      const expectedPairRows = yield* sql<{ readonly message_id: string }>`
+        SELECT message_id FROM civilization_messages
+        WHERE project_id = ${PROJECT_ID}
+          AND (
+            (sender_thread_id = ${TARGET_PARTICIPANT} AND recipient_thread_id = ${PAIR_COUNTERPARTY})
+            OR
+            (sender_thread_id = ${PAIR_COUNTERPARTY} AND recipient_thread_id = ${TARGET_PARTICIPANT})
+          )
+        ORDER BY accepted_at DESC, message_id DESC
+        LIMIT ${PAGE_SIZE * 2}
+      `;
+      assert.deepEqual(
+        pairMessages.map((message) => message.messageId),
+        expectedPairRows.map((row) => row.message_id),
+      );
+
       for (let index = 0; index < 5; index += 1) {
         yield* service.listCorrespondenceHistory({ projectId: PROJECT_ID, limit: PAGE_SIZE });
         yield* service.listCorrespondenceHistory({
           projectId: PROJECT_ID,
           participantThreadId: TARGET_PARTICIPANT,
+          limit: PAGE_SIZE,
+        });
+        yield* service.listCorrespondenceHistory({
+          projectId: PROJECT_ID,
+          participantThreadId: TARGET_PARTICIPANT,
+          counterpartyThreadId: PAIR_COUNTERPARTY,
+          limit: PAGE_SIZE,
+        });
+        yield* service.listCorrespondenceHistory({
+          projectId: PROJECT_ID,
+          participantThreadId: PAIR_COUNTERPARTY,
+          counterpartyThreadId: TARGET_PARTICIPANT,
+          cursor: pairCursor,
           limit: PAGE_SIZE,
         });
         yield* service.readCorrespondenceThread({
@@ -153,6 +246,8 @@ it.effect(
       const pageSamples: number[] = [];
       const participantSamples: number[] = [];
       const selectiveSamples: number[] = [];
+      const pairFirstPageSamples: number[] = [];
+      const pairContinuedPageSamples: number[] = [];
       const threadSamples: number[] = [];
       const rssSamples: number[] = [];
       let maxBytes = 0;
@@ -183,6 +278,33 @@ it.effect(
         );
         selectiveSamples.push(selective.elapsedMs);
         maxBytes = Math.max(maxBytes, Buffer.byteLength(JSON.stringify(selective.value), "utf8"));
+        const pairFirstPage = yield* timed(
+          service.listCorrespondenceHistory({
+            projectId: PROJECT_ID,
+            participantThreadId: TARGET_PARTICIPANT,
+            counterpartyThreadId: PAIR_COUNTERPARTY,
+            limit: PAGE_SIZE,
+          }),
+        );
+        pairFirstPageSamples.push(pairFirstPage.elapsedMs);
+        maxBytes = Math.max(
+          maxBytes,
+          Buffer.byteLength(JSON.stringify(pairFirstPage.value), "utf8"),
+        );
+        const pairContinuedPage = yield* timed(
+          service.listCorrespondenceHistory({
+            projectId: PROJECT_ID,
+            participantThreadId: PAIR_COUNTERPARTY,
+            counterpartyThreadId: TARGET_PARTICIPANT,
+            cursor: pairCursor,
+            limit: PAGE_SIZE,
+          }),
+        );
+        pairContinuedPageSamples.push(pairContinuedPage.elapsedMs);
+        maxBytes = Math.max(
+          maxBytes,
+          Buffer.byteLength(JSON.stringify(pairContinuedPage.value), "utf8"),
+        );
         const thread = yield* timed(
           service.readCorrespondenceThread({
             projectId: PROJECT_ID,
@@ -199,6 +321,8 @@ it.effect(
       assert.isAtMost(percentile(pageSamples, 0.95), P95_BUDGET_MS);
       assert.isAtMost(percentile(participantSamples, 0.95), P95_BUDGET_MS);
       assert.isAtMost(percentile(selectiveSamples, 0.95), P95_BUDGET_MS);
+      assert.isAtMost(percentile(pairFirstPageSamples, 0.95), P95_BUDGET_MS);
+      assert.isAtMost(percentile(pairContinuedPageSamples, 0.95), P95_BUDGET_MS);
       assert.isAtMost(percentile(threadSamples, 0.95), P95_BUDGET_MS);
       assert.isAtMost(maxBytes, MAX_RESPONSE_BYTES);
       const plateauStart =

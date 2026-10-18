@@ -409,6 +409,206 @@ it.effect("lists correspondence with revision-bound filters without reading bodi
   }).pipe(Effect.provide(Layer.fresh(makeLayer(calls))));
 });
 
+it.effect("lists an unordered citizen pair through canonical bounded directional branches", () => {
+  const calls: FakeProviderCalls = { get: 0, unexpectedProviderWork: 0 };
+  return Effect.gen(function* () {
+    const service = yield* MailService.CivilizationMailService;
+    const sql = yield* SqlClient.SqlClient;
+    const projectId = ProjectId.make("project:mail:correspondence-pair");
+    const a = ThreadId.make("thread:mail:pair:a");
+    const b = ThreadId.make("thread:mail:pair:b");
+    const c = ThreadId.make("thread:mail:pair:c");
+    yield* seedProject(projectId);
+    yield* enableFeature();
+    yield* seedActor(projectId, { threadId: a, runId: RunId.make("run:pair:a") });
+    yield* seedActor(projectId, { threadId: b, runId: RunId.make("run:pair:b") });
+    yield* seedActor(projectId, { threadId: c, runId: RunId.make("run:pair:c") });
+
+    yield* insertRetainedMessage({
+      messageId: "mail:pair:root",
+      projectId,
+      senderThreadId: a,
+      recipientThreadId: b,
+      acceptedAt: "2026-10-17T10:00:00.000Z",
+    });
+    yield* insertRetainedMessage({
+      messageId: "mail:pair:reply",
+      projectId,
+      senderThreadId: b,
+      recipientThreadId: a,
+      acceptedAt: "2026-10-17T10:01:00.000Z",
+      replyToMessageId: "mail:pair:root",
+      acknowledgedAt: "2026-10-17T10:01:30.000Z",
+    });
+    yield* insertRetainedMessage({
+      messageId: "mail:pair:terminal",
+      projectId,
+      senderThreadId: a,
+      recipientThreadId: b,
+      acceptedAt: "2026-10-17T10:02:00.000Z",
+      replyToMessageId: "mail:pair:reply",
+      recipientDeliveryEpoch: 2,
+      terminalAt: "2026-10-17T10:02:30.000Z",
+      terminalReason: "recipient_settled",
+    });
+    yield* insertRetainedMessage({
+      messageId: "mail:pair:tie-y",
+      projectId,
+      senderThreadId: b,
+      recipientThreadId: a,
+      acceptedAt: "2026-10-17T10:03:00.000Z",
+    });
+    yield* insertRetainedMessage({
+      messageId: "mail:pair:tie-z",
+      projectId,
+      senderThreadId: a,
+      recipientThreadId: b,
+      acceptedAt: "2026-10-17T10:03:00.000Z",
+    });
+    yield* insertRetainedMessage({
+      messageId: "mail:pair:outsider-a-c",
+      projectId,
+      senderThreadId: a,
+      recipientThreadId: c,
+      acceptedAt: "2026-10-17T10:04:00.000Z",
+    });
+    yield* insertRetainedMessage({
+      messageId: "mail:pair:outsider-c-b",
+      projectId,
+      senderThreadId: c,
+      recipientThreadId: b,
+      acceptedAt: "2026-10-17T10:05:00.000Z",
+    });
+
+    const pairPlan = yield* sql<{ readonly detail: string }>`
+      EXPLAIN QUERY PLAN
+      SELECT message_id
+      FROM civilization_messages
+      WHERE project_id = ${projectId}
+        AND sender_thread_id = ${a}
+        AND recipient_thread_id = ${b}
+        AND (accepted_at < ${"2026-10-17T10:03:00.000Z"}
+          OR (accepted_at = ${"2026-10-17T10:03:00.000Z"} AND message_id < ${"mail:pair:tie-z"}))
+      ORDER BY accepted_at DESC, message_id DESC
+      LIMIT 3
+    `;
+    assert.isTrue(
+      pairPlan.some((row) => row.detail.includes("civilization_messages_pair_history_idx")),
+      "pair branches must use migration075's sender/recipient history index",
+    );
+
+    const first = yield* service.listCorrespondenceHistory({
+      projectId,
+      participantThreadId: b,
+      counterpartyThreadId: a,
+      limit: 2,
+    });
+    assert.deepEqual(
+      first.messages.map((message) => message.messageId),
+      ["mail:pair:tie-z", "mail:pair:tie-y"],
+      "pair merge keeps the existing accepted-time/message-id ordering across directions",
+    );
+    assert.isNotNull(first.nextCursor);
+    assert.deepEqual(first.citizenReferences, [
+      { threadId: a, name: `Citizen ${a}` },
+      { threadId: b, name: `Citizen ${b}` },
+    ]);
+    assert.notInclude(JSON.stringify(first), "retained-history-body");
+
+    const swappedSecond = yield* service.listCorrespondenceHistory({
+      projectId,
+      participantThreadId: a,
+      counterpartyThreadId: b,
+      cursor: first.nextCursor!,
+      limit: 3,
+    });
+    assert.deepEqual(
+      swappedSecond.messages.map((message) => message.messageId),
+      ["mail:pair:terminal", "mail:pair:reply", "mail:pair:root"],
+      "the cursor identity is canonical for swapped A/B inputs and excludes outsiders",
+    );
+
+    const acknowledged = yield* service.listCorrespondenceHistory({
+      projectId,
+      participantThreadId: a,
+      counterpartyThreadId: b,
+      acknowledged: true,
+      limit: 10,
+    });
+    assert.deepEqual(
+      acknowledged.messages.map((message) => message.messageId),
+      ["mail:pair:reply"],
+    );
+    const terminal = yield* service.listCorrespondenceHistory({
+      projectId,
+      participantThreadId: a,
+      counterpartyThreadId: b,
+      terminal: true,
+      deliveryEpoch: 2,
+      limit: 10,
+    });
+    assert.deepEqual(
+      terminal.messages.map((message) => message.messageId),
+      ["mail:pair:terminal"],
+    );
+    const roots = yield* service.listCorrespondenceHistory({
+      projectId,
+      participantThreadId: a,
+      counterpartyThreadId: b,
+      replyRelation: "root",
+      from: "2026-10-17T09:59:00.000Z",
+      to: "2026-10-17T10:01:00.000Z",
+      limit: 10,
+    });
+    assert.deepEqual(
+      roots.messages.map((message) => message.messageId),
+      ["mail:pair:root"],
+    );
+
+    const invalidInputs: ReadonlyArray<MailService.CorrespondenceHistoryInput> = [
+      { projectId, counterpartyThreadId: b },
+      { projectId, participantThreadId: a, counterpartyThreadId: a },
+      { projectId, participantThreadId: a, counterpartyThreadId: b, senderThreadId: a },
+      { projectId, participantThreadId: a, counterpartyThreadId: b, recipientThreadId: b },
+    ];
+    for (const invalidInput of invalidInputs) {
+      const failure = yield* service.listCorrespondenceHistory(invalidInput).pipe(Effect.flip);
+      assert.equal(errorReason(failure), "invalid_cursor");
+    }
+
+    const wrongPair = yield* service
+      .listCorrespondenceHistory({
+        projectId,
+        participantThreadId: a,
+        counterpartyThreadId: c,
+        cursor: first.nextCursor!,
+        limit: 2,
+      })
+      .pipe(Effect.flip);
+    assert.equal(errorReason(wrongPair), "invalid_cursor");
+
+    yield* insertRetainedMessage({
+      messageId: "mail:pair:new-membership",
+      projectId,
+      senderThreadId: b,
+      recipientThreadId: a,
+      acceptedAt: "2026-10-17T10:06:00.000Z",
+    });
+    const stale = yield* service
+      .listCorrespondenceHistory({
+        projectId,
+        participantThreadId: b,
+        counterpartyThreadId: a,
+        cursor: first.nextCursor!,
+        limit: 2,
+      })
+      .pipe(Effect.flip);
+    assert.equal(errorReason(stale), "invalid_cursor");
+    assert.equal(calls.get, 0);
+    assert.equal(calls.unexpectedProviderWork, 0);
+  }).pipe(Effect.provide(Layer.fresh(makeLayer(calls))));
+});
+
 it.effect(
   "returns deterministic bounded anchored correspondence segments with explicit root status",
   () => {

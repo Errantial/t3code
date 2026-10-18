@@ -246,23 +246,24 @@ describe("Civilization context inspector", () => {
     ).toBeGreaterThan(0);
   });
 
-  it("links retained metadata back to Ancestral Hall without reading packet detail", async () => {
-    const onViewLineage = vi.fn();
+  it("opens citizen detail from retained metadata without reading packet detail", async () => {
+    const onViewCitizen = vi.fn();
     await act(() => {
       renderer = create(
         <CivilizationContextInspector
           environmentId={environmentId}
           projectId={projectId}
           targetLabel="Inspector machine"
-          onViewLineage={onViewLineage}
+          onViewCitizen={onViewCitizen}
         />,
       );
     });
-    const lineageButton = renderer!.root
+    const citizenButton = renderer!.root
       .findAllByType("button")
-      .find((button) => button.props["aria-label"] === `View lineage ${threadId}`);
-    await act(() => lineageButton!.props.onClick());
-    expect(onViewLineage).toHaveBeenCalledWith(threadId);
+      .find((button) => button.props["aria-label"] === "View citizen Inspector Ada");
+    expect(citizenButton).toBeDefined();
+    await act(() => citizenButton!.props.onClick());
+    expect(onViewCitizen).toHaveBeenCalledWith(threadId);
     expect(testState.sensitiveCalls).toEqual([]);
   });
 

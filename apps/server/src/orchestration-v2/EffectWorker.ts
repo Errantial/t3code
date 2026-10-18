@@ -521,7 +521,7 @@ export const layerExecutor: Layer.Layer<
                 }
                 return threads
                   .dispatch({
-                    type: "thread.metadata.update",
+                    type: "thread.title.converge",
                     commandId: effect.commandId,
                     threadId: effect.threadId,
                     expectedTitle: titleRequest.expectedTitle,

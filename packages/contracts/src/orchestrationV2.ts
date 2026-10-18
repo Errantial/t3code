@@ -2982,6 +2982,17 @@ export type OrchestrationV2Command = typeof OrchestrationV2Command.Type;
  * send them.
  */
 const OrchestrationV2InternalCommand = Schema.Union([
+  /**
+   * Server-only compare-and-swap title convergence. Unlike a public/manual
+   * metadata rename, this preserves any already-armed host title generation.
+   */
+  Schema.Struct({
+    type: Schema.Literal("thread.title.converge"),
+    commandId: CommandId,
+    threadId: ThreadId,
+    expectedTitle: TrimmedNonEmptyString,
+    title: TrimmedNonEmptyString,
+  }),
   Schema.Struct({
     type: Schema.Literal("thread.pull-request-watch.sync"),
     commandId: CommandId,

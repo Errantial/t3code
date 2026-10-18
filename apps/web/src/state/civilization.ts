@@ -809,6 +809,7 @@ export function useCivilizationCitizenDetail(
 
 export interface CivilizationCorrespondenceFilters {
   readonly participantThreadId?: ThreadId | undefined;
+  readonly counterpartyThreadId?: ThreadId | undefined;
   readonly senderThreadId?: ThreadId | undefined;
   readonly recipientThreadId?: ThreadId | undefined;
   readonly replyRelation?: CivilizationCorrespondenceReplyRelation | undefined;
@@ -825,6 +826,7 @@ const civilizationCorrespondencePageAtom = Atom.family((serializedKey: string) =
     rawEnvironmentId,
     rawProjectId,
     rawParticipantThreadId,
+    rawCounterpartyThreadId,
     rawSenderThreadId,
     rawRecipientThreadId,
     rawReplyRelation,
@@ -839,6 +841,7 @@ const civilizationCorrespondencePageAtom = Atom.family((serializedKey: string) =
   ] = JSON.parse(serializedKey) as [
     string,
     string,
+    string | null,
     string | null,
     string | null,
     string | null,
@@ -866,6 +869,9 @@ const civilizationCorrespondencePageAtom = Atom.family((serializedKey: string) =
         ...(rawParticipantThreadId === null
           ? {}
           : { participantThreadId: ThreadId.make(rawParticipantThreadId) }),
+        ...(rawCounterpartyThreadId === null
+          ? {}
+          : { counterpartyThreadId: ThreadId.make(rawCounterpartyThreadId) }),
         ...(rawSenderThreadId === null ? {} : { senderThreadId: ThreadId.make(rawSenderThreadId) }),
         ...(rawRecipientThreadId === null
           ? {}
@@ -901,6 +907,7 @@ export function useCivilizationCorrespondencePage(
             environmentId,
             projectId,
             filters.participantThreadId ?? null,
+            filters.counterpartyThreadId ?? null,
             filters.senderThreadId ?? null,
             filters.recipientThreadId ?? null,
             filters.replyRelation ?? null,

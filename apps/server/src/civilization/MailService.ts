@@ -200,6 +200,7 @@ interface CorrespondenceCursorPayload {
   readonly projectId: ProjectId;
   readonly revision: number;
   readonly participantThreadId: ThreadId | null;
+  readonly counterpartyThreadId: ThreadId | null;
   readonly senderThreadId: ThreadId | null;
   readonly recipientThreadId: ThreadId | null;
   readonly replyRelation: CivilizationCorrespondenceReplyRelation;
@@ -216,6 +217,7 @@ interface CorrespondenceCursorPayload {
 export interface CorrespondenceHistoryInput {
   readonly projectId: ProjectId;
   readonly participantThreadId?: ThreadId | undefined;
+  readonly counterpartyThreadId?: ThreadId | undefined;
   readonly senderThreadId?: ThreadId | undefined;
   readonly recipientThreadId?: ThreadId | undefined;
   readonly replyRelation?: CivilizationCorrespondenceReplyRelation | undefined;
@@ -452,8 +454,20 @@ const encodeCorrespondenceCursor = (payload: Omit<CorrespondenceCursorPayload, "
     ).toString("base64url"),
   );
 
+const correspondencePair = (
+  input: Pick<CorrespondenceHistoryInput, "participantThreadId" | "counterpartyThreadId">,
+): readonly [ThreadId, ThreadId] | undefined => {
+  if (input.participantThreadId === undefined || input.counterpartyThreadId === undefined) {
+    return undefined;
+  }
+  return String(input.participantThreadId).localeCompare(String(input.counterpartyThreadId)) <= 0
+    ? [input.participantThreadId, input.counterpartyThreadId]
+    : [input.counterpartyThreadId, input.participantThreadId];
+};
+
 const correspondenceFilterIdentity = (input: CorrespondenceHistoryInput) => ({
-  participantThreadId: input.participantThreadId ?? null,
+  participantThreadId: correspondencePair(input)?.[0] ?? input.participantThreadId ?? null,
+  counterpartyThreadId: correspondencePair(input)?.[1] ?? null,
   senderThreadId: input.senderThreadId ?? null,
   recipientThreadId: input.recipientThreadId ?? null,
   replyRelation: input.replyRelation ?? "any",
@@ -482,6 +496,7 @@ const decodeCorrespondenceCursor = (
       parsed.projectId !== input.projectId ||
       parsed.revision !== revision ||
       parsed.participantThreadId !== filters.participantThreadId ||
+      parsed.counterpartyThreadId !== filters.counterpartyThreadId ||
       parsed.senderThreadId !== filters.senderThreadId ||
       parsed.recipientThreadId !== filters.recipientThreadId ||
       parsed.replyRelation !== filters.replyRelation ||
@@ -1953,6 +1968,33 @@ const make = Effect.gen(function* () {
                 "Correspondence reply filters must pair replies_to with a parent message id.",
               );
             }
+            if (
+              input.counterpartyThreadId !== undefined &&
+              input.participantThreadId === undefined
+            ) {
+              throw invalid(
+                "invalid_cursor",
+                "Correspondence pair filters require participantThreadId with counterpartyThreadId.",
+              );
+            }
+            if (
+              input.counterpartyThreadId !== undefined &&
+              input.participantThreadId === input.counterpartyThreadId
+            ) {
+              throw invalid(
+                "invalid_cursor",
+                "Correspondence pair participants must be two different citizens.",
+              );
+            }
+            if (
+              input.counterpartyThreadId !== undefined &&
+              (input.senderThreadId !== undefined || input.recipientThreadId !== undefined)
+            ) {
+              throw invalid(
+                "invalid_cursor",
+                "Correspondence pair filters cannot be combined with directed sender/recipient filters.",
+              );
+            }
             return {
               ...input,
               replyRelation,
@@ -1969,14 +2011,30 @@ const make = Effect.gen(function* () {
           );
           const queryLimit = limit + 1;
 
+          type CorrespondenceBranchScope =
+            | { readonly kind: "project" }
+            | {
+                readonly kind: "participant";
+                readonly column: "sender_thread_id" | "recipient_thread_id";
+              }
+            | {
+                readonly kind: "pair";
+                readonly senderThreadId: ThreadId;
+                readonly recipientThreadId: ThreadId;
+              };
+
           const queryBranch = Effect.fn("CivilizationMail.queryCorrespondenceBranch")(function* (
-            participantColumn?: "sender_thread_id" | "recipient_thread_id",
+            scope: CorrespondenceBranchScope,
           ) {
             const clauses = ["project_id = ?"];
             const params: Array<unknown> = [normalized.projectId];
-            if (participantColumn !== undefined && normalized.participantThreadId !== undefined) {
-              clauses.push(`${participantColumn} = ?`);
+            if (scope.kind === "participant" && normalized.participantThreadId !== undefined) {
+              clauses.push(`${scope.column} = ?`);
               params.push(normalized.participantThreadId);
+            }
+            if (scope.kind === "pair") {
+              clauses.push("sender_thread_id = ?", "recipient_thread_id = ?");
+              params.push(scope.senderThreadId, scope.recipientThreadId);
             }
             if (normalized.senderThreadId !== undefined) {
               clauses.push("sender_thread_id = ?");
@@ -2034,23 +2092,27 @@ const make = Effect.gen(function* () {
             );
           });
 
-          const rows =
-            normalized.participantThreadId === undefined
-              ? yield* queryBranch()
-              : (() => undefined)();
-          const mergedRows =
-            normalized.participantThreadId === undefined
-              ? (rows as ReadonlyArray<MessageSummaryRow>)
-              : yield* Effect.gen(function* () {
-                  const [sent, received] = yield* Effect.all([
-                    queryBranch("sender_thread_id"),
-                    queryBranch("recipient_thread_id"),
-                  ]);
-                  const byId = new Map<string, MessageSummaryRow>();
-                  for (const row of sent) byId.set(row.message_id, row);
-                  for (const row of received) byId.set(row.message_id, row);
-                  return [...byId.values()].sort(compareMessageRows).slice(0, queryLimit);
-                });
+          const pair = correspondencePair(normalized);
+          const mergedRows = yield* Effect.gen(function* () {
+            if (pair !== undefined) {
+              const [aToB, bToA] = yield* Effect.all([
+                queryBranch({ kind: "pair", senderThreadId: pair[0], recipientThreadId: pair[1] }),
+                queryBranch({ kind: "pair", senderThreadId: pair[1], recipientThreadId: pair[0] }),
+              ]);
+              return [...aToB, ...bToA].sort(compareMessageRows).slice(0, queryLimit);
+            }
+            if (normalized.participantThreadId !== undefined) {
+              const [sent, received] = yield* Effect.all([
+                queryBranch({ kind: "participant", column: "sender_thread_id" }),
+                queryBranch({ kind: "participant", column: "recipient_thread_id" }),
+              ]);
+              const byId = new Map<string, MessageSummaryRow>();
+              for (const row of sent) byId.set(row.message_id, row);
+              for (const row of received) byId.set(row.message_id, row);
+              return [...byId.values()].sort(compareMessageRows).slice(0, queryLimit);
+            }
+            return yield* queryBranch({ kind: "project" });
+          });
 
           const pageRows = mergedRows.slice(0, limit);
           const citizenReferences = yield* loadCitizenReferences(

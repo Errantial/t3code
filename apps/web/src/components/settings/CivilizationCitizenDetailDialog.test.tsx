@@ -144,19 +144,30 @@ import { CivilizationCitizenDetailDialog } from "./CivilizationCitizenDetailDial
 
 let renderer: ReactTestRenderer | undefined;
 
-const render = async (canAdminister = true) => {
+const render = async (
+  canAdminister = true,
+  citizenDetail: CivilizationCitizenDetail = detail,
+  effectiveConfig: CivilizationEffectiveConfig = effective,
+  navigation: {
+    readonly onViewLineage?: (threadId: ThreadId) => void;
+    readonly onViewChronicle?: (threadId: ThreadId) => void;
+    readonly onViewContext?: (threadId: ThreadId) => void;
+    readonly onViewMessages?: (threadId: ThreadId) => void;
+  } = {},
+) => {
   await act(() => {
     renderer = create(
       <CivilizationCitizenDetailDialog
         open
         onOpenChange={vi.fn()}
-        detail={detail}
+        detail={citizenDetail}
         loading={false}
         error={null}
         environmentId={environmentId}
-        effective={effective}
+        effective={effectiveConfig}
         canAdminister={canAdminister}
         refresh={vi.fn()}
+        {...navigation}
       />,
     );
   });
@@ -181,7 +192,11 @@ describe("Civilization citizen detail dialog", () => {
     await render(false);
     expect(text()).toContain("Pragmatic Craftsman");
     expect(text()).toContain("Conversational");
+    expect(text()).toContain("conversational, restrained");
+    expect(text()).toContain("pragmatic, grounded, craft-focused");
     expect(text()).toContain("Prefer the smallest durable solution");
+    expect(text()).toContain("resolved");
+    expect(text()).toContain("Citizen revision");
     expect(text()).toContain("[Ada] Desktop provider test");
     expect(text()).not.toContain("Edit citizen");
     expect(state.calls).toEqual([]);
@@ -193,6 +208,9 @@ describe("Civilization citizen detail dialog", () => {
     expect(text()).toContain("Stoic Architect");
     expect(text()).toContain("Pragmatic Craftsman");
     expect(text()).toContain("Obsessive Optimizer");
+    expect(text()).toContain("Use a pragmatic craftsman voice.");
+    expect(text()).toContain("Current topic");
+    expect(text()).toContain("Desktop provider test");
     expect(text()).not.toContain("Profile entry ID");
 
     const nameInput = renderer!.root
@@ -227,5 +245,58 @@ describe("Civilization citizen detail dialog", () => {
     await act(() => apply!.props.onClick());
     expect(state.calls).toHaveLength(1);
     expect(text()).toContain("Permission changed before apply");
+  });
+
+  it("only offers manual/original restore while the host still has the last managed title", async () => {
+    await render(true, {
+      ...detail,
+      host: { ...detail.host, threadTitle: "User renamed this manually" },
+      title: { ...detail.title, managed: false },
+    });
+    expect(text()).not.toContain("Restore manual/original title");
+    expect(text()).toContain("Reclaim managed title");
+  });
+
+  it("uses current global rendering for presentation while retaining the persisted rich snapshot", async () => {
+    const mild = {
+      ...effective,
+      config: {
+        ...effective.config,
+        personalities: { ...effective.config.personalities, rendering: "mild" as const },
+      },
+      environmentRevision: 5,
+    } satisfies CivilizationEffectiveConfig;
+    await render(false, detail, mild);
+    expect(text()).toContain("Conversational");
+    expect(text()).toContain("Rich axiom");
+    expect(text()).toContain("Prefer the smallest durable solution");
+    expect(text()).toContain("Rich voice");
+    expect(text()).toContain("Grounded and practical");
+  });
+
+  it("routes all citizen-detail destinations with the exact thread ID", async () => {
+    const onViewLineage = vi.fn();
+    const onViewChronicle = vi.fn();
+    const onViewContext = vi.fn();
+    const onViewMessages = vi.fn();
+    await render(false, detail, effective, {
+      onViewLineage,
+      onViewChronicle,
+      onViewContext,
+      onViewMessages,
+    });
+    for (const [label, callback] of [
+      ["Lineage", onViewLineage],
+      ["Chronicle", onViewChronicle],
+      ["Context", onViewContext],
+      ["Messages", onViewMessages],
+    ] as const) {
+      const button = renderer!.root
+        .findAllByType("button")
+        .find((candidate) => candidate.props.children === label);
+      expect(button).toBeDefined();
+      await act(() => button!.props.onClick());
+      expect(callback).toHaveBeenCalledWith(threadId);
+    }
   });
 });

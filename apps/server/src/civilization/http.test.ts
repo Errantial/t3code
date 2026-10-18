@@ -1204,7 +1204,7 @@ it.effect(
 
             const correspondence = await server.handler(
               new Request(
-                `http://127.0.0.1/api/civilization/correspondence?projectId=${encodeURIComponent(projectId)}&participantThreadId=thread%3Asender&replyRelation=root&acknowledged=false&terminal=true&deliveryEpoch=4&from=${encodeURIComponent("2026-10-16T09:00:00.000Z")}&to=${encodeURIComponent("2026-10-16T11:00:00.000Z")}&cursor=correspondence-cursor&limit=2`,
+                `http://127.0.0.1/api/civilization/correspondence?projectId=${encodeURIComponent(projectId)}&participantThreadId=thread%3Asender&counterpartyThreadId=thread%3Arecipient&replyRelation=root&acknowledged=false&terminal=true&deliveryEpoch=4&from=${encodeURIComponent("2026-10-16T09:00:00.000Z")}&to=${encodeURIComponent("2026-10-16T11:00:00.000Z")}&cursor=correspondence-cursor&limit=2`,
               ),
               requestContext,
             );
@@ -1248,6 +1248,7 @@ it.effect(
             expect(inputs.correspondence).toEqual({
               projectId,
               participantThreadId: ThreadId.make("thread:sender"),
+              counterpartyThreadId: ThreadId.make("thread:recipient"),
               replyRelation: "root",
               acknowledged: false,
               terminal: true,

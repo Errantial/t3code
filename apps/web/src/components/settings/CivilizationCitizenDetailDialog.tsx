@@ -40,10 +40,20 @@ const errorMessage = (error: unknown): string => {
 };
 
 function renderManagedTitle(template: string, name: string, topic: string, generation: number) {
-  return template
-    .replaceAll("{name}", name)
-    .replaceAll("{topic}", topic)
-    .replaceAll("{generation}", String(generation));
+  const compose = (candidateTopic: string) =>
+    template
+      .replaceAll("{name}", name)
+      .replaceAll("{topic}", candidateTopic)
+      .replaceAll("{generation}", String(generation));
+  const bytes = (value: string) => new TextEncoder().encode(value).byteLength;
+  const direct = compose(topic);
+  if (bytes(direct) <= 512) return direct;
+  let fittedTopic = "";
+  for (const character of topic) {
+    if (bytes(compose(fittedTopic + character)) > 512) break;
+    fittedTopic += character;
+  }
+  return compose(fittedTopic);
 }
 
 function DetailValue({
@@ -125,6 +135,14 @@ export function CivilizationCitizenDetailDialog({
       : (chosenNameEntry?.displayName ?? customName.trim());
   const proposedProfile = selectedProfilePool?.entries.find((entry) => entry.id === profileEntryId);
   const rendering = effective.config.personalities.rendering;
+  const activePresentationLabel =
+    detail === null
+      ? null
+      : rendering === "off"
+        ? null
+        : rendering === "mild"
+          ? detail.personality.base.label
+          : detail.personality.rich.label;
   const proposedPresentation =
     proposedProfile === undefined
       ? null
@@ -282,16 +300,16 @@ export function CivilizationCitizenDetailDialog({
                 </div>
                 <div className="grid gap-3 sm:grid-cols-2">
                   <DetailValue label="Personality presentation">
-                    {detail.presentation.label ?? "Hidden (rendering off)"}
+                    {activePresentationLabel ?? "Hidden (rendering off)"}
                   </DetailValue>
                   <DetailValue label="Underlying profile">
                     {detail.personality.base.label} · {detail.personality.profileEntryId}
                   </DetailValue>
                   <DetailValue label="Traits">
-                    {(rendering === "rich"
-                      ? detail.personality.rich.traits
-                      : detail.personality.base.traits
-                    ).join(", ") || "—"}
+                    {detail.personality.base.traits.join(", ") || "—"}
+                  </DetailValue>
+                  <DetailValue label="Rich traits">
+                    {detail.personality.rich.traits.join(", ") || "—"}
                   </DetailValue>
                   <DetailValue label="Provider">{detail.host.providerInstanceId}</DetailValue>
                   <DetailValue label="Parent">
@@ -303,20 +321,17 @@ export function CivilizationCitizenDetailDialog({
                     {detail.observedOnly ? "Provider-owned · read only" : "T3-managed"} · epoch{" "}
                     {detail.lifecycle.epoch}
                   </DetailValue>
+                  <DetailValue label="Lineage status">{detail.lineage.status}</DetailValue>
+                  <DetailValue label="Citizen revision">{detail.revision}</DetailValue>
                   <DetailValue label="Thread ID">{detail.threadId}</DetailValue>
                   <DetailValue label="Project ID">{detail.projectId}</DetailValue>
                 </div>
-                {rendering === "rich" ? (
-                  <div className="grid gap-3 sm:grid-cols-2">
-                    <DetailValue label="Axiom">{detail.personality.rich.axiom}</DetailValue>
-                    <DetailValue label="Voice">{detail.personality.rich.voice}</DetailValue>
-                    <div className="sm:col-span-2">
-                      <DetailValue label="Style">{detail.personality.rich.styleText}</DetailValue>
-                    </div>
-                  </div>
-                ) : rendering === "mild" ? (
-                  <DetailValue label="Style">{detail.personality.base.styleText}</DetailValue>
-                ) : null}
+                <div className="grid gap-3 sm:grid-cols-2">
+                  <DetailValue label="Mild style">{detail.personality.base.styleText}</DetailValue>
+                  <DetailValue label="Rich axiom">{detail.personality.rich.axiom}</DetailValue>
+                  <DetailValue label="Rich voice">{detail.personality.rich.voice}</DetailValue>
+                  <DetailValue label="Rich style">{detail.personality.rich.styleText}</DetailValue>
+                </div>
                 <div className="flex flex-wrap gap-2">
                   {onViewLineage === undefined ? null : (
                     <Button size="xs" variant="outline" onClick={() => navigate(onViewLineage)}>
@@ -428,8 +443,15 @@ export function CivilizationCitizenDetailDialog({
                         <>
                           <div className="mt-2">{proposedProfile.rich.axiom}</div>
                           <div className="text-muted-foreground">{proposedProfile.rich.voice}</div>
+                          <div className="mt-1 text-muted-foreground">
+                            {proposedProfile.rich.styleText}
+                          </div>
                         </>
-                      ) : null}
+                      ) : (
+                        <div className="mt-1 text-muted-foreground">
+                          {proposedProfile.styleText}
+                        </div>
+                      )}
                     </div>
                   )}
                   <div className="rounded-md border border-border/70 p-3 text-sm">
@@ -438,6 +460,20 @@ export function CivilizationCitizenDetailDialog({
                       {detail.title.managed
                         ? "Civilization currently owns this title."
                         : "The title is user-owned."}
+                    </div>
+                    <div className="mt-2 grid gap-1 text-xs">
+                      <div className="wrap-anywhere">
+                        <span className="text-muted-foreground">Current topic: </span>
+                        {detail.title.topic}
+                      </div>
+                      <div className="wrap-anywhere">
+                        <span className="text-muted-foreground">Preserved manual/original: </span>
+                        {detail.title.preservedTitle ?? "—"}
+                      </div>
+                      <div className="wrap-anywhere">
+                        <span className="text-muted-foreground">Last managed title: </span>
+                        {detail.title.lastManagedTitle ?? "—"}
+                      </div>
                     </div>
                     <div className="mt-2 wrap-anywhere text-xs">
                       <span className="text-muted-foreground">Live managed preview: </span>
@@ -455,7 +491,8 @@ export function CivilizationCitizenDetailDialog({
                         </Button>
                       ) : null}
                       {detail.title.preservedTitle !== null &&
-                      detail.title.lastManagedTitle !== null ? (
+                      detail.title.lastManagedTitle !== null &&
+                      detail.host.threadTitle === detail.title.lastManagedTitle ? (
                         <Button
                           size="xs"
                           variant="outline"
