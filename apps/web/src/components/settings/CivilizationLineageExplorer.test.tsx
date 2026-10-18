@@ -133,11 +133,15 @@ afterEach(async () => {
   vi.unstubAllGlobals();
 });
 
-describe("Civilization Ancestral Hall", () => {
+describe("Civilization lineage", () => {
   it("loads one bounded neighborhood and navigates by changing focus", async () => {
     await render();
     expect(JSON.stringify(renderer?.toJSON())).toContain("Root Ada");
     expect(JSON.stringify(renderer?.toJSON())).toContain("Child Grace");
+    expect(renderer!.root.findByProps({ "aria-label": "Direct descendants" }).type).toBe("ul");
+    expect(renderer!.root.findAllByType("li")).toHaveLength(1);
+    expect(renderer!.root.findAllByProps({ role: "tree" })).toHaveLength(0);
+    expect(renderer!.root.findAllByProps({ role: "treeitem" })).toHaveLength(0);
     expect(testState.calls.at(-1)?.slice(0, 5)).toEqual([
       environmentId,
       projectId,

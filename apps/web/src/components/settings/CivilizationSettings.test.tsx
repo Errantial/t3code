@@ -4,6 +4,7 @@ import {
   EnvironmentId,
   ProjectId,
   ProviderInstanceId,
+  ThreadId,
   type CivilizationEffectiveConfig,
 } from "@t3tools/contracts";
 import { act, type ReactNode } from "react";
@@ -22,6 +23,13 @@ const state = vi.hoisted(() => ({
   >,
   refreshCalls: 0,
   multiEffectiveByEnvironment: new Map<string, CivilizationEffectiveConfig>(),
+  scopeKind: null as "all" | "environment" | "project" | "checkout" | "unavailable" | null,
+  searchTargetId: null as string | null,
+  scrollTargets: [] as string[],
+  scrollResult: false,
+  projectInspectionProps: [] as Array<Record<string, unknown>>,
+  contextAnalyticsProps: [] as Array<Record<string, unknown>>,
+  contextInspectorProps: [] as Array<Record<string, unknown>>,
 }));
 
 vi.mock("@effect/atom-react", () => ({
@@ -57,28 +65,74 @@ vi.mock("../../state/session", () => ({
 }));
 
 vi.mock("./SettingsScopeContext", () => ({
-  useSettingsScope: () => ({
-    targets: state.targets,
-    scope: { kind: "all", environmentIds: state.targets.map((target) => target.environmentId) },
-  }),
+  useSettingsScope: () => {
+    const kind =
+      state.scopeKind ??
+      (state.targets.length === 1 && state.targets[0]?.projectId !== null
+        ? "checkout"
+        : state.targets.length > 1
+          ? "project"
+          : "all");
+    return {
+      targets: state.targets,
+      scope: {
+        kind,
+        environmentIds: state.targets.map((target) => target.environmentId),
+        ...(kind === "unavailable" ? { message: "Unavailable test scope" } : {}),
+      },
+    };
+  },
+}));
+
+vi.mock("./SettingsScopeNotice", () => ({
+  SettingsScopeNotice: ({
+    children,
+    target,
+    targetId,
+  }: {
+    children: ReactNode;
+    target: string;
+    targetId?: string;
+  }) => (
+    <div data-testid="settings-scope-notice" data-target={target} data-target-id={targetId}>
+      {children}
+    </div>
+  ),
 }));
 
 vi.mock("./CivilizationContextInspector", () => ({
-  CivilizationContextInspector: ({ targetLabel }: { targetLabel: string }) => (
-    <div data-testid="civilization-context-inspector">Context inspector for {targetLabel}</div>
-  ),
+  CivilizationContextInspector: (props: { targetLabel: string } & Record<string, unknown>) => {
+    state.contextInspectorProps.push(props);
+    return (
+      <div data-testid="civilization-context-inspector">
+        Context inspector for {props.targetLabel}
+      </div>
+    );
+  },
 }));
 
 vi.mock("./CivilizationContextAnalytics", () => ({
-  CivilizationContextAnalytics: ({ targetLabel }: { targetLabel: string }) => (
-    <div data-testid="civilization-context-analytics">Context analytics for {targetLabel}</div>
-  ),
+  CivilizationContextAnalytics: (props: { targetLabel: string } & Record<string, unknown>) => {
+    state.contextAnalyticsProps.push(props);
+    return (
+      <div data-testid="civilization-context-analytics">
+        Context analytics for {props.targetLabel}
+      </div>
+    );
+  },
 }));
 
 vi.mock("./CivilizationProjectInspection", () => ({
-  CivilizationProjectInspection: ({ targetLabel }: { targetLabel: string }) => (
-    <div data-testid="civilization-project-inspection">Project inspection · {targetLabel}</div>
-  ),
+  CivilizationProjectInspection: (
+    props: { targetLabel: string; mode?: string } & Record<string, unknown>,
+  ) => {
+    state.projectInspectionProps.push(props);
+    return (
+      <div data-testid="civilization-project-inspection" data-mode={props.mode}>
+        Project inspection · {props.targetLabel} · {props.mode}
+      </div>
+    );
+  },
 }));
 
 const EFFECTIVE = {
@@ -214,6 +268,23 @@ vi.mock("../ui/switch", () => ({
   ),
 }));
 
+vi.mock("../ui/toggle-group", () => ({
+  ToggleGroup: ({ children, ...props }: { children: ReactNode } & Record<string, unknown>) => (
+    <div {...props}>{children}</div>
+  ),
+  Toggle: ({ children, ...props }: { children: ReactNode } & Record<string, unknown>) => (
+    <button {...props}>{children}</button>
+  ),
+}));
+
+vi.mock("../ui/number-field", () => ({
+  NumberField: ({ children }: { children: ReactNode }) => <div>{children}</div>,
+  NumberFieldGroup: ({ children }: { children: ReactNode }) => <div>{children}</div>,
+  NumberFieldDecrement: (props: Record<string, unknown>) => <button {...props}>−</button>,
+  NumberFieldIncrement: (props: Record<string, unknown>) => <button {...props}>+</button>,
+  NumberFieldInput: (props: Record<string, unknown>) => <input {...props} />,
+}));
+
 vi.mock("../ui/select", () => ({
   Select: ({
     children,
@@ -244,6 +315,11 @@ vi.mock("../ui/select", () => ({
 
 vi.mock("./settingsLayout", () => ({
   SettingsPageContainer: ({ children }: { children: ReactNode }) => <main>{children}</main>,
+  useSettingsSearchTargetId: () => state.searchTargetId,
+  scrollToSettingsTarget: (targetId: string) => {
+    state.scrollTargets.push(targetId);
+    return state.scrollResult;
+  },
   SettingsSection: ({
     children,
     title,
@@ -298,6 +374,13 @@ beforeEach(() => {
   state.configActionResults = [];
   state.refreshCalls = 0;
   state.multiEffectiveByEnvironment.clear();
+  state.scopeKind = null;
+  state.searchTargetId = null;
+  state.scrollTargets = [];
+  state.scrollResult = false;
+  state.projectInspectionProps = [];
+  state.contextAnalyticsProps = [];
+  state.contextInspectorProps = [];
 });
 
 afterEach(async () => {
@@ -320,11 +403,8 @@ describe("Civilization settings read-only shell", () => {
     expect(state.overviewCalls).toEqual([[environmentId, projectId]]);
     expect(text()).toContain("Read-only machine");
     expect(text()).toContain("active");
-    expect(text()).toContain("Read only");
     expect(text()).toContain("Project override");
-    expect(text()).toContain("Environment override");
-    expect(text()).toContain("codex");
-    expect(text()).toContain("Full");
+    expect(text()).toContain("1 full");
   });
 
   it("does not issue a Civilization read when orchestration:read is absent", async () => {
@@ -393,7 +473,7 @@ describe("Civilization settings participation editor", () => {
     ];
 
     await act(() => {
-      renderer = create(<CivilizationSettingsPanel />);
+      renderer = create(<CivilizationSettingsPanel search={{ view: "configuration" }} />);
     });
 
     const enabled = renderer!.root.findByProps({
@@ -481,7 +561,7 @@ describe("Civilization settings participation editor", () => {
     ];
 
     await act(() => {
-      renderer = create(<CivilizationSettingsPanel />);
+      renderer = create(<CivilizationSettingsPanel search={{ view: "configuration" }} />);
     });
     const enabled = renderer!.root.findByProps({
       "aria-label": "Enable Civilization on Writable machine",
@@ -624,7 +704,7 @@ describe("Civilization settings participation editor", () => {
     ];
 
     await act(() => {
-      renderer = create(<CivilizationSettingsPanel />);
+      renderer = create(<CivilizationSettingsPanel search={{ view: "configuration" }} />);
     });
 
     const rendering = renderer!.root
@@ -722,7 +802,7 @@ describe("Civilization settings participation editor", () => {
     ];
 
     await act(() => {
-      renderer = create(<CivilizationSettingsPanel />);
+      renderer = create(<CivilizationSettingsPanel search={{ view: "configuration" }} />);
     });
     const reset = renderer!.root
       .findAllByType("button")
@@ -836,5 +916,307 @@ describe("Civilization settings mixed selection", () => {
     expect(text()).toContain("Saved on Machine A");
     expect(text()).toContain("Failed on Machine B");
     expect(text()).toContain("later environments were not changed");
+  });
+});
+
+describe("Civilization v1.4 task shell", () => {
+  const exactTarget = () => {
+    const environmentId = EnvironmentId.make("environment-shell");
+    const projectId = ProjectId.make("project-shell");
+    state.readable.add(environmentId);
+    state.writable.add(environmentId);
+    state.targets = [{ environmentId, label: "Shell machine", projectId }];
+    state.scopeKind = "checkout";
+    return { environmentId, projectId };
+  };
+
+  it("writes top-level and local mode choices back to navigation search", async () => {
+    exactTarget();
+    const onNavigate = vi.fn();
+    await act(() => {
+      renderer = create(
+        <CivilizationSettingsPanel search={{ view: "overview" }} onNavigate={onNavigate} />,
+      );
+    });
+
+    const viewSelector = renderer!.root
+      .findAllByType("div")
+      .find((node) => node.props["aria-label"] === "Civilization view")!;
+    await act(() => viewSelector.props.onValueChange(["activity"]));
+    expect(onNavigate).toHaveBeenLastCalledWith({ view: "activity", activity: "chronicle" });
+
+    await act(() => {
+      renderer!.update(
+        <CivilizationSettingsPanel
+          search={{ view: "activity", activity: "chronicle" }}
+          onNavigate={onNavigate}
+        />,
+      );
+    });
+    const activitySelector = renderer!.root
+      .findAllByType("div")
+      .find((node) => node.props["aria-label"] === "Civilization activity view")!;
+    await act(() => activitySelector.props.onValueChange(["messages"]));
+    expect(onNavigate).toHaveBeenLastCalledWith({ view: "activity", activity: "messages" });
+  });
+
+  it("mounts only the selected heavy task surface", async () => {
+    exactTarget();
+
+    await act(() => {
+      renderer = create(<CivilizationSettingsPanel search={{ view: "citizens" }} />);
+    });
+    expect(
+      renderer!.root.findByProps({ "data-testid": "civilization-project-inspection" }).props[
+        "data-mode"
+      ],
+    ).toBe("citizens");
+    expect(
+      renderer!.root.findAllByProps({ "data-testid": "civilization-context-analytics" }),
+    ).toHaveLength(0);
+    expect(
+      renderer!.root.findAllByProps({ "data-testid": "civilization-context-inspector" }),
+    ).toHaveLength(0);
+
+    await act(() => {
+      renderer!.update(
+        <CivilizationSettingsPanel search={{ view: "activity", activity: "notes" }} />,
+      );
+    });
+    expect(
+      renderer!.root.findByProps({ "data-testid": "civilization-project-inspection" }).props[
+        "data-mode"
+      ],
+    ).toBe("notes");
+
+    await act(() => {
+      renderer!.update(
+        <CivilizationSettingsPanel search={{ view: "context", contextMode: "analytics" }} />,
+      );
+    });
+    expect(
+      renderer!.root.findAllByProps({ "data-testid": "civilization-project-inspection" }),
+    ).toHaveLength(0);
+    expect(
+      renderer!.root.findAllByProps({ "data-testid": "civilization-context-analytics" }),
+    ).toHaveLength(1);
+    expect(
+      renderer!.root.findAllByProps({ "data-testid": "civilization-context-inspector" }),
+    ).toHaveLength(0);
+
+    await act(() => {
+      renderer!.update(
+        <CivilizationSettingsPanel search={{ view: "context", contextMode: "inspector" }} />,
+      );
+    });
+    expect(
+      renderer!.root.findAllByProps({ "data-testid": "civilization-context-analytics" }),
+    ).toHaveLength(0);
+    expect(
+      renderer!.root.findAllByProps({ "data-testid": "civilization-context-inspector" }),
+    ).toHaveLength(1);
+
+    await act(() => {
+      renderer!.update(<CivilizationSettingsPanel search={{ view: "configuration" }} />);
+    });
+    expect(
+      renderer!.root.findAllByProps({ "data-testid": "civilization-context-analytics" }),
+    ).toHaveLength(0);
+    expect(
+      renderer!.root.findAllByProps({ "data-testid": "civilization-context-inspector" }),
+    ).toHaveLength(0);
+    expect(
+      renderer!.root.findByProps({ "data-testid": "civilization-project-inspection" }).props[
+        "data-mode"
+      ],
+    ).toBe("data");
+  });
+
+  it("keeps Overview multi-target safe with one canonical status id and gates rich views to one checkout", async () => {
+    const firstEnvironment = EnvironmentId.make("environment-shell-a");
+    const secondEnvironment = EnvironmentId.make("environment-shell-b");
+    state.readable.add(firstEnvironment);
+    state.readable.add(secondEnvironment);
+    state.targets = [
+      {
+        environmentId: firstEnvironment,
+        label: "Shell A",
+        projectId: ProjectId.make("project-shell-a"),
+      },
+      {
+        environmentId: secondEnvironment,
+        label: "Shell B",
+        projectId: ProjectId.make("project-shell-b"),
+      },
+    ];
+    state.scopeKind = "project";
+
+    await act(() => {
+      renderer = create(<CivilizationSettingsPanel search={{ view: "overview" }} />);
+    });
+    expect(
+      renderer!.root
+        .findAllByType("section")
+        .filter((section) => section.props.id === "civilization-status"),
+    ).toHaveLength(1);
+    expect(text()).toContain("Shell A");
+    expect(text()).toContain("Shell B");
+    expect(
+      renderer!.root.findAllByProps({ "data-testid": "civilization-project-inspection" }),
+    ).toHaveLength(0);
+
+    await act(() => {
+      renderer!.update(<CivilizationSettingsPanel search={{ view: "citizens" }} />);
+    });
+    const notice = renderer!.root.findByProps({ "data-testid": "settings-scope-notice" });
+    expect(notice.props["data-target"]).toBe("checkout");
+    expect(
+      renderer!.root.findAllByProps({ "data-testid": "civilization-project-inspection" }),
+    ).toHaveLength(0);
+  });
+
+  it("asks for a project before mounting a project-required task from environment scope", async () => {
+    const environmentId = EnvironmentId.make("environment-shell-environment-only");
+    state.readable.add(environmentId);
+    state.targets = [{ environmentId, label: "Environment only", projectId: null }];
+    state.scopeKind = "environment";
+
+    await act(() => {
+      renderer = create(
+        <CivilizationSettingsPanel search={{ view: "context", contextMode: "analytics" }} />,
+      );
+    });
+    const notice = renderer!.root.findByProps({ "data-testid": "settings-scope-notice" });
+    expect(notice.props["data-target"]).toBe("project");
+    expect(
+      renderer!.root.findAllByProps({ "data-testid": "civilization-context-analytics" }),
+    ).toHaveLength(0);
+  });
+
+  it("uses a Settings search hash to reveal the owning view and mode", async () => {
+    exactTarget();
+    state.searchTargetId = "civilization-context-inspector";
+    const onNavigate = vi.fn();
+
+    await act(() => {
+      renderer = create(
+        <CivilizationSettingsPanel search={{ view: "overview" }} onNavigate={onNavigate} />,
+      );
+    });
+
+    expect(
+      renderer!.root.findAllByProps({ "data-testid": "civilization-context-inspector" }),
+    ).toHaveLength(0);
+    expect(
+      renderer!.root.findAllByProps({ "data-testid": "civilization-context-analytics" }),
+    ).toHaveLength(0);
+    expect(onNavigate).toHaveBeenCalledWith(
+      { view: "context", contextMode: "inspector" },
+      { replace: true, hash: "civilization-context-inspector" },
+    );
+    state.searchTargetId = null;
+    state.scrollResult = true;
+    await act(() => {
+      renderer!.update(
+        <CivilizationSettingsPanel
+          search={{ view: "context", contextMode: "inspector" }}
+          onNavigate={onNavigate}
+        />,
+      );
+    });
+    expect(
+      renderer!.root.findAllByProps({ "data-testid": "civilization-context-inspector" }),
+    ).toHaveLength(1);
+    expect(state.scrollTargets).toContain("civilization-context-inspector");
+  });
+
+  it("preserves the full Analytics filter set when drilling into Inspector", async () => {
+    exactTarget();
+    const onNavigate = vi.fn();
+    const threadId = ThreadId.make("thread-shell-analytics");
+    const providerInstanceId = ProviderInstanceId.make("provider-shell-analytics");
+    const filters = {
+      from: "2026-10-18T10:00:00.000Z",
+      to: "2026-10-18T11:00:00.000Z",
+      providerInstanceId,
+      threadId,
+      outcome: "provider_start_accepted" as const,
+      suppressionReason: "provider_unsupported" as const,
+    };
+
+    await act(() => {
+      renderer = create(
+        <CivilizationSettingsPanel
+          search={{ view: "context", contextMode: "analytics" }}
+          onNavigate={onNavigate}
+        />,
+      );
+    });
+    const analyticsProps = state.contextAnalyticsProps.at(-1)!;
+    await act(() => {
+      (analyticsProps.onInspect as (nextFilters: typeof filters) => void)(filters);
+    });
+    expect(onNavigate).toHaveBeenLastCalledWith({
+      view: "context",
+      contextMode: "inspector",
+      contextFilterThread: threadId,
+      contextFilterProvider: providerInstanceId,
+      contextFilterOutcome: "provider_start_accepted",
+      contextFilterSuppression: "provider_unsupported",
+      contextFilterFrom: filters.from,
+      contextFilterTo: filters.to,
+    });
+
+    await act(() => {
+      renderer!.update(
+        <CivilizationSettingsPanel
+          search={{
+            view: "context",
+            contextMode: "inspector",
+            contextFilterThread: threadId,
+            contextFilterProvider: providerInstanceId,
+            contextFilterOutcome: "provider_start_accepted",
+            contextFilterSuppression: "provider_unsupported",
+            contextFilterFrom: filters.from,
+            contextFilterTo: filters.to,
+          }}
+          onNavigate={onNavigate}
+        />,
+      );
+    });
+    expect(state.contextInspectorProps.at(-1)?.initialFilters).toEqual(filters);
+  });
+
+  it("routes citizen context links with contextFilterThread and focuses the canonical target after mount", async () => {
+    exactTarget();
+    const onNavigate = vi.fn();
+    const threadId = ThreadId.make("thread-shell-context");
+
+    await act(() => {
+      renderer = create(
+        <CivilizationSettingsPanel search={{ view: "citizens" }} onNavigate={onNavigate} />,
+      );
+    });
+    const projectProps = state.projectInspectionProps.at(-1)!;
+    await act(() => {
+      (projectProps.onViewContext as (threadId: ThreadId) => void)(threadId);
+    });
+    expect(onNavigate).toHaveBeenLastCalledWith({
+      view: "context",
+      contextMode: "inspector",
+      contextFilterThread: threadId,
+    });
+
+    state.scrollResult = true;
+    await act(() => {
+      renderer!.update(
+        <CivilizationSettingsPanel
+          search={{ view: "context", contextMode: "inspector", contextFilterThread: threadId }}
+          onNavigate={onNavigate}
+        />,
+      );
+    });
+    expect(state.scrollTargets).toContain("civilization-context-inspector");
+    expect(state.contextInspectorProps.at(-1)?.initialFilters).toEqual({ threadId });
   });
 });

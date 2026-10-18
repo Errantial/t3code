@@ -1005,8 +1005,18 @@ export const SETTINGS_SEARCH_ITEMS = [
     id: "civilization-context-analytics",
     title: "Civilization context analytics",
     to: "/settings/civilization",
+    scope: "project",
     searchTerms: [
       "analytics context trends outcomes suppression packet budget composition inspections observability",
+    ],
+  },
+  {
+    id: "civilization-context-inspector",
+    title: "Civilization Context Inspector",
+    to: "/settings/civilization",
+    scope: "project",
+    searchTerms: [
+      "historical context inspection provider turn packet exact filters outcome suppression observability",
     ],
   },
   {
@@ -1037,32 +1047,37 @@ export const SETTINGS_SEARCH_ITEMS = [
     id: "civilization-citizens",
     title: "Civilization citizens",
     to: "/settings/civilization",
+    scope: "project",
     searchTerms: [
       "census population citizen identity reassignment title lineage generation parent",
     ],
   },
   {
     id: "civilization-lineage",
-    title: "Civilization Ancestral Hall",
+    title: "Civilization lineage",
     to: "/settings/civilization",
+    scope: "project",
     searchTerms: ["ancestral hall lineage ancestry descendants parent children generation family"],
   },
   {
     id: "civilization-chronicle",
     title: "Civilization Chronicle",
     to: "/settings/civilization",
+    scope: "project",
     searchTerms: ["chronicle history timeline achievements provenance civilization events"],
   },
   {
     id: "civilization-notes",
     title: "Civilization notes",
     to: "/settings/civilization",
+    scope: "project",
     searchTerms: ["knowledge notes metadata resolved body author revision"],
   },
   {
     id: "civilization-retained-mail",
     title: "Civilization correspondence history",
     to: "/settings/civilization",
+    scope: "project",
     searchTerms: [
       "correspondence history retained mail admin inbox message metadata body reply chain participant lifecycle epoch expiry acknowledgment",
     ],
@@ -1071,6 +1086,7 @@ export const SETTINGS_SEARCH_ITEMS = [
     id: "civilization-data-retention",
     title: "Civilization data and retention",
     to: "/settings/civilization",
+    scope: "project",
     searchTerms: [
       "project data export backup retention preview cleanup purge erase deletion destructive",
     ],

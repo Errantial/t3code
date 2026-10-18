@@ -122,6 +122,7 @@ import {
 } from "./features/settings/SettingsOpenSourceLicensesRouteScreen";
 import { SettingsProjectGroupingRouteScreen } from "./features/settings/SettingsProjectGroupingRouteScreen";
 import { SettingsProjectOverviewRouteScreen } from "./features/settings/SettingsProjectOverviewRouteScreen";
+import { SettingsCivilizationRouteScreen } from "./features/settings/SettingsCivilizationRouteScreen";
 import { UsageLimitAccountScreen } from "./features/usage/UsageLimitsPooled";
 import { UsageRouteScreen } from "./features/usage/UsageRouteScreen";
 import { SettingsAboutRouteScreen } from "./features/settings/SettingsAboutRouteScreen";
@@ -308,6 +309,11 @@ const SettingsContentStack = createV5SheetStackNavigator({
       screen: SettingsProjectOverviewRouteScreen,
       linking: "project",
       options: { title: "Project overview" },
+    }),
+    SettingsCivilization: createNativeStackScreen({
+      screen: SettingsCivilizationRouteScreen,
+      linking: "civilization",
+      options: { title: "Civilization" },
     }),
     SettingsKeyboard: createNativeStackScreen({
       screen: SettingsKeyboardRouteScreen,

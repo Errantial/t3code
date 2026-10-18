@@ -183,8 +183,8 @@ describe("Civilization context analytics", () => {
     expect(text).toContain("Inspections10");
     expect(text).toContain("Skipped3");
     expect(text).toContain("Built2");
-    expect(text).toContain("Adapter handoff accepted4");
-    expect(text).toContain("Adapter handoff failed1");
+    expect(text).toContain("Provider start accepted4");
+    expect(text).toContain("Provider start failed1");
     expect(text).toContain("Provider unsupported2");
     expect(text).toContain("Packet size bands");
     expect(text).toContain("Packet budget utilization");
@@ -194,6 +194,11 @@ describe("Civilization context analytics", () => {
       .findAllByType("table")
       .find((node) => node.props["aria-label"] === "Context analytics bucket table");
     expect(table).toBeDefined();
+    expect(
+      renderer?.root.findAll(
+        (node) => node.props["aria-label"] === "Context analytics time buckets",
+      ),
+    ).toHaveLength(1);
     expect(text).not.toContain("Packet text");
     expect(text).not.toContain("Open body");
     expect(text).not.toContain("Download");

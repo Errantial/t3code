@@ -40,9 +40,17 @@ import {
   DialogTitle,
 } from "../ui/dialog";
 import { Input } from "../ui/input";
+import {
+  NumberField,
+  NumberFieldDecrement,
+  NumberFieldGroup,
+  NumberFieldIncrement,
+  NumberFieldInput,
+} from "../ui/number-field";
 import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
 import { Switch } from "../ui/switch";
 import { Textarea } from "../ui/textarea";
+import { Toggle, ToggleGroup } from "../ui/toggle-group";
 import {
   CivilizationNamePoolEditorDialog,
   CivilizationProfilePoolEditorDialog,
@@ -50,8 +58,25 @@ import {
 import { CivilizationContextAnalytics } from "./CivilizationContextAnalytics";
 import { CivilizationContextInspector } from "./CivilizationContextInspector";
 import { CivilizationProjectInspection } from "./CivilizationProjectInspection";
-import { SettingsPageContainer, SettingsRow, SettingsSection } from "./settingsLayout";
+import {
+  SettingsPageContainer,
+  SettingsRow,
+  SettingsSection,
+  scrollToSettingsTarget,
+  useSettingsSearchTargetId,
+} from "./settingsLayout";
+import { SettingsScopeNotice } from "./SettingsScopeNotice";
 import { useSettingsScope } from "./SettingsScopeContext";
+import {
+  CIVILIZATION_ACTIVITY_MODE_OPTIONS,
+  CIVILIZATION_CONTEXT_MODE_OPTIONS,
+  CIVILIZATION_SETTINGS_VIEW_OPTIONS,
+  civilizationViewForTargetId,
+  type CivilizationActivityMode,
+  type CivilizationContextMode,
+  type CivilizationNavigationSearch,
+  type CivilizationSettingsView,
+} from "./civilizationNavigation";
 
 type CivilizationTarget = {
   readonly environmentId: EnvironmentId;
@@ -373,17 +398,20 @@ function NumberEditor({
   readonly disabled: boolean;
 }) {
   return (
-    <Input
-      aria-label={label}
-      type="number"
+    <NumberField
       size="sm"
-      value={String(value)}
+      value={value}
       disabled={disabled}
-      onChange={(event) => {
-        const next = Number(event.currentTarget.value);
-        if (Number.isFinite(next)) onChange(next);
+      onValueChange={(next) => {
+        if (next !== null && Number.isFinite(next)) onChange(next);
       }}
-    />
+    >
+      <NumberFieldGroup>
+        <NumberFieldDecrement aria-label={`Decrease ${label}`} />
+        <NumberFieldInput aria-label={label} />
+        <NumberFieldIncrement aria-label={`Increase ${label}`} />
+      </NumberFieldGroup>
+    </NumberField>
   );
 }
 
@@ -641,46 +669,132 @@ function CivilizationMultiTargetParticipation({
   );
 }
 
+function CivilizationTargetStatusRow({ target }: { readonly target: CivilizationTarget }) {
+  const canRead = useEnvironmentScope(target.environmentId, AuthOrchestrationReadScope);
+  const overview = useCivilizationOverview(
+    canRead ? target.environmentId : null,
+    canRead ? target.projectId : null,
+  );
+  const status = overview.data?.status;
+  const description = !canRead
+    ? "orchestration:read permission is required."
+    : overview.data === null && overview.isPending
+      ? "Loading Civilization status…"
+      : (overview.error ??
+        (status === undefined
+          ? "Civilization status is unavailable."
+          : `${status.openCitizenCount} open of ${status.citizenCount} enrolled citizens.`));
+  return (
+    <SettingsRow
+      title={target.label}
+      description={description}
+      control={
+        <ReadOnlyValue>
+          {status?.status ?? (overview.isPending ? "Loading…" : "Unavailable")}
+        </ReadOnlyValue>
+      }
+    />
+  );
+}
+
+function CivilizationMultiTargetStatus({
+  targets,
+}: {
+  readonly targets: readonly CivilizationTarget[];
+}) {
+  return (
+    <SettingsSection title="Civilization overview" id="civilization-status">
+      {targets.map((target) => (
+        <CivilizationTargetStatusRow key={civilizationTargetKey(target)} target={target} />
+      ))}
+    </SettingsSection>
+  );
+}
+
+type CivilizationTargetSurface = Exclude<CivilizationSettingsView, "overview"> | "overview";
+
+interface CivilizationTargetSurfaceNavigation {
+  readonly search: CivilizationNavigationSearch;
+  readonly activityMode: CivilizationActivityMode;
+  readonly contextMode: CivilizationContextMode;
+  readonly navigate: (next: CivilizationNavigationSearch, targetId: string) => void;
+}
+
 function CivilizationTargetOverview({
   target,
   allowSensitiveProjectActions,
   initialInspectionFilters,
+  surface,
+  navigation,
+  surfaceTargetId,
 }: {
   readonly target: CivilizationTarget;
   readonly allowSensitiveProjectActions: boolean;
   readonly initialInspectionFilters?: CivilizationContextInspectionFilters | undefined;
+  readonly surface: CivilizationTargetSurface;
+  readonly navigation: CivilizationTargetSurfaceNavigation;
+  readonly surfaceTargetId: string;
 }) {
   const canRead = useEnvironmentScope(target.environmentId, AuthOrchestrationReadScope);
   const canWrite = useEnvironmentScope(target.environmentId, AuthSettingsWriteScope);
-  const initialInspectionFiltersKey = JSON.stringify(initialInspectionFilters ?? {});
+  const routedInspectionFilters = initialInspectionFilters ?? {
+    ...(navigation.search.contextFilterThread === undefined
+      ? {}
+      : { threadId: navigation.search.contextFilterThread }),
+    ...(navigation.search.contextFilterProvider === undefined
+      ? {}
+      : { providerInstanceId: navigation.search.contextFilterProvider }),
+    ...(navigation.search.contextFilterOutcome === undefined
+      ? {}
+      : { outcome: navigation.search.contextFilterOutcome }),
+    ...(navigation.search.contextFilterSuppression === undefined
+      ? {}
+      : { suppressionReason: navigation.search.contextFilterSuppression }),
+    ...(navigation.search.contextFilterFrom === undefined
+      ? {}
+      : { from: navigation.search.contextFilterFrom }),
+    ...(navigation.search.contextFilterTo === undefined
+      ? {}
+      : { to: navigation.search.contextFilterTo }),
+  };
+  const initialInspectionFiltersKey = JSON.stringify(routedInspectionFilters);
   const lastInitialInspectionFiltersKey = useRef(initialInspectionFiltersKey);
   const [inspectionFilters, setInspectionFilters] = useState<CivilizationContextInspectionFilters>(
-    () => initialInspectionFilters ?? {},
+    () => routedInspectionFilters,
   );
-  const inspectorRef = useRef<HTMLDivElement>(null);
-  const [requestedLineage, setRequestedLineage] = useState<{
-    readonly threadId: ThreadId;
-    readonly nonce: number;
-  } | null>(null);
-  const [requestedCitizen, setRequestedCitizen] = useState<{
-    readonly threadId: ThreadId;
-    readonly nonce: number;
-  } | null>(null);
   useEffect(() => {
     if (lastInitialInspectionFiltersKey.current === initialInspectionFiltersKey) return;
     lastInitialInspectionFiltersKey.current = initialInspectionFiltersKey;
-    setInspectionFilters(initialInspectionFilters ?? {});
-  }, [initialInspectionFilters, initialInspectionFiltersKey]);
+    setInspectionFilters(routedInspectionFilters);
+  }, [initialInspectionFiltersKey, routedInspectionFilters]);
   const viewContext = (filters: CivilizationContextInspectionFilters) => {
     setInspectionFilters(filters);
-    inspectorRef.current?.scrollIntoView({ block: "start" });
-    inspectorRef.current?.querySelector<HTMLElement>("input,button")?.focus();
+    navigation.navigate(
+      {
+        view: "context",
+        contextMode: "inspector",
+        ...(filters.threadId === undefined ? {} : { contextFilterThread: filters.threadId }),
+        ...(filters.providerInstanceId === undefined
+          ? {}
+          : { contextFilterProvider: filters.providerInstanceId }),
+        ...(filters.outcome === undefined ? {} : { contextFilterOutcome: filters.outcome }),
+        ...(filters.suppressionReason === undefined
+          ? {}
+          : { contextFilterSuppression: filters.suppressionReason }),
+        ...(filters.from === undefined ? {} : { contextFilterFrom: filters.from }),
+        ...(filters.to === undefined ? {} : { contextFilterTo: filters.to }),
+      },
+      "civilization-context-inspector",
+    );
   };
-  const viewLineage = (threadId: ThreadId) => {
-    setRequestedLineage((current) => ({ threadId, nonce: (current?.nonce ?? 0) + 1 }));
+  const viewLineage = (threadId: ThreadId | null) => {
+    navigation.navigate(
+      { view: "citizens", ...(threadId === null ? {} : { lineage: threadId }) },
+      threadId === null ? "civilization-citizens" : "civilization-lineage",
+    );
   };
   const viewCitizen = (threadId: ThreadId) => {
-    setRequestedCitizen((current) => ({ threadId, nonce: (current?.nonce ?? 0) + 1 }));
+    navigation.navigate({ view: "citizens", citizen: threadId }, "civilization-citizens");
   };
   const runConfigAction: CivilizationConfigRunner = useAtomSet(civilizationConfigAction, {
     mode: "promise",
@@ -900,7 +1014,7 @@ function CivilizationTargetOverview({
 
   if (!canRead) {
     return (
-      <SettingsSection title={target.label} id="civilization-status">
+      <SettingsSection title={target.label} id={surfaceTargetId}>
         <SettingsRow
           title="Civilization"
           description="This client does not have orchestration:read permission for this environment."
@@ -912,7 +1026,7 @@ function CivilizationTargetOverview({
 
   if (overview.data === null && overview.isPending) {
     return (
-      <SettingsSection title={target.label} id="civilization-status">
+      <SettingsSection title={target.label} id={surfaceTargetId}>
         <SettingsRow
           title="Civilization"
           description="Loading server-owned status, capabilities, and effective configuration."
@@ -926,7 +1040,7 @@ function CivilizationTargetOverview({
     return (
       <SettingsSection
         title={target.label}
-        id="civilization-status"
+        id={surfaceTargetId}
         headerAction={
           <Button
             size="icon-xs"
@@ -1125,53 +1239,256 @@ function CivilizationTargetOverview({
       });
   };
 
+  if (surface === "overview") {
+    return (
+      <div className="space-y-8">
+        <SettingsSection
+          title={target.label}
+          id="civilization-status"
+          headerAction={
+            <Button
+              size="icon-xs"
+              variant="ghost-muted"
+              aria-label={`Refresh ${target.label}`}
+              onClick={overview.refresh}
+            >
+              <RefreshCwIcon className="size-3.5" />
+            </Button>
+          }
+        >
+          <SettingsRow
+            title="Status"
+            description={
+              status.detail ??
+              (target.projectId === null
+                ? "Environment-wide Civilization status."
+                : "Civilization status for this project on the selected environment.")
+            }
+            control={<ReadOnlyValue>{status.status}</ReadOnlyValue>}
+          />
+          <SettingsRow
+            title="Citizens"
+            description={`${status.openCitizenCount} open of ${status.citizenCount} enrolled citizens.`}
+            control={<ReadOnlyValue>{String(status.citizenCount)}</ReadOnlyValue>}
+          />
+          <SettingsRow
+            title="Provider support"
+            description={`${capabilities.providers.length} provider instances report Civilization capability metadata.`}
+            control={
+              <ReadOnlyValue>
+                {`${fullProviders} full${limitedProviders > 0 ? ` · ${limitedProviders} limited` : ""}`}
+              </ReadOnlyValue>
+            }
+          />
+        </SettingsSection>
+        <SettingsSection title="Participation" id="civilization-participation">
+          <SettingsRow
+            title="Enabled"
+            description={`${sourceLabel(effective, "participation.enabled")} · changes are staged locally until Save.`}
+            control={
+              canWrite && participationEditor.draft !== null ? (
+                <Switch
+                  aria-label={`Enable Civilization on ${target.label}`}
+                  checked={participationEditor.draft.enabled}
+                  disabled={participationEditor.saving}
+                  onCheckedChange={(checked) =>
+                    participationEditor.update((current) => ({ ...current, enabled: checked }))
+                  }
+                />
+              ) : (
+                <ReadOnlyValue>
+                  {config.participation.enabled ? "Enabled" : "Disabled"}
+                </ReadOnlyValue>
+              )
+            }
+          />
+          <SettingsRow
+            title="Emergency off"
+            description={`${sourceLabel(effective, "participation.emergencyOff")} · stronger operational stop than ordinary disable.`}
+            control={
+              canWrite && participationEditor.draft !== null ? (
+                <Switch
+                  aria-label={`Emergency off Civilization on ${target.label}`}
+                  checked={participationEditor.draft.emergencyOff}
+                  disabled={participationEditor.saving}
+                  onCheckedChange={(checked) =>
+                    participationEditor.update((current) => ({ ...current, emergencyOff: checked }))
+                  }
+                />
+              ) : (
+                <ReadOnlyValue>{config.participation.emergencyOff ? "On" : "Off"}</ReadOnlyValue>
+              )
+            }
+          />
+          <SettingsRow
+            title="Adoption"
+            description={`${sourceLabel(effective, "participation.adoption")} · ${description.applicationTiming.participation}.`}
+            control={
+              canWrite && participationEditor.draft !== null ? (
+                <Select
+                  value={participationEditor.draft.adoption}
+                  onValueChange={(value) =>
+                    participationEditor.update((current) => ({
+                      ...current,
+                      adoption: value as ParticipationDraft["adoption"],
+                    }))
+                  }
+                  disabled={participationEditor.saving}
+                >
+                  <SelectTrigger aria-label={`Civilization adoption on ${target.label}`} size="sm">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectPopup>
+                    <SelectItem value="future_only">Future only</SelectItem>
+                    <SelectItem value="all_existing">All existing</SelectItem>
+                  </SelectPopup>
+                </Select>
+              ) : (
+                <ReadOnlyValue>{config.participation.adoption.replaceAll("_", " ")}</ReadOnlyValue>
+              )
+            }
+          />
+          <SectionSaveRow
+            title="Save participation"
+            editor={participationEditor}
+            canWrite={canWrite}
+            target={target}
+          />
+        </SettingsSection>
+      </div>
+    );
+  }
+
+  if (surface === "citizens" && target.projectId !== null) {
+    return (
+      <CivilizationProjectInspection
+        key={`citizens:${navigation.search.citizen ?? "none"}:${navigation.search.lineage ?? "none"}`}
+        environmentId={target.environmentId}
+        projectId={target.projectId}
+        targetLabel={target.label}
+        effective={effective}
+        allowSensitiveActions={allowSensitiveProjectActions}
+        mode="citizens"
+        initialCitizenThreadId={navigation.search.citizen}
+        initialLineageThreadId={navigation.search.lineage}
+        onNavigateCitizen={viewCitizen}
+        onNavigateLineage={viewLineage}
+        onNavigateChronicle={({ threadId, sourceId }) =>
+          navigation.navigate(
+            {
+              view: "activity",
+              activity: "chronicle",
+              ...(threadId === undefined ? {} : { activityThread: threadId }),
+              ...(sourceId === undefined ? {} : { activitySource: sourceId }),
+            },
+            "civilization-chronicle",
+          )
+        }
+        onNavigateCorrespondence={({ threadId, messageId }) =>
+          navigation.navigate(
+            {
+              view: "activity",
+              activity: "messages",
+              ...(threadId === undefined ? {} : { activityThread: threadId }),
+              ...(messageId === undefined ? {} : { activityMessage: messageId }),
+            },
+            "civilization-retained-mail",
+          )
+        }
+        onViewContext={(threadId) =>
+          navigation.navigate(
+            { view: "context", contextMode: "inspector", contextFilterThread: threadId },
+            "civilization-context-inspector",
+          )
+        }
+      />
+    );
+  }
+
+  if (surface === "activity" && target.projectId !== null) {
+    const mode = navigation.activityMode;
+    return (
+      <CivilizationProjectInspection
+        key={`activity:${mode}:${navigation.search.activityThread ?? "none"}:${navigation.search.activitySource ?? "none"}:${navigation.search.activityMessage ?? "none"}`}
+        environmentId={target.environmentId}
+        projectId={target.projectId}
+        targetLabel={target.label}
+        effective={effective}
+        allowSensitiveActions={allowSensitiveProjectActions}
+        mode={mode}
+        initialChronicleThreadId={
+          mode === "chronicle" ? navigation.search.activityThread : undefined
+        }
+        initialChronicleSourceId={
+          mode === "chronicle" ? navigation.search.activitySource : undefined
+        }
+        initialCorrespondenceThreadId={
+          mode === "messages" ? navigation.search.activityThread : undefined
+        }
+        initialMessageId={mode === "messages" ? navigation.search.activityMessage : undefined}
+        onNavigateCitizen={viewCitizen}
+        onNavigateLineage={viewLineage}
+        onNavigateChronicle={({ threadId, sourceId }) =>
+          navigation.navigate(
+            {
+              view: "activity",
+              activity: "chronicle",
+              ...(threadId === undefined ? {} : { activityThread: threadId }),
+              ...(sourceId === undefined ? {} : { activitySource: sourceId }),
+            },
+            "civilization-chronicle",
+          )
+        }
+        onNavigateCorrespondence={({ threadId, messageId }) =>
+          navigation.navigate(
+            {
+              view: "activity",
+              activity: "messages",
+              ...(threadId === undefined ? {} : { activityThread: threadId }),
+              ...(messageId === undefined ? {} : { activityMessage: messageId }),
+            },
+            "civilization-retained-mail",
+          )
+        }
+        onViewContext={(threadId) =>
+          navigation.navigate(
+            { view: "context", contextMode: "inspector", contextFilterThread: threadId },
+            "civilization-context-inspector",
+          )
+        }
+      />
+    );
+  }
+
+  if (surface === "context" && target.projectId !== null) {
+    if (navigation.contextMode === "analytics") {
+      return (
+        <CivilizationContextAnalytics
+          environmentId={target.environmentId}
+          projectId={target.projectId}
+          targetLabel={target.label}
+          onInspect={viewContext}
+        />
+      );
+    }
+    return (
+      <CivilizationContextInspector
+        environmentId={target.environmentId}
+        projectId={target.projectId}
+        targetLabel={target.label}
+        initialFilters={inspectionFilters}
+        onViewCitizen={viewCitizen}
+        onViewLineage={viewLineage}
+      />
+    );
+  }
+
+  if (surface !== "configuration") {
+    return null;
+  }
+
   return (
     <div className="space-y-8">
-      <SettingsSection
-        title={target.label}
-        id="civilization-status"
-        headerAction={
-          <Button
-            size="icon-xs"
-            variant="ghost-muted"
-            aria-label={`Refresh ${target.label}`}
-            onClick={overview.refresh}
-          >
-            <RefreshCwIcon className="size-3.5" />
-          </Button>
-        }
-      >
-        <SettingsRow
-          title="Status"
-          description={
-            status.detail ??
-            (target.projectId === null
-              ? "Environment-wide Civilization status."
-              : "Civilization status for this project on the selected environment.")
-          }
-          control={<ReadOnlyValue>{status.status}</ReadOnlyValue>}
-        />
-        <SettingsRow
-          title="Citizens"
-          description={`${status.openCitizenCount} open of ${status.citizenCount} enrolled citizens.`}
-          control={<ReadOnlyValue>{String(status.citizenCount)}</ReadOnlyValue>}
-        />
-        <SettingsRow
-          title="Access"
-          description={
-            canWrite
-              ? "Configuration changes validate first and commit against the captured tier revision."
-              : "This connection can inspect Civilization but lacks settings:write permission."
-          }
-          control={<ReadOnlyValue>{canWrite ? "Read + manage" : "Read only"}</ReadOnlyValue>}
-        />
-        <SettingsRow
-          title="Revisions"
-          description={`Environment ${effective.environmentRevision}; project ${effective.projectRevision}.`}
-          control={<ReadOnlyValue>{`schema v${description.version}`}</ReadOnlyValue>}
-        />
-      </SettingsSection>
-
       <SettingsSection title="Participation" id="civilization-participation">
         <SettingsRow
           title="Enabled"
@@ -1886,34 +2203,14 @@ function CivilizationTargetOverview({
       </SettingsSection>
 
       {target.projectId === null ? null : (
-        <>
-          <CivilizationContextAnalytics
-            environmentId={target.environmentId}
-            projectId={target.projectId}
-            targetLabel={target.label}
-            onInspect={viewContext}
-          />
-          <div ref={inspectorRef}>
-            <CivilizationContextInspector
-              environmentId={target.environmentId}
-              projectId={target.projectId}
-              targetLabel={target.label}
-              initialFilters={inspectionFilters}
-              onViewCitizen={viewCitizen}
-              onViewLineage={viewLineage}
-            />
-          </div>
-          <CivilizationProjectInspection
-            environmentId={target.environmentId}
-            projectId={target.projectId}
-            targetLabel={target.label}
-            effective={effective}
-            allowSensitiveActions={allowSensitiveProjectActions}
-            onViewContext={(threadId) => viewContext({ threadId })}
-            requestedLineage={requestedLineage}
-            requestedCitizen={requestedCitizen}
-          />
-        </>
+        <CivilizationProjectInspection
+          environmentId={target.environmentId}
+          projectId={target.projectId}
+          targetLabel={target.label}
+          effective={effective}
+          allowSensitiveActions={allowSensitiveProjectActions}
+          mode="data"
+        />
       )}
 
       <SettingsSection title="Server contract" id="civilization-config">
@@ -2083,22 +2380,316 @@ function CivilizationTargetOverview({
   );
 }
 
-export function CivilizationSettingsPanel({
-  initialInspectionFilters,
+export function CivilizationTaskSelector({
+  view,
+  activityMode,
+  contextMode,
+  navigate,
 }: {
-  readonly initialInspectionFilters?: CivilizationContextInspectionFilters | undefined;
-} = {}) {
-  const { targets, scope } = useSettingsScope();
+  readonly view: CivilizationSettingsView;
+  readonly activityMode: CivilizationActivityMode;
+  readonly contextMode: CivilizationContextMode;
+  readonly navigate: (next: CivilizationNavigationSearch, targetId: string) => void;
+}) {
+  const selectView = (nextView: CivilizationSettingsView) => {
+    const option = CIVILIZATION_SETTINGS_VIEW_OPTIONS.find(
+      (candidate) => candidate.value === nextView,
+    )!;
+    if (nextView === "activity") {
+      navigate({ view: nextView, activity: "chronicle" }, option.targetId);
+      return;
+    }
+    if (nextView === "context") {
+      navigate({ view: nextView, contextMode: "analytics" }, option.targetId);
+      return;
+    }
+    navigate({ view: nextView }, option.targetId);
+  };
+  const selectActivityMode = (mode: CivilizationActivityMode) => {
+    const option = CIVILIZATION_ACTIVITY_MODE_OPTIONS.find(
+      (candidate) => candidate.value === mode,
+    )!;
+    navigate({ view: "activity", activity: mode }, option.targetId);
+  };
+  const selectContextMode = (mode: CivilizationContextMode) => {
+    const option = CIVILIZATION_CONTEXT_MODE_OPTIONS.find((candidate) => candidate.value === mode)!;
+    navigate({ view: "context", contextMode: mode }, option.targetId);
+  };
 
   return (
-    <SettingsPageContainer width="expanded" className="gap-8">
-      <div className="px-3 text-sm text-muted-foreground sm:px-4">
-        Civilization coordinates server-owned agent identity, bounded personality context, shared
-        notes, and passive agent mail. Configuration edits are staged locally, validated by the
-        server, and saved with optimistic concurrency.
+    <div className="space-y-3 px-3 sm:px-4">
+      <ToggleGroup
+        aria-label="Civilization view"
+        className="hidden w-full *:flex-1 sm:flex"
+        value={[view]}
+        onValueChange={(next) => {
+          const selected = CIVILIZATION_SETTINGS_VIEW_OPTIONS.find(
+            (option) => option.value === next[0],
+          );
+          if (selected) selectView(selected.value);
+        }}
+      >
+        {CIVILIZATION_SETTINGS_VIEW_OPTIONS.map((option) => (
+          <Toggle key={option.value} value={option.value}>
+            {option.label}
+          </Toggle>
+        ))}
+      </ToggleGroup>
+      <div className="sm:hidden">
+        <Select
+          items={CIVILIZATION_SETTINGS_VIEW_OPTIONS}
+          value={view}
+          onValueChange={(value) => selectView(value as CivilizationSettingsView)}
+        >
+          <SelectTrigger aria-label="Civilization view" className="w-full">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectPopup>
+            {CIVILIZATION_SETTINGS_VIEW_OPTIONS.map((option) => (
+              <SelectItem key={option.value} value={option.value}>
+                {option.label}
+              </SelectItem>
+            ))}
+          </SelectPopup>
+        </Select>
       </div>
-      {targets.length === 0 ? (
-        <SettingsSection title="Civilization" id="civilization-status">
+      {view === "activity" ? (
+        <>
+          <ToggleGroup
+            aria-label="Civilization activity view"
+            className="hidden w-fit sm:flex"
+            value={[activityMode]}
+            onValueChange={(next) => {
+              const selected = CIVILIZATION_ACTIVITY_MODE_OPTIONS.find(
+                (option) => option.value === next[0],
+              );
+              if (selected) selectActivityMode(selected.value);
+            }}
+          >
+            {CIVILIZATION_ACTIVITY_MODE_OPTIONS.map((option) => (
+              <Toggle key={option.value} value={option.value}>
+                {option.label}
+              </Toggle>
+            ))}
+          </ToggleGroup>
+          <div className="sm:hidden">
+            <Select
+              items={CIVILIZATION_ACTIVITY_MODE_OPTIONS}
+              value={activityMode}
+              onValueChange={(value) => selectActivityMode(value as CivilizationActivityMode)}
+            >
+              <SelectTrigger aria-label="Civilization activity view" className="w-full">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectPopup>
+                {CIVILIZATION_ACTIVITY_MODE_OPTIONS.map((option) => (
+                  <SelectItem key={option.value} value={option.value}>
+                    {option.label}
+                  </SelectItem>
+                ))}
+              </SelectPopup>
+            </Select>
+          </div>
+        </>
+      ) : null}
+      {view === "context" ? (
+        <>
+          <ToggleGroup
+            aria-label="Civilization context view"
+            className="hidden w-fit sm:flex"
+            value={[contextMode]}
+            onValueChange={(next) => {
+              const selected = CIVILIZATION_CONTEXT_MODE_OPTIONS.find(
+                (option) => option.value === next[0],
+              );
+              if (selected) selectContextMode(selected.value);
+            }}
+          >
+            {CIVILIZATION_CONTEXT_MODE_OPTIONS.map((option) => (
+              <Toggle key={option.value} value={option.value}>
+                {option.label}
+              </Toggle>
+            ))}
+          </ToggleGroup>
+          <div className="sm:hidden">
+            <Select
+              items={CIVILIZATION_CONTEXT_MODE_OPTIONS}
+              value={contextMode}
+              onValueChange={(value) => selectContextMode(value as CivilizationContextMode)}
+            >
+              <SelectTrigger aria-label="Civilization context view" className="w-full">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectPopup>
+                {CIVILIZATION_CONTEXT_MODE_OPTIONS.map((option) => (
+                  <SelectItem key={option.value} value={option.value}>
+                    {option.label}
+                  </SelectItem>
+                ))}
+              </SelectPopup>
+            </Select>
+          </div>
+        </>
+      ) : null}
+    </div>
+  );
+}
+
+function CivilizationTaskShell({
+  search,
+  initialInspectionFilters,
+  onNavigate,
+}: {
+  readonly search: CivilizationNavigationSearch;
+  readonly initialInspectionFilters?: CivilizationContextInspectionFilters | undefined;
+  readonly onNavigate: (
+    next: CivilizationNavigationSearch,
+    options?: { readonly replace?: boolean; readonly hash?: string },
+  ) => void;
+}) {
+  const { targets, scope } = useSettingsScope();
+  const searchTargetId = useSettingsSearchTargetId();
+  const searchTarget = searchTargetId === null ? null : civilizationViewForTargetId(searchTargetId);
+  const legacyHistoricalContext = search.contextThread !== undefined;
+  const view =
+    searchTarget?.view ?? search.view ?? (legacyHistoricalContext ? "context" : "overview");
+  const activityMode = searchTarget?.activity ?? search.activity ?? "chronicle";
+  const contextMode =
+    searchTarget?.contextMode ??
+    search.contextMode ??
+    (legacyHistoricalContext || search.contextFilterThread !== undefined
+      ? "inspector"
+      : "analytics");
+  const pendingTargetId = useRef<string | null>(null);
+  const searchTargetPending =
+    searchTarget !== null &&
+    (search.view !== searchTarget.view ||
+      (searchTarget.activity !== undefined && search.activity !== searchTarget.activity) ||
+      (searchTarget.contextMode !== undefined && search.contextMode !== searchTarget.contextMode));
+  const navigate = (next: CivilizationNavigationSearch, targetId: string) => {
+    pendingTargetId.current = targetId;
+    onNavigate(next);
+    if (scrollToSettingsTarget(targetId, { highlight: false })) pendingTargetId.current = null;
+  };
+
+  useEffect(() => {
+    if (searchTarget === null) return;
+    if (!searchTargetPending) return;
+    pendingTargetId.current = searchTargetId;
+    onNavigate(
+      {
+        view: searchTarget.view,
+        ...(searchTarget.activity === undefined ? {} : { activity: searchTarget.activity }),
+        ...(searchTarget.contextMode === undefined
+          ? {}
+          : { contextMode: searchTarget.contextMode }),
+      },
+      { replace: true, ...(searchTargetId === null ? {} : { hash: searchTargetId }) },
+    );
+  }, [onNavigate, searchTarget, searchTargetId, searchTargetPending]);
+
+  useEffect(() => {
+    if (search.view !== undefined || !legacyHistoricalContext) return;
+    onNavigate({ ...search, view: "context", contextMode: "inspector" }, { replace: true });
+  }, [legacyHistoricalContext, onNavigate, search]);
+
+  useEffect(() => {
+    const targetId = pendingTargetId.current;
+    if (targetId === null) return;
+    if (scrollToSettingsTarget(targetId, { highlight: false })) pendingTargetId.current = null;
+  });
+
+  const canonicalTargetId =
+    view === "activity"
+      ? CIVILIZATION_ACTIVITY_MODE_OPTIONS.find((option) => option.value === activityMode)!.targetId
+      : view === "context"
+        ? CIVILIZATION_CONTEXT_MODE_OPTIONS.find((option) => option.value === contextMode)!.targetId
+        : CIVILIZATION_SETTINGS_VIEW_OPTIONS.find((option) => option.value === view)!.targetId;
+  const normalizedTargets: CivilizationTarget[] = targets.map((target) => ({
+    environmentId: target.environmentId,
+    label: target.label,
+    projectId: target.projectId,
+  }));
+  const projectRequired = view === "citizens" || view === "activity" || view === "context";
+
+  const content = (() => {
+    // Mounting a searchable section consumes its hash before passive effects run.
+    // Commit the durable destination first so hash removal cannot restore Overview.
+    if (searchTargetPending) return <div role="status">Opening Civilization view…</div>;
+    if (view === "overview") {
+      if (normalizedTargets.length === 0) {
+        return (
+          <SettingsSection title="Civilization" id="civilization-status">
+            <SettingsRow
+              title="No connected target"
+              description={
+                scope.kind === "unavailable"
+                  ? scope.message
+                  : "Connect an environment in the selected scope to inspect Civilization."
+              }
+              control={<ReadOnlyValue>Unavailable</ReadOnlyValue>}
+            />
+          </SettingsSection>
+        );
+      }
+      if (normalizedTargets.length > 1) {
+        return (
+          <>
+            <CivilizationMultiTargetStatus targets={normalizedTargets} />
+            <CivilizationMultiTargetParticipation targets={normalizedTargets} />
+          </>
+        );
+      }
+      return (
+        <CivilizationTargetOverview
+          target={normalizedTargets[0]!}
+          allowSensitiveProjectActions
+          initialInspectionFilters={initialInspectionFilters}
+          surface="overview"
+          surfaceTargetId="civilization-status"
+          navigation={{ search, activityMode, contextMode, navigate }}
+        />
+      );
+    }
+
+    if (projectRequired) {
+      if (
+        scope.kind === "all" ||
+        scope.kind === "environment" ||
+        normalizedTargets.every((target) => target.projectId === null)
+      ) {
+        return (
+          <SettingsScopeNotice target="project" targetId={searchTargetId ?? canonicalTargetId}>
+            Select a project to open this Civilization view.
+          </SettingsScopeNotice>
+        );
+      }
+      if (normalizedTargets.length > 1) {
+        return (
+          <SettingsScopeNotice target="checkout" targetId={searchTargetId ?? canonicalTargetId}>
+            Choose one checkout to inspect this Civilization view.
+          </SettingsScopeNotice>
+        );
+      }
+      if (normalizedTargets.length === 0 || normalizedTargets[0]!.projectId === null) {
+        return (
+          <SettingsScopeNotice target="project" targetId={searchTargetId ?? canonicalTargetId}>
+            Select a project to open this Civilization view.
+          </SettingsScopeNotice>
+        );
+      }
+    } else if (view === "configuration" && normalizedTargets.length > 1) {
+      return (
+        <SettingsScopeNotice target="checkout" targetId={searchTargetId ?? canonicalTargetId}>
+          Choose one checkout before changing target-specific Civilization configuration.
+        </SettingsScopeNotice>
+      );
+    }
+
+    const target = normalizedTargets[0];
+    if (target === undefined) {
+      return (
+        <SettingsSection title="Civilization" id={canonicalTargetId}>
           <SettingsRow
             title="No connected target"
             description={
@@ -2109,31 +2700,63 @@ export function CivilizationSettingsPanel({
             control={<ReadOnlyValue>Unavailable</ReadOnlyValue>}
           />
         </SettingsSection>
-      ) : (
-        <>
-          {targets.length > 1 ? (
-            <CivilizationMultiTargetParticipation
-              targets={targets.map((target) => ({
-                environmentId: target.environmentId,
-                label: target.label,
-                projectId: target.projectId,
-              }))}
-            />
-          ) : null}
-          {targets.map((target) => (
-            <CivilizationTargetOverview
-              key={`${target.environmentId}:${target.projectId ?? "environment"}`}
-              allowSensitiveProjectActions={targets.length === 1}
-              initialInspectionFilters={initialInspectionFilters}
-              target={{
-                environmentId: target.environmentId,
-                label: target.label,
-                projectId: target.projectId,
-              }}
-            />
-          ))}
-        </>
-      )}
+      );
+    }
+    return (
+      <CivilizationTargetOverview
+        key={`${target.environmentId}:${target.projectId ?? "environment"}:${view}:${activityMode}:${contextMode}`}
+        target={target}
+        allowSensitiveProjectActions
+        initialInspectionFilters={initialInspectionFilters}
+        surface={view}
+        surfaceTargetId={canonicalTargetId}
+        navigation={{ search, activityMode, contextMode, navigate }}
+      />
+    );
+  })();
+
+  return (
+    <>
+      <div className="px-3 text-sm text-muted-foreground sm:px-4">
+        Civilization coordinates server-owned agent identity, bounded personality context, shared
+        notes, and passive agent mail. Configuration edits are staged locally, validated by the
+        server, and saved with optimistic concurrency.
+      </div>
+      <CivilizationTaskSelector
+        view={view}
+        activityMode={activityMode}
+        contextMode={contextMode}
+        navigate={navigate}
+      />
+      {content}
+    </>
+  );
+}
+
+const EMPTY_CIVILIZATION_NAVIGATION_SEARCH: CivilizationNavigationSearch = {};
+const noopCivilizationNavigation: (next: CivilizationNavigationSearch) => void = () => undefined;
+
+export function CivilizationSettingsPanel({
+  search = EMPTY_CIVILIZATION_NAVIGATION_SEARCH,
+  initialInspectionFilters,
+  onNavigate = noopCivilizationNavigation,
+}: {
+  readonly search?: CivilizationNavigationSearch | undefined;
+  readonly initialInspectionFilters?: CivilizationContextInspectionFilters | undefined;
+  readonly onNavigate?:
+    | ((
+        next: CivilizationNavigationSearch,
+        options?: { readonly replace?: boolean; readonly hash?: string },
+      ) => void)
+    | undefined;
+} = {}) {
+  return (
+    <SettingsPageContainer className="gap-8">
+      <CivilizationTaskShell
+        search={search}
+        initialInspectionFilters={initialInspectionFilters}
+        onNavigate={onNavigate}
+      />
     </SettingsPageContainer>
   );
 }

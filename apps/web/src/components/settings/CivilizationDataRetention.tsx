@@ -12,16 +12,16 @@ import { useState } from "react";
 
 import { civilizationDataAction, refreshCivilizationOverview } from "../../state/civilization";
 import { readEnvironmentScope } from "../../state/session";
-import { Button } from "../ui/button";
 import {
-  Dialog,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogPanel,
-  DialogPopup,
-  DialogTitle,
-} from "../ui/dialog";
+  AlertDialog,
+  AlertDialogClose,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogPopup,
+  AlertDialogTitle,
+} from "../ui/alert-dialog";
+import { Button } from "../ui/button";
 import { SettingsRow, SettingsSection } from "./settingsLayout";
 
 interface RetentionPolicy {
@@ -112,6 +112,7 @@ export function CivilizationDataRetention({
   const runDataAction = useAtomSet(civilizationDataAction, { mode: "promise" });
   const [working, setWorking] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
+  const [messageRole, setMessageRole] = useState<"status" | "alert">("status");
   const [exportResult, setExportResult] = useState<CivilizationProjectDataExport | null>(null);
   const [retentionPolicy, setRetentionPolicy] = useState<RetentionPolicy | null>(null);
   const [retentionPreview, setRetentionPreview] = useState<RetentionPreview | null>(null);
@@ -122,6 +123,7 @@ export function CivilizationDataRetention({
 
   const requirePermission = (): boolean => {
     if (readEnvironmentScope(environmentId, AuthSettingsWriteScope)) return true;
+    setMessageRole("alert");
     setMessage("Permission changed; settings:write is required for this operation.");
     return false;
   };
@@ -135,6 +137,7 @@ export function CivilizationDataRetention({
     if (working || !enabled || !requirePermission()) return;
     setWorking(true);
     setMessage(null);
+    setMessageRole("status");
     void runDataAction({ environmentId, projectId, type: "export" })
       .then((result) => {
         setWorking(false);
@@ -144,6 +147,7 @@ export function CivilizationDataRetention({
       })
       .catch((error: unknown) => {
         setWorking(false);
+        setMessageRole("alert");
         setMessage(describeError(error));
       });
   };
@@ -152,6 +156,7 @@ export function CivilizationDataRetention({
     if (working || !enabled || !requirePermission()) return;
     setWorking(true);
     setMessage(null);
+    setMessageRole("status");
     void runDataAction({ environmentId, projectId, type: "retentionGet" })
       .then((result) => {
         setWorking(false);
@@ -159,6 +164,7 @@ export function CivilizationDataRetention({
       })
       .catch((error: unknown) => {
         setWorking(false);
+        setMessageRole("alert");
         setMessage(describeError(error));
       });
   };
@@ -167,6 +173,7 @@ export function CivilizationDataRetention({
     if (working || !enabled || !requirePermission()) return;
     setWorking(true);
     setMessage(null);
+    setMessageRole("status");
     void runDataAction({ environmentId, projectId, type: "retentionPreview" })
       .then((result) => {
         setWorking(false);
@@ -175,6 +182,7 @@ export function CivilizationDataRetention({
       })
       .catch((error: unknown) => {
         setWorking(false);
+        setMessageRole("alert");
         setMessage(describeError(error));
       });
   };
@@ -184,6 +192,7 @@ export function CivilizationDataRetention({
     const expectedPreviewToken = retentionPreview.previewToken;
     setWorking(true);
     setMessage(null);
+    setMessageRole("status");
     void runDataAction({
       environmentId,
       projectId,
@@ -196,6 +205,7 @@ export function CivilizationDataRetention({
         setRetentionPreview(null);
         const applied = result as { readonly applied: RetentionPolicy };
         setRetentionPolicy(applied.applied);
+        setMessageRole("status");
         setMessage("Retention reduction applied. Eligible data will be removed by cleanup policy.");
         refreshAfterMutation();
       })
@@ -203,6 +213,7 @@ export function CivilizationDataRetention({
         setWorking(false);
         setRetentionConfirmOpen(false);
         setRetentionPreview(null);
+        setMessageRole("alert");
         setMessage(`${describeError(error)} Review a new preview before applying again.`);
       });
   };
@@ -211,6 +222,7 @@ export function CivilizationDataRetention({
     if (working || !enabled || !requirePermission()) return;
     setWorking(true);
     setMessage(null);
+    setMessageRole("status");
     setPurgeProgress(null);
     void runDataAction({ environmentId, projectId, type: "purgePreview" })
       .then((result) => {
@@ -220,6 +232,7 @@ export function CivilizationDataRetention({
       })
       .catch((error: unknown) => {
         setWorking(false);
+        setMessageRole("alert");
         setMessage(describeError(error));
       });
   };
@@ -230,6 +243,7 @@ export function CivilizationDataRetention({
     const batchSize = effective.config.operations.cleanupBatch;
     setWorking(true);
     setMessage(null);
+    setMessageRole("status");
 
     const run = async () => {
       let progress: CivilizationPurgeProgress;
@@ -252,6 +266,7 @@ export function CivilizationDataRetention({
       setWorking(false);
       setPurgeConfirmOpen(false);
       setPurgePreview(null);
+      setMessageRole("status");
       setMessage("Civilization project purge completed.");
       refreshAfterMutation();
     };
@@ -260,6 +275,7 @@ export function CivilizationDataRetention({
       setWorking(false);
       setPurgeConfirmOpen(false);
       setPurgePreview(null);
+      setMessageRole("alert");
       setMessage(
         `${describeError(error)} The purge stopped; a new preview is required before continuing.`,
       );
@@ -335,20 +351,28 @@ export function CivilizationDataRetention({
         </>
       )}
       {message === null ? null : (
-        <div className="px-3 text-sm text-muted-foreground sm:px-4">{message}</div>
+        <div role={messageRole} className="px-3 text-sm text-muted-foreground sm:px-4">
+          {message}
+        </div>
       )}
 
-      <Dialog open={retentionConfirmOpen} onOpenChange={setRetentionConfirmOpen}>
-        <DialogPopup>
-          <DialogHeader>
-            <DialogTitle>Apply retention reduction?</DialogTitle>
-            <DialogDescription>
+      <AlertDialog
+        open={retentionConfirmOpen}
+        onOpenChange={(open) => {
+          if (working) return;
+          setRetentionConfirmOpen(open);
+        }}
+      >
+        <AlertDialogPopup>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Apply retention reduction?</AlertDialogTitle>
+            <AlertDialogDescription>
               Project {projectId} on {environmentLabel}. The exact reviewed preview token will be
               applied once; conflicts do not auto-preview or retry.
-            </DialogDescription>
-          </DialogHeader>
+            </AlertDialogDescription>
+          </AlertDialogHeader>
           {retentionPreview === null ? null : (
-            <DialogPanel>
+            <div className="space-y-3 px-6 pb-4">
               <div className="grid gap-2 sm:grid-cols-3">
                 <PolicySummary label="Current" policy={retentionPreview.current} />
                 <PolicySummary label="Configured" policy={retentionPreview.configured} />
@@ -372,12 +396,15 @@ export function CivilizationDataRetention({
                   {warning}
                 </div>
               ))}
-            </DialogPanel>
+            </div>
           )}
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setRetentionConfirmOpen(false)}>
+          <AlertDialogFooter>
+            <AlertDialogClose
+              disabled={working}
+              render={<Button variant="outline" disabled={working} />}
+            >
               Cancel
-            </Button>
+            </AlertDialogClose>
             <Button
               variant="destructive"
               disabled={working || retentionPreview === null}
@@ -385,22 +412,28 @@ export function CivilizationDataRetention({
             >
               Apply reduction
             </Button>
-          </DialogFooter>
-        </DialogPopup>
-      </Dialog>
+          </AlertDialogFooter>
+        </AlertDialogPopup>
+      </AlertDialog>
 
-      <Dialog open={purgeConfirmOpen} onOpenChange={setPurgeConfirmOpen}>
-        <DialogPopup>
-          <DialogHeader>
-            <DialogTitle>Purge Civilization project data?</DialogTitle>
-            <DialogDescription>
+      <AlertDialog
+        open={purgeConfirmOpen}
+        onOpenChange={(open) => {
+          if (working) return;
+          setPurgeConfirmOpen(open);
+        }}
+      >
+        <AlertDialogPopup>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Purge Civilization project data?</AlertDialogTitle>
+            <AlertDialogDescription>
               Destructive purge for project {projectId} on {environmentLabel}. This does not claim
               system-wide erasure: provider transcripts, copied data, and backups follow their own
               stores.
-            </DialogDescription>
-          </DialogHeader>
+            </AlertDialogDescription>
+          </AlertDialogHeader>
           {purgePreview === null ? null : (
-            <DialogPanel>
+            <div className="space-y-3 px-6 pb-4">
               <div className="grid gap-2 text-sm sm:grid-cols-2">
                 <div>Citizens: {purgePreview.counts.citizens}</div>
                 <div>
@@ -424,17 +457,20 @@ export function CivilizationDataRetention({
                 </div>
               ))}
               {purgeProgress === null ? null : (
-                <div className="text-sm">
+                <div role="status" className="text-sm">
                   Progress: {purgeProgress.deletedThisBatch} deleted this batch;{" "}
                   {purgeProgress.remaining} remaining.
                 </div>
               )}
-            </DialogPanel>
+            </div>
           )}
-          <DialogFooter>
-            <Button variant="outline" disabled={working} onClick={() => setPurgeConfirmOpen(false)}>
+          <AlertDialogFooter>
+            <AlertDialogClose
+              disabled={working}
+              render={<Button variant="outline" disabled={working} />}
+            >
               Cancel
-            </Button>
+            </AlertDialogClose>
             <Button
               variant="destructive"
               disabled={working || purgePreview === null}
@@ -442,9 +478,9 @@ export function CivilizationDataRetention({
             >
               Purge this project
             </Button>
-          </DialogFooter>
-        </DialogPopup>
-      </Dialog>
+          </AlertDialogFooter>
+        </AlertDialogPopup>
+      </AlertDialog>
     </SettingsSection>
   );
 }

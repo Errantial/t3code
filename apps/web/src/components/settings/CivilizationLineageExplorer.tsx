@@ -117,22 +117,26 @@ export function CivilizationLineageExplorer({
   };
 
   return (
-    <SettingsSection title="Ancestral Hall" id="civilization-lineage">
+    <SettingsSection title="Lineage" id="civilization-lineage">
       <SettingsRow
         title="Bounded lineage neighborhood"
         description="One citizen, one visible parent, and one page of direct children. Navigation never loads the whole civilization."
         control={
           <Button size="sm" variant="outline" onClick={onClose}>
-            Close Hall
+            Close lineage
           </Button>
         }
       />
       <div className="space-y-4 px-3 sm:px-4">
         {lineage.isPending && lineage.data === null ? (
-          <div className="text-sm text-muted-foreground">Loading lineage…</div>
+          <div role="status" className="text-sm text-muted-foreground">
+            Loading lineage…
+          </div>
         ) : null}
         {lineage.error === null ? null : (
-          <div className="text-sm text-destructive">{String(lineage.error)}</div>
+          <div role="alert" className="text-sm text-destructive">
+            {String(lineage.error)}
+          </div>
         )}
         {lineage.data === null ? null : (
           <>
@@ -206,9 +210,11 @@ export function CivilizationLineageExplorer({
               </div>
             </div>
 
-            <div className="space-y-2" role="tree" aria-label="Direct descendants">
+            <section className="space-y-2" aria-labelledby="civilization-direct-descendants-title">
               <div className="flex items-center justify-between gap-2">
-                <div className="text-sm font-medium">Direct descendants</div>
+                <h3 id="civilization-direct-descendants-title" className="text-sm font-medium">
+                  Direct descendants
+                </h3>
                 <div className="text-xs text-muted-foreground">
                   census rev {lineage.data.revision}
                 </div>
@@ -218,16 +224,18 @@ export function CivilizationLineageExplorer({
                   No visible direct descendants on this page.
                 </div>
               ) : (
-                lineage.data.children.map((child) => (
-                  <div role="treeitem" key={child.threadId}>
-                    <CitizenLineageButton
-                      citizen={child}
-                      relation={child.relationshipToParent ?? "Child"}
-                      onFocus={focus}
-                      onViewCitizen={onViewCitizen}
-                    />
-                  </div>
-                ))
+                <ul className="space-y-2" aria-label="Direct descendants">
+                  {lineage.data.children.map((child) => (
+                    <li key={child.threadId}>
+                      <CitizenLineageButton
+                        citizen={child}
+                        relation={child.relationshipToParent ?? "Child"}
+                        onFocus={focus}
+                        onViewCitizen={onViewCitizen}
+                      />
+                    </li>
+                  ))}
+                </ul>
               )}
               <div className="flex flex-wrap gap-2">
                 <Button
@@ -250,7 +258,7 @@ export function CivilizationLineageExplorer({
                   Refresh
                 </Button>
               </div>
-            </div>
+            </section>
           </>
         )}
       </div>

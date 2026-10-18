@@ -198,6 +198,8 @@ describe("Civilization citizen detail dialog", () => {
     expect(text()).toContain("resolved");
     expect(text()).toContain("Citizen revision");
     expect(text()).toContain("[Ada] Desktop provider test");
+    expect(renderer!.root.findByType("details")).toBeDefined();
+    expect(renderer!.root.findByType("summary").props.children).toBe("Technical details");
     expect(text()).not.toContain("Edit citizen");
     expect(state.calls).toEqual([]);
   });
@@ -211,13 +213,17 @@ describe("Civilization citizen detail dialog", () => {
     expect(text()).toContain("Use a pragmatic craftsman voice.");
     expect(text()).toContain("Current topic");
     expect(text()).toContain("Desktop provider test");
-    expect(text()).not.toContain("Profile entry ID");
+    expect(renderer!.root.findByType("summary").props.children).toBe("Technical details");
+    expect(text()).toContain("Profile entry ID");
 
     const nameInput = renderer!.root
       .findAllByType("input")
       .find((input) => input.props["aria-label"] === "Citizen display name");
     expect(nameInput).toBeDefined();
     await act(() => nameInput!.props.onChange({ currentTarget: { value: "Ada Prime" } }));
+    expect(text()).toContain("Current server managed preview");
+    expect(text()).toContain("[Ada] Desktop provider test");
+    expect(text()).not.toContain("[Ada Prime] Desktop provider test");
     const preview = renderer!.root
       .findAllByType("button")
       .find((button) => button.props.children === "Preview changes");
@@ -245,6 +251,7 @@ describe("Civilization citizen detail dialog", () => {
     await act(() => apply!.props.onClick());
     expect(state.calls).toHaveLength(1);
     expect(text()).toContain("Permission changed before apply");
+    expect(renderer!.root.findByProps({ role: "alert" })).toBeDefined();
   });
 
   it("only offers manual/original restore while the host still has the last managed title", async () => {

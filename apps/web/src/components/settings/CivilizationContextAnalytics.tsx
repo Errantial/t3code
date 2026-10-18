@@ -21,6 +21,10 @@ import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../ui/table";
+import {
+  CIVILIZATION_CONTEXT_OUTCOME_OPTIONS,
+  CIVILIZATION_CONTEXT_SUPPRESSION_OPTIONS,
+} from "./CivilizationContextLabels";
 import { SettingsSection } from "./settingsLayout";
 
 interface CivilizationContextAnalyticsProps {
@@ -49,25 +53,6 @@ const PRESETS: Readonly<Record<PresetId, PresetDefinition>> = {
   "7d": { label: "7 days", durationMs: 7 * DAY_MS, bucket: "day" },
   "30d": { label: "30 days", durationMs: 30 * DAY_MS, bucket: "day" },
 };
-
-const SUPPRESSION_OPTIONS: ReadonlyArray<{
-  readonly value: CivilizationContextSuppressionReason;
-  readonly label: string;
-}> = [
-  { value: "participation_disabled", label: "Participation disabled" },
-  { value: "emergency_off", label: "Emergency off" },
-  { value: "citizen_not_adopted", label: "Citizen not adopted" },
-  { value: "citizen_deleted", label: "Citizen deleted" },
-  { value: "citizen_closed", label: "Citizen closed" },
-  { value: "observed_agent_read_only", label: "Observed agent read only" },
-  { value: "provider_unsupported", label: "Provider unsupported" },
-  { value: "provider_continuation", label: "Provider continuation" },
-  { value: "provider_command", label: "Provider command" },
-  { value: "claude_provider_continuation", label: "Claude continuation" },
-  { value: "claude_slash_command", label: "Claude slash command" },
-  { value: "packet_budget_zero", label: "Packet budget zero" },
-  { value: "packet_budget_too_small", label: "Packet budget too small" },
-];
 
 const EMPTY_HISTOGRAM: CivilizationContextAnalyticsHistogram = {
   zero: 0,
@@ -296,6 +281,10 @@ export function CivilizationContextAnalytics({
             onChange={(event) => setThreadDraft(event.currentTarget.value)}
           />
           <Select
+            items={[
+              { value: "all", label: "All outcomes" },
+              ...CIVILIZATION_CONTEXT_OUTCOME_OPTIONS,
+            ]}
             value={outcomeDraft}
             onValueChange={(value) => setOutcomeDraft(value as OutcomeFilter)}
           >
@@ -304,13 +293,18 @@ export function CivilizationContextAnalytics({
             </SelectTrigger>
             <SelectPopup>
               <SelectItem value="all">All outcomes</SelectItem>
-              <SelectItem value="skipped">Skipped</SelectItem>
-              <SelectItem value="built">Built</SelectItem>
-              <SelectItem value="provider_start_accepted">Adapter handoff accepted</SelectItem>
-              <SelectItem value="provider_start_failed">Adapter handoff failed</SelectItem>
+              {CIVILIZATION_CONTEXT_OUTCOME_OPTIONS.map((option) => (
+                <SelectItem key={option.value} value={option.value}>
+                  {option.label}
+                </SelectItem>
+              ))}
             </SelectPopup>
           </Select>
           <Select
+            items={[
+              { value: "all", label: "All suppression reasons" },
+              ...CIVILIZATION_CONTEXT_SUPPRESSION_OPTIONS,
+            ]}
             value={suppressionDraft}
             onValueChange={(value) => setSuppressionDraft(value as SuppressionFilter)}
           >
@@ -319,7 +313,7 @@ export function CivilizationContextAnalytics({
             </SelectTrigger>
             <SelectPopup>
               <SelectItem value="all">All suppression reasons</SelectItem>
-              {SUPPRESSION_OPTIONS.map((option) => (
+              {CIVILIZATION_CONTEXT_SUPPRESSION_OPTIONS.map((option) => (
                 <SelectItem key={option.value} value={option.value}>
                   {option.label}
                 </SelectItem>
@@ -349,10 +343,14 @@ export function CivilizationContextAnalytics({
         </div>
 
         {analytics.error === null ? null : (
-          <div className="text-sm text-destructive">Context analytics could not be loaded.</div>
+          <div className="text-sm text-destructive" role="alert">
+            Context analytics could not be loaded.
+          </div>
         )}
         {analytics.isPending && analytics.data === null ? (
-          <div className="text-sm text-muted-foreground">Loading context analytics…</div>
+          <div className="text-sm text-muted-foreground" role="status">
+            Loading context analytics…
+          </div>
         ) : null}
 
         {analytics.data === null ? null : (
@@ -367,8 +365,8 @@ export function CivilizationContextAnalytics({
               <SummaryCard label="Inspections" value={totalInspections} />
               <SummaryCard label="Skipped" value={totalSkipped} />
               <SummaryCard label="Built" value={totalBuilt} />
-              <SummaryCard label="Adapter handoff accepted" value={totalAccepted} />
-              <SummaryCard label="Adapter handoff failed" value={totalFailed} />
+              <SummaryCard label="Provider start accepted" value={totalAccepted} />
+              <SummaryCard label="Provider start failed" value={totalFailed} />
             </div>
 
             <section className="space-y-2" aria-labelledby="context-analytics-outcomes">
@@ -376,7 +374,7 @@ export function CivilizationContextAnalytics({
                 Outcome and suppression breakdown
               </h3>
               <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
-                {SUPPRESSION_OPTIONS.flatMap((option) => {
+                {CIVILIZATION_CONTEXT_SUPPRESSION_OPTIONS.flatMap((option) => {
                   const count = suppressionTotals.get(option.value) ?? 0;
                   return count === 0
                     ? []
@@ -429,36 +427,77 @@ export function CivilizationContextAnalytics({
                 Time buckets
               </h3>
               {buckets.length === 0 ? (
-                <div className="rounded-md border border-border/70 p-3 text-sm text-muted-foreground">
+                <div
+                  className="rounded-md border border-border/70 p-3 text-sm text-muted-foreground"
+                  role="status"
+                >
                   No retained context-inspection metadata matches this range and filter set.
                 </div>
               ) : (
-                <Table aria-label="Context analytics bucket table">
-                  <TableHeader>
-                    <TableRow>
-                      <TableHead>Bucket</TableHead>
-                      <TableHead>Inspections</TableHead>
-                      <TableHead>Skipped</TableHead>
-                      <TableHead>Built</TableHead>
-                      <TableHead>Adapter handoff accepted</TableHead>
-                      <TableHead>Adapter handoff failed</TableHead>
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
+                <>
+                  <div className="space-y-2 sm:hidden" aria-label="Context analytics time buckets">
                     {buckets.map((bucket) => (
-                      <TableRow key={bucket.bucketStart}>
-                        <TableCell>
+                      <div
+                        key={bucket.bucketStart}
+                        className="rounded-md border border-border/70 p-3"
+                      >
+                        <div className="wrap-anywhere text-xs font-medium text-foreground">
                           {formatDate(bucket.bucketStart)} – {formatDate(bucket.bucketEnd)}
-                        </TableCell>
-                        <TableCell>{bucket.totalInspections}</TableCell>
-                        <TableCell>{bucket.outcomes.skipped}</TableCell>
-                        <TableCell>{bucket.outcomes.built}</TableCell>
-                        <TableCell>{bucket.outcomes.providerStartAccepted}</TableCell>
-                        <TableCell>{bucket.outcomes.providerStartFailed}</TableCell>
-                      </TableRow>
+                        </div>
+                        <dl className="mt-2 grid grid-cols-2 gap-x-4 gap-y-2 text-xs">
+                          <div>
+                            <dt className="text-muted-foreground">Inspections</dt>
+                            <dd>{bucket.totalInspections}</dd>
+                          </div>
+                          <div>
+                            <dt className="text-muted-foreground">Skipped</dt>
+                            <dd>{bucket.outcomes.skipped}</dd>
+                          </div>
+                          <div>
+                            <dt className="text-muted-foreground">Built</dt>
+                            <dd>{bucket.outcomes.built}</dd>
+                          </div>
+                          <div>
+                            <dt className="text-muted-foreground">Provider start accepted</dt>
+                            <dd>{bucket.outcomes.providerStartAccepted}</dd>
+                          </div>
+                          <div>
+                            <dt className="text-muted-foreground">Provider start failed</dt>
+                            <dd>{bucket.outcomes.providerStartFailed}</dd>
+                          </div>
+                        </dl>
+                      </div>
                     ))}
-                  </TableBody>
-                </Table>
+                  </div>
+                  <div className="max-sm:hidden">
+                    <Table aria-label="Context analytics bucket table">
+                      <TableHeader>
+                        <TableRow>
+                          <TableHead>Bucket</TableHead>
+                          <TableHead>Inspections</TableHead>
+                          <TableHead>Skipped</TableHead>
+                          <TableHead>Built</TableHead>
+                          <TableHead>Provider start accepted</TableHead>
+                          <TableHead>Provider start failed</TableHead>
+                        </TableRow>
+                      </TableHeader>
+                      <TableBody>
+                        {buckets.map((bucket) => (
+                          <TableRow key={bucket.bucketStart}>
+                            <TableCell>
+                              {formatDate(bucket.bucketStart)} – {formatDate(bucket.bucketEnd)}
+                            </TableCell>
+                            <TableCell>{bucket.totalInspections}</TableCell>
+                            <TableCell>{bucket.outcomes.skipped}</TableCell>
+                            <TableCell>{bucket.outcomes.built}</TableCell>
+                            <TableCell>{bucket.outcomes.providerStartAccepted}</TableCell>
+                            <TableCell>{bucket.outcomes.providerStartFailed}</TableCell>
+                          </TableRow>
+                        ))}
+                      </TableBody>
+                    </Table>
+                  </div>
+                </>
               )}
             </section>
           </>

@@ -298,6 +298,26 @@ describe("Civilization context inspector", () => {
     expect(testState.sensitiveCalls).toEqual([]);
   });
 
+  it("keeps the existing query when a typed provider turn is invalid", async () => {
+    await render({ threadId });
+    const callsBeforeEdit = testState.pageCalls.length;
+    const providerTurn = renderer!.root
+      .findAllByType("input")
+      .find((input) => input.props["aria-label"] === "Context inspector provider turn");
+    expect(providerTurn).toBeDefined();
+
+    await act(() => providerTurn!.props.onChange({ currentTarget: { value: "not-a-turn" } }));
+    await act(() => buttonNamed("Apply filters")?.props.onClick());
+
+    expect(text()).toContain("Provider turn must be a positive whole number.");
+    expect(testState.pageCalls.slice(callsBeforeEdit).length).toBeGreaterThan(0);
+    expect(
+      testState.pageCalls
+        .slice(callsBeforeEdit)
+        .every((call) => JSON.stringify(call[2]) === JSON.stringify({ threadId })),
+    ).toBe(true);
+  });
+
   it("loads exact packet detail only after an explicit settings-write Inspect click", async () => {
     testState.writable = true;
     await render();

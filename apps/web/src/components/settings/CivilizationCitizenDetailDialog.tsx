@@ -39,23 +39,6 @@ const errorMessage = (error: unknown): string => {
     : "The citizen operation could not be completed.";
 };
 
-function renderManagedTitle(template: string, name: string, topic: string, generation: number) {
-  const compose = (candidateTopic: string) =>
-    template
-      .replaceAll("{name}", name)
-      .replaceAll("{topic}", candidateTopic)
-      .replaceAll("{generation}", String(generation));
-  const bytes = (value: string) => new TextEncoder().encode(value).byteLength;
-  const direct = compose(topic);
-  if (bytes(direct) <= 512) return direct;
-  let fittedTopic = "";
-  for (const character of topic) {
-    if (bytes(compose(fittedTopic + character)) > 512) break;
-    fittedTopic += character;
-  }
-  return compose(fittedTopic);
-}
-
 function DetailValue({
   label,
   children,
@@ -124,6 +107,7 @@ export function CivilizationCitizenDetailDialog({
     useState<CivilizationCitizenReassignmentRequest | null>(null);
   const [working, setWorking] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
+  const [messageRole, setMessageRole] = useState<"status" | "alert">("status");
 
   const chosenNameEntry =
     nameChoice === CUSTOM_NAME
@@ -151,15 +135,6 @@ export function CivilizationCitizenDetailDialog({
         : rendering === "mild"
           ? proposedProfile.label
           : proposedProfile.rich.label;
-  const liveManagedTitlePreview = (() => {
-    if (detail === null) return null;
-    return renderManagedTitle(
-      effective.config.names.titleTemplate,
-      proposedName || detail.identity.displayName,
-      detail.title.managed ? detail.title.topic : detail.host.threadTitle,
-      detail.lineage.generation,
-    );
-  })();
 
   const request = (): CivilizationCitizenReassignmentRequest | null => {
     if (detail === null) return null;
@@ -191,11 +166,13 @@ export function CivilizationCitizenDetailDialog({
     const nextRequest = request();
     if (working || nextRequest === null) return;
     if (!readEnvironmentScope(environmentId, AuthSettingsWriteScope)) {
+      setMessageRole("alert");
       setMessage("Permission changed before preview; settings:write is required.");
       return;
     }
     setWorking(true);
     setMessage(null);
+    setMessageRole("status");
     void runCitizenAction({ environmentId, type: "reassignmentPreview", request: nextRequest })
       .then((result) => {
         setWorking(false);
@@ -206,6 +183,7 @@ export function CivilizationCitizenDetailDialog({
         setWorking(false);
         setPreview(null);
         setPreviewRequest(null);
+        setMessageRole("alert");
         setMessage(errorMessage(cause));
       });
   };
@@ -213,16 +191,19 @@ export function CivilizationCitizenDetailDialog({
   const applyChanges = () => {
     if (working || previewRequest === null) return;
     if (!readEnvironmentScope(environmentId, AuthSettingsWriteScope)) {
+      setMessageRole("alert");
       setMessage("Permission changed before apply; settings:write is required.");
       return;
     }
     setWorking(true);
     setMessage(null);
+    setMessageRole("status");
     void runCitizenAction({ environmentId, type: "reassignmentApply", request: previewRequest })
       .then(() => {
         setWorking(false);
         setPreview(null);
         setPreviewRequest(null);
+        setMessageRole("status");
         setMessage("Citizen updated.");
         refresh();
       })
@@ -230,6 +211,7 @@ export function CivilizationCitizenDetailDialog({
         setWorking(false);
         setPreview(null);
         setPreviewRequest(null);
+        setMessageRole("alert");
         setMessage(errorMessage(cause));
         refresh();
       });
@@ -238,11 +220,13 @@ export function CivilizationCitizenDetailDialog({
   const titleAction = (type: "titleRestore" | "titleReclaim") => {
     if (working || detail === null) return;
     if (!readEnvironmentScope(environmentId, AuthSettingsWriteScope)) {
+      setMessageRole("alert");
       setMessage("Permission changed before title action; settings:write is required.");
       return;
     }
     setWorking(true);
     setMessage(null);
+    setMessageRole("status");
     void runCitizenAction({
       environmentId,
       type,
@@ -254,11 +238,13 @@ export function CivilizationCitizenDetailDialog({
     })
       .then(() => {
         setWorking(false);
+        setMessageRole("status");
         setMessage(type === "titleReclaim" ? "Managed title reclaimed." : "Manual title restored.");
         refresh();
       })
       .catch((cause: unknown) => {
         setWorking(false);
+        setMessageRole("alert");
         setMessage(errorMessage(cause));
         refresh();
       });
@@ -282,9 +268,13 @@ export function CivilizationCitizenDetailDialog({
         </DialogHeader>
         <DialogPanel>
           {loading && detail === null ? (
-            <div className="text-sm text-muted-foreground">Loading citizen details…</div>
+            <div role="status" className="text-sm text-muted-foreground">
+              Loading citizen details…
+            </div>
           ) : error !== null ? (
-            <div className="text-sm text-destructive">{error}</div>
+            <div role="alert" className="text-sm text-destructive">
+              {error}
+            </div>
           ) : detail === null ? null : (
             <div className="space-y-5">
               <section className="space-y-3 rounded-lg border border-border/70 p-3">
@@ -303,7 +293,7 @@ export function CivilizationCitizenDetailDialog({
                     {activePresentationLabel ?? "Hidden (rendering off)"}
                   </DetailValue>
                   <DetailValue label="Underlying profile">
-                    {detail.personality.base.label} · {detail.personality.profileEntryId}
+                    {detail.personality.base.label}
                   </DetailValue>
                   <DetailValue label="Traits">
                     {detail.personality.base.traits.join(", ") || "—"}
@@ -311,20 +301,14 @@ export function CivilizationCitizenDetailDialog({
                   <DetailValue label="Rich traits">
                     {detail.personality.rich.traits.join(", ") || "—"}
                   </DetailValue>
-                  <DetailValue label="Provider">{detail.host.providerInstanceId}</DetailValue>
                   <DetailValue label="Parent">
                     {detail.lineage.parentThreadId === null
                       ? "None"
-                      : `${detail.lineage.relationshipToParent ?? "child"} of ${detail.lineage.parentThreadId}`}
+                      : `${detail.lineage.relationshipToParent ?? "child"} parent`}
                   </DetailValue>
                   <DetailValue label="Status">
-                    {detail.observedOnly ? "Provider-owned · read only" : "T3-managed"} · epoch{" "}
-                    {detail.lifecycle.epoch}
+                    {detail.observedOnly ? "Provider-owned · read only" : "T3-managed"}
                   </DetailValue>
-                  <DetailValue label="Lineage status">{detail.lineage.status}</DetailValue>
-                  <DetailValue label="Citizen revision">{detail.revision}</DetailValue>
-                  <DetailValue label="Thread ID">{detail.threadId}</DetailValue>
-                  <DetailValue label="Project ID">{detail.projectId}</DetailValue>
                 </div>
                 <div className="grid gap-3 sm:grid-cols-2">
                   <DetailValue label="Mild style">{detail.personality.base.styleText}</DetailValue>
@@ -332,6 +316,34 @@ export function CivilizationCitizenDetailDialog({
                   <DetailValue label="Rich voice">{detail.personality.rich.voice}</DetailValue>
                   <DetailValue label="Rich style">{detail.personality.rich.styleText}</DetailValue>
                 </div>
+                <details className="rounded-md border border-border/70 p-3">
+                  <summary className="cursor-pointer text-sm font-medium">
+                    Technical details
+                  </summary>
+                  <div className="mt-3 grid gap-3 sm:grid-cols-2">
+                    <DetailValue label="Provider instance ID">
+                      {detail.host.providerInstanceId}
+                    </DetailValue>
+                    <DetailValue label="Thread ID">{detail.threadId}</DetailValue>
+                    <DetailValue label="Project ID">{detail.projectId}</DetailValue>
+                    <DetailValue label="Citizen revision">{detail.revision}</DetailValue>
+                    <DetailValue label="Lifecycle epoch">{detail.lifecycle.epoch}</DetailValue>
+                    <DetailValue label="Lineage status">{detail.lineage.status}</DetailValue>
+                    <DetailValue label="Name pool ID">{detail.identity.namePoolId}</DetailValue>
+                    <DetailValue label="Name entry ID">{detail.identity.nameEntryId}</DetailValue>
+                    <DetailValue label="Profile pool ID">
+                      {detail.personality.profilePoolId}
+                    </DetailValue>
+                    <DetailValue label="Profile entry ID">
+                      {detail.personality.profileEntryId}
+                    </DetailValue>
+                    {detail.lineage.parentThreadId === null ? null : (
+                      <DetailValue label="Parent thread ID">
+                        {detail.lineage.parentThreadId}
+                      </DetailValue>
+                    )}
+                  </div>
+                </details>
                 <div className="flex flex-wrap gap-2">
                   {onViewLineage === undefined ? null : (
                     <Button size="xs" variant="outline" onClick={() => navigate(onViewLineage)}>
@@ -370,6 +382,13 @@ export function CivilizationCitizenDetailDialog({
                     <label className="space-y-1 text-sm">
                       <span>Name source</span>
                       <Select
+                        items={[
+                          ...(selectedNamePool?.entries.map((entry) => ({
+                            value: entry.id,
+                            label: entry.displayName,
+                          })) ?? []),
+                          { value: CUSTOM_NAME, label: "Custom name…" },
+                        ]}
                         value={nameChoice}
                         onValueChange={(value) => {
                           if (value === null) return;
@@ -405,6 +424,10 @@ export function CivilizationCitizenDetailDialog({
                     <label className="space-y-1 text-sm sm:col-span-2">
                       <span>Personality</span>
                       <Select
+                        items={selectedProfilePool?.entries.map((entry) => ({
+                          value: entry.id,
+                          label: rendering === "rich" ? entry.rich.label : entry.label,
+                        }))}
                         value={profileEntryId}
                         onValueChange={(value) => {
                           if (value === null) return;
@@ -476,8 +499,10 @@ export function CivilizationCitizenDetailDialog({
                       </div>
                     </div>
                     <div className="mt-2 wrap-anywhere text-xs">
-                      <span className="text-muted-foreground">Live managed preview: </span>
-                      {liveManagedTitlePreview ?? detail.title.managedTitlePreview}
+                      <span className="text-muted-foreground">
+                        Current server managed preview:{" "}
+                      </span>
+                      {detail.title.managedTitlePreview}
                     </div>
                     <div className="mt-2 flex flex-wrap gap-2">
                       {!detail.title.managed ? (
@@ -505,7 +530,7 @@ export function CivilizationCitizenDetailDialog({
                     </div>
                   </div>
                   {preview === null ? null : (
-                    <div className="rounded-md border border-border/70 p-3 text-sm">
+                    <div role="status" className="rounded-md border border-border/70 p-3 text-sm">
                       <div>
                         {preview.current.name} / {preview.current.profileLabel}
                       </div>
@@ -516,7 +541,9 @@ export function CivilizationCitizenDetailDialog({
                     </div>
                   )}
                   {message === null ? null : (
-                    <div className="text-xs text-muted-foreground">{message}</div>
+                    <div role={messageRole} className="text-xs text-muted-foreground">
+                      {message}
+                    </div>
                   )}
                   <div className="flex flex-wrap gap-2">
                     <Button

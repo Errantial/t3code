@@ -14,7 +14,7 @@ const environmentId = EnvironmentId.make("environment-chronicle-ui");
 const projectId = ProjectId.make("project-chronicle-ui");
 const parentId = ThreadId.make("thread-chronicle-parent");
 const childId = ThreadId.make("thread-chronicle-child");
-const testState = vi.hoisted(() => ({ calls: [] as unknown[][] }));
+const testState = vi.hoisted(() => ({ calls: [] as unknown[][], empty: false }));
 
 const award = {
   awardId: CivilizationAchievementAwardId.make("award:first-child"),
@@ -48,7 +48,7 @@ vi.mock("../../state/civilization", () => ({
       data: {
         projectId,
         revision: 2,
-        awards: [award],
+        awards: testState.empty ? [] : [award],
         citizenReferences: [{ threadId: childId, name: "Child Grace" }],
         nextCursor: null,
         partial: false,
@@ -64,7 +64,7 @@ vi.mock("../../state/civilization", () => ({
       data: {
         projectId,
         revision: 3,
-        entries: [entry],
+        entries: testState.empty ? [] : [entry],
         citizenReferences: [
           { threadId: childId, name: "Child Grace" },
           { threadId: parentId, name: "Root Ada" },
@@ -112,6 +112,7 @@ const onViewCitizen = vi.fn();
 beforeEach(() => {
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
   testState.calls = [];
+  testState.empty = false;
   onViewLineage.mockReset();
   onViewCitizen.mockReset();
 });
@@ -138,7 +139,7 @@ describe("Civilization Chronicle", () => {
     const rendered = JSON.stringify(renderer?.toJSON());
     expect(rendered).toContain("Child joined");
     expect(rendered).toContain("First descendant");
-    expect(rendered).toContain("relationship ");
+    expect(rendered).toContain("Relationship:");
     expect(rendered).toContain("fork");
     expect(rendered).toContain("Child Grace");
     expect(rendered).toContain("Root Ada");
@@ -173,7 +174,7 @@ describe("Civilization Chronicle", () => {
     await act(() => threadInput!.props.onChange({ currentTarget: { value: childId } }));
     const apply = renderer!.root
       .findAllByType("button")
-      .find((button) => button.props.children === "Apply");
+      .find((button) => button.props.children === "Apply filters");
     await act(() => apply!.props.onClick());
 
     const chronicleCall = testState.calls.toReversed().find((call) => call[0] === "chronicle");
@@ -199,5 +200,20 @@ describe("Civilization Chronicle", () => {
     });
     expect(JSON.stringify(renderer?.toJSON())).toContain("Linked source");
     expect(JSON.stringify(renderer?.toJSON())).not.toContain("secret-body");
+  });
+
+  it("shows explicit loaded-empty states without stale release copy", async () => {
+    testState.empty = true;
+    await act(() => {
+      renderer = create(
+        <CivilizationChronicle environmentId={environmentId} projectId={projectId} pageSize={25} />,
+      );
+    });
+
+    const rendered = JSON.stringify(renderer?.toJSON());
+    expect(rendered).toContain("No achievements have been awarded yet.");
+    expect(rendered).toContain("No Chronicle entries match these filters.");
+    expect(rendered).not.toContain("v1.1");
+    expect(renderer!.root.findAll((node) => node.props.role === "status")).toHaveLength(2);
   });
 });

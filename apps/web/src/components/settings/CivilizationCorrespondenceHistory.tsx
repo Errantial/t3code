@@ -91,7 +91,7 @@ function MessageFacts({
         {message.replyToMessageId === null
           ? "Conversation root"
           : `Reply to ${message.replyToMessageId}`}{" "}
-        · sender epoch {message.senderCitizenEpoch}
+        · Sender epoch {message.senderCitizenEpoch}
         {onViewCitizen !== undefined || onViewLineage === undefined ? null : (
           <Button size="xs" variant="ghost" onClick={() => onViewLineage(message.senderThreadId)}>
             Lineage
@@ -102,11 +102,11 @@ function MessageFacts({
         {formatDate(message.acceptedAt)} · {message.bodyBytes} bytes
       </div>
       <div>
-        delivery epoch {message.recipientDeliveryEpoch} · offered {message.offerCount}× ·{" "}
-        {message.acknowledgedAt === null ? "not acknowledged" : "acknowledged"}
+        Delivery epoch {message.recipientDeliveryEpoch} · Offered {message.offerCount}× ·{" "}
+        {message.acknowledgedAt === null ? "Not acknowledged" : "Acknowledged"}
         {message.terminalAt === null
-          ? " · active"
-          : ` · terminal${message.terminalReason === null ? "" : ` (${message.terminalReason})`}`}
+          ? " · Active"
+          : ` · Terminal${message.terminalReason === null ? "" : ` (${message.terminalReason})`}`}
       </div>
     </div>
   );
@@ -260,13 +260,21 @@ export function CivilizationCorrespondenceHistory({
         <SettingsRow
           title="Correspondence history"
           description="Retained correspondence metadata and bodies require settings:write."
-          control={<span className="text-sm text-muted-foreground">Restricted</span>}
+          control={
+            <span role="status" className="text-sm text-muted-foreground">
+              Restricted
+            </span>
+          }
         />
       ) : !allowSensitiveActions ? (
         <SettingsRow
           title="Correspondence history"
           description="Select one environment before inspecting retained correspondence."
-          control={<span className="text-sm text-muted-foreground">Choose environment</span>}
+          control={
+            <span role="status" className="text-sm text-muted-foreground">
+              Choose environment
+            </span>
+          }
         />
       ) : (
         <div className="space-y-4 px-3 sm:px-4">
@@ -352,99 +360,118 @@ export function CivilizationCorrespondenceHistory({
 
           <details className="rounded-lg border border-border/70 p-3">
             <summary className="cursor-pointer text-sm font-medium">Advanced filters</summary>
+            <p className="mt-1 text-xs text-muted-foreground">
+              Filter by raw sender, recipient, message, delivery, or time metadata. Citizen A and
+              Citizen B stay selected above.
+            </p>
             <div className="mt-3 grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
-              <Input
-                aria-label="Correspondence participant thread"
-                placeholder="Citizen A thread ID"
-                value={participantDraft}
-                onChange={(event) => setParticipantDraft(event.currentTarget.value)}
-              />
-              <Input
-                aria-label="Correspondence counterparty thread"
-                placeholder="Citizen B thread ID (optional)"
-                value={counterpartyDraft}
-                onChange={(event) => setCounterpartyDraft(event.currentTarget.value)}
-              />
-              <Input
-                aria-label="Correspondence sender thread"
-                placeholder="Sender thread"
-                value={senderDraft}
-                onChange={(event) => setSenderDraft(event.currentTarget.value)}
-              />
-              <Input
-                aria-label="Correspondence recipient thread"
-                placeholder="Recipient thread"
-                value={recipientDraft}
-                onChange={(event) => setRecipientDraft(event.currentTarget.value)}
-              />
-              <Select
-                value={replyRelation}
-                onValueChange={(value) =>
-                  setReplyRelation(value as CivilizationCorrespondenceReplyRelation)
-                }
-              >
-                <SelectTrigger aria-label="Correspondence reply relation">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="any">Any reply relation</SelectItem>
-                  <SelectItem value="root">Roots only</SelectItem>
-                  <SelectItem value="replies_to">Direct replies to…</SelectItem>
-                </SelectContent>
-              </Select>
-              {replyRelation === "replies_to" ? (
+              <label className="space-y-1 text-xs text-muted-foreground">
+                <span>Sender thread ID</span>
                 <Input
-                  aria-label="Correspondence parent message"
-                  placeholder="Parent message id"
-                  value={replyToDraft}
-                  onChange={(event) => setReplyToDraft(event.currentTarget.value)}
+                  aria-label="Correspondence sender thread"
+                  placeholder="Sender thread ID"
+                  value={senderDraft}
+                  onChange={(event) => setSenderDraft(event.currentTarget.value)}
                 />
+              </label>
+              <label className="space-y-1 text-xs text-muted-foreground">
+                <span>Recipient thread ID</span>
+                <Input
+                  aria-label="Correspondence recipient thread"
+                  placeholder="Recipient thread ID"
+                  value={recipientDraft}
+                  onChange={(event) => setRecipientDraft(event.currentTarget.value)}
+                />
+              </label>
+              <label className="space-y-1 text-xs text-muted-foreground">
+                <span>Reply relationship</span>
+                <Select
+                  value={replyRelation}
+                  onValueChange={(value) =>
+                    setReplyRelation(value as CivilizationCorrespondenceReplyRelation)
+                  }
+                >
+                  <SelectTrigger aria-label="Correspondence reply relation">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="any">Any reply relationship</SelectItem>
+                    <SelectItem value="root">Conversation roots only</SelectItem>
+                    <SelectItem value="replies_to">Direct replies to message…</SelectItem>
+                  </SelectContent>
+                </Select>
+              </label>
+              {replyRelation === "replies_to" ? (
+                <label className="space-y-1 text-xs text-muted-foreground">
+                  <span>Parent message ID</span>
+                  <Input
+                    aria-label="Correspondence parent message"
+                    placeholder="Parent message ID"
+                    value={replyToDraft}
+                    onChange={(event) => setReplyToDraft(event.currentTarget.value)}
+                  />
+                </label>
               ) : null}
-              <Select
-                value={acknowledged}
-                onValueChange={(value) => setAcknowledged(value as BooleanFilter)}
-              >
-                <SelectTrigger aria-label="Correspondence acknowledged state">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="any">Any acknowledgement</SelectItem>
-                  <SelectItem value="yes">Acknowledged</SelectItem>
-                  <SelectItem value="no">Not acknowledged</SelectItem>
-                </SelectContent>
-              </Select>
-              <Select
-                value={terminal}
-                onValueChange={(value) => setTerminal(value as BooleanFilter)}
-              >
-                <SelectTrigger aria-label="Correspondence terminal state">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="any">Any terminal state</SelectItem>
-                  <SelectItem value="yes">Terminal</SelectItem>
-                  <SelectItem value="no">Not terminal</SelectItem>
-                </SelectContent>
-              </Select>
-              <Input
-                aria-label="Correspondence delivery epoch"
-                inputMode="numeric"
-                placeholder="Delivery epoch"
-                value={epochDraft}
-                onChange={(event) => setEpochDraft(event.currentTarget.value)}
-              />
-              <Input
-                aria-label="Correspondence from time"
-                type="datetime-local"
-                value={fromDraft}
-                onChange={(event) => setFromDraft(event.currentTarget.value)}
-              />
-              <Input
-                aria-label="Correspondence to time"
-                type="datetime-local"
-                value={toDraft}
-                onChange={(event) => setToDraft(event.currentTarget.value)}
-              />
+              <label className="space-y-1 text-xs text-muted-foreground">
+                <span>Acknowledgement</span>
+                <Select
+                  value={acknowledged}
+                  onValueChange={(value) => setAcknowledged(value as BooleanFilter)}
+                >
+                  <SelectTrigger aria-label="Correspondence acknowledged state">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="any">Any acknowledgement</SelectItem>
+                    <SelectItem value="yes">Acknowledged</SelectItem>
+                    <SelectItem value="no">Not acknowledged</SelectItem>
+                  </SelectContent>
+                </Select>
+              </label>
+              <label className="space-y-1 text-xs text-muted-foreground">
+                <span>Terminal state</span>
+                <Select
+                  value={terminal}
+                  onValueChange={(value) => setTerminal(value as BooleanFilter)}
+                >
+                  <SelectTrigger aria-label="Correspondence terminal state">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="any">Any terminal state</SelectItem>
+                    <SelectItem value="yes">Terminal</SelectItem>
+                    <SelectItem value="no">Not terminal</SelectItem>
+                  </SelectContent>
+                </Select>
+              </label>
+              <label className="space-y-1 text-xs text-muted-foreground">
+                <span>Delivery epoch</span>
+                <Input
+                  aria-label="Correspondence delivery epoch"
+                  inputMode="numeric"
+                  placeholder="Delivery epoch"
+                  value={epochDraft}
+                  onChange={(event) => setEpochDraft(event.currentTarget.value)}
+                />
+              </label>
+              <label className="space-y-1 text-xs text-muted-foreground">
+                <span>From</span>
+                <Input
+                  aria-label="Correspondence from time"
+                  type="datetime-local"
+                  value={fromDraft}
+                  onChange={(event) => setFromDraft(event.currentTarget.value)}
+                />
+              </label>
+              <label className="space-y-1 text-xs text-muted-foreground">
+                <span>To</span>
+                <Input
+                  aria-label="Correspondence to time"
+                  type="datetime-local"
+                  value={toDraft}
+                  onChange={(event) => setToDraft(event.currentTarget.value)}
+                />
+              </label>
             </div>
             <div className="mt-3 flex flex-wrap items-center gap-2">
               <Button size="sm" variant="outline" onClick={applyFilters}>
@@ -453,15 +480,32 @@ export function CivilizationCorrespondenceHistory({
             </div>
           </details>
           {filterError === null ? null : (
-            <span className="text-sm text-destructive">{filterError}</span>
+            <div role="alert" className="text-sm text-destructive">
+              {filterError}
+            </div>
           )}
 
           {page.isPending && page.data === null ? (
-            <div className="text-sm text-muted-foreground">Loading correspondence…</div>
+            <div role="status" aria-live="polite" className="text-sm text-muted-foreground">
+              Loading correspondence…
+            </div>
           ) : null}
           {page.error === null ? null : (
-            <div className="text-sm text-destructive">{String(page.error)}</div>
+            <div role="alert" className="text-sm text-destructive">
+              {String(page.error)}
+            </div>
           )}
+          {!page.isPending &&
+          page.error === null &&
+          page.data !== null &&
+          page.data.messages.length === 0 ? (
+            <div
+              role="status"
+              className="rounded-lg border border-border/70 p-3 text-sm text-muted-foreground"
+            >
+              No retained correspondence matches this conversation and filter set.
+            </div>
+          ) : null}
           <div className="space-y-3" aria-label="Citizen conversation timeline">
             {page.data?.messages.map((message) => (
               <div
@@ -489,7 +533,7 @@ export function CivilizationCorrespondenceHistory({
                     variant="outline"
                     onClick={() => setSelectedMessageId(message.messageId)}
                   >
-                    Thread
+                    Reply chain
                   </Button>
                   <Button
                     size="xs"
@@ -550,11 +594,26 @@ export function CivilizationCorrespondenceHistory({
                 </Button>
               </div>
               {thread.isPending && thread.data === null ? (
-                <div className="text-sm text-muted-foreground">Loading reply chain…</div>
+                <div role="status" aria-live="polite" className="text-sm text-muted-foreground">
+                  Loading reply chain…
+                </div>
               ) : null}
               {thread.error === null ? null : (
-                <div className="text-sm text-destructive">{String(thread.error)}</div>
+                <div role="alert" className="text-sm text-destructive">
+                  {String(thread.error)}
+                </div>
               )}
+              {!thread.isPending &&
+              thread.error === null &&
+              thread.data !== null &&
+              thread.data.entries.length === 0 ? (
+                <div
+                  role="status"
+                  className="rounded-md border border-border/70 p-3 text-sm text-muted-foreground"
+                >
+                  No retained messages are available for this reply chain.
+                </div>
+              ) : null}
               <ol className="space-y-2">
                 {thread.data?.entries.map((entry) => (
                   <li
@@ -583,7 +642,11 @@ export function CivilizationCorrespondenceHistory({
             </div>
           )}
 
-          {bodyError === null ? null : <div className="text-sm text-destructive">{bodyError}</div>}
+          {bodyError === null ? null : (
+            <div role="alert" className="text-sm text-destructive">
+              {bodyError}
+            </div>
+          )}
           <div className="text-xs text-muted-foreground">
             Inspection only. This view cannot send, reply, wake, steer, resume, acknowledge, or
             impersonate another citizen.

@@ -19,7 +19,7 @@ import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../ui/select";
 import { CivilizationCitizenLink } from "./CivilizationCitizenLink";
-import { SettingsRow, SettingsSection } from "./settingsLayout";
+import { SettingsSection } from "./settingsLayout";
 
 interface CivilizationChronicleProps {
   readonly environmentId: EnvironmentId;
@@ -162,7 +162,7 @@ function ChronicleEntry({
           </div>
           {"relationship" in entry.metadata ? (
             <div className="text-xs text-muted-foreground">
-              relationship {entry.metadata.relationship}
+              Relationship: {entry.metadata.relationship}
             </div>
           ) : null}
           {noteId === null || onViewNote === undefined ? null : (
@@ -180,7 +180,7 @@ function ChronicleEntry({
           <div>{new Date(entry.occurredAt).toLocaleString()}</div>
           <div>
             {entry.sourceKind} ·{" "}
-            {entry.sourceSequence === null ? "no sequence" : `seq ${entry.sourceSequence}`}
+            {entry.sourceSequence === null ? "No sequence" : `Sequence ${entry.sourceSequence}`}
           </div>
         </div>
       </div>
@@ -215,12 +215,12 @@ function AchievementAward({
                 onViewLineage={onViewLineage}
               />
             )}
-            {` · definition v${award.definitionVersion}`}
+            {` · Definition v${award.definitionVersion}`}
           </div>
         </div>
         <div className="text-right text-xs text-muted-foreground">
           <div>{new Date(award.awardedAt).toLocaleString()}</div>
-          <div className="wrap-anywhere">trigger {award.triggerEntryId}</div>
+          <div className="wrap-anywhere">Trigger {award.triggerEntryId}</div>
         </div>
       </div>
     </li>
@@ -324,122 +324,149 @@ export function CivilizationChronicle({
 
   return (
     <SettingsSection title="Chronicle" id="civilization-chronicle">
-      <SettingsRow
-        title="Achievements"
-        description="Versioned awards derived from authoritative Chronicle facts only. No model inference."
-        control={
-          <div className="min-w-0 space-y-2">
-            {achievements.isPending && achievements.data === null ? (
-              <div className="text-sm text-muted-foreground">Loading achievements…</div>
-            ) : null}
-            {achievements.error === null ? null : (
-              <div className="text-sm text-destructive">{String(achievements.error)}</div>
-            )}
-            {achievements.data !== null && achievements.data.awards.length === 0 ? (
-              <div className="text-sm text-muted-foreground">
-                No deterministic achievements have been awarded yet.
-              </div>
-            ) : null}
-            <ol className="space-y-2" aria-label="Civilization achievements">
-              {achievements.data?.awards.map((award) => (
-                <AchievementAward
-                  key={award.awardId}
-                  award={award}
-                  citizenName={
-                    award.subjectThreadId === null
-                      ? undefined
-                      : achievementNames.get(award.subjectThreadId)
-                  }
-                  onViewCitizen={onViewCitizen}
-                  onViewLineage={onViewLineage}
-                />
-              ))}
-            </ol>
-            <div className="flex flex-wrap items-center gap-2">
-              <Button
-                size="sm"
-                variant="outline"
-                disabled={achievementCursorStack.length === 0}
-                onClick={previousAchievementPage}
-              >
-                Previous awards
-              </Button>
-              <Button
-                size="sm"
-                variant="outline"
-                disabled={achievementNextCursor === null}
-                onClick={nextAchievementPage}
-              >
-                Next awards
-              </Button>
-              <Button size="sm" variant="ghost" onClick={() => achievements.refresh()}>
-                Refresh awards
-              </Button>
-            </div>
+      <div className="space-y-5 px-3 sm:px-4">
+        <section
+          className="space-y-3 rounded-lg border border-border/70 p-3"
+          aria-labelledby="civilization-achievements-heading"
+        >
+          <div className="space-y-1">
+            <h3 id="civilization-achievements-heading" className="text-sm font-medium">
+              Achievements
+            </h3>
+            <p className="text-xs text-muted-foreground">
+              Versioned awards derived from retained Chronicle facts.
+            </p>
           </div>
-        }
-      />
-      <SettingsRow
-        title="Deterministic history"
-        description="Typed, provenance-bearing Civilization facts only. No transcript summarization or model-generated lore."
-        control={
-          <Select
-            value={kind ?? "all"}
-            onValueChange={(value) => {
-              setKind(value === "all" ? undefined : (value as CivilizationChronicleKind));
-              resetPaging();
-            }}
-          >
-            <SelectTrigger aria-label="Chronicle event kind" className="w-48">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="all">All events</SelectItem>
-              {KINDS.map((value) => (
-                <SelectItem key={value} value={value}>
-                  {label(value)}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        }
-      />
-      <SettingsRow
-        title="Filter history"
-        description="Optional citizen and time bounds. Chronicle reads metadata only."
-        control={
-          <div className="flex max-w-xl flex-wrap items-end gap-2">
-            <Input
-              aria-label="Chronicle citizen thread"
-              placeholder="Thread ID"
-              value={threadDraft}
-              onChange={(event) => setThreadDraft(event.currentTarget.value)}
-            />
-            <Input
-              aria-label="Chronicle from time"
-              type="datetime-local"
-              value={fromDraft}
-              onChange={(event) => setFromDraft(event.currentTarget.value)}
-            />
-            <Input
-              aria-label="Chronicle to time"
-              type="datetime-local"
-              value={toDraft}
-              onChange={(event) => setToDraft(event.currentTarget.value)}
-            />
-            <Button size="sm" variant="outline" onClick={applyFilters}>
-              Apply
+          {achievements.isPending && achievements.data === null ? (
+            <div role="status" aria-live="polite" className="text-sm text-muted-foreground">
+              Loading achievements…
+            </div>
+          ) : null}
+          {achievements.error === null ? null : (
+            <div role="alert" className="text-sm text-destructive">
+              {String(achievements.error)}
+            </div>
+          )}
+          {!achievements.isPending &&
+          achievements.error === null &&
+          achievements.data !== null &&
+          achievements.data.awards.length === 0 ? (
+            <div
+              role="status"
+              className="rounded-md border border-border/70 p-3 text-sm text-muted-foreground"
+            >
+              No achievements have been awarded yet.
+            </div>
+          ) : null}
+          <ol className="space-y-2" aria-label="Civilization achievements">
+            {achievements.data?.awards.map((award) => (
+              <AchievementAward
+                key={award.awardId}
+                award={award}
+                citizenName={
+                  award.subjectThreadId === null
+                    ? undefined
+                    : achievementNames.get(award.subjectThreadId)
+                }
+                onViewCitizen={onViewCitizen}
+                onViewLineage={onViewLineage}
+              />
+            ))}
+          </ol>
+          <div className="flex flex-wrap items-center gap-2">
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={achievementCursorStack.length === 0}
+              onClick={previousAchievementPage}
+            >
+              Previous awards
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={achievementNextCursor === null}
+              onClick={nextAchievementPage}
+            >
+              Next awards
+            </Button>
+            <Button size="sm" variant="ghost" onClick={() => achievements.refresh()}>
+              Refresh awards
             </Button>
           </div>
-        }
-      />
-      {sourceId === undefined ? null : (
-        <SettingsRow
-          title="Linked source"
-          description="Showing only Chronicle facts with this exact persisted source identifier."
-          control={
+        </section>
+
+        <section
+          className="space-y-3 rounded-lg border border-border/70 p-3"
+          aria-labelledby="civilization-chronicle-history-heading"
+        >
+          <div className="space-y-1">
+            <h3 id="civilization-chronicle-history-heading" className="text-sm font-medium">
+              History
+            </h3>
+            <p className="text-xs text-muted-foreground">
+              Filter retained Civilization events by type, citizen, time, or an exact linked source.
+            </p>
+          </div>
+          <label className="block max-w-56 space-y-1 text-sm">
+            <span>Event type</span>
+            <Select
+              value={kind ?? "all"}
+              onValueChange={(value) => {
+                setKind(value === "all" ? undefined : (value as CivilizationChronicleKind));
+                resetPaging();
+              }}
+            >
+              <SelectTrigger aria-label="Chronicle event kind" className="w-48">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">All events</SelectItem>
+                {KINDS.map((value) => (
+                  <SelectItem key={value} value={value}>
+                    {label(value)}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </label>
+          <div className="flex max-w-xl flex-wrap items-end gap-2">
+            <label className="min-w-44 flex-1 space-y-1 text-xs text-muted-foreground">
+              <span>Citizen thread ID</span>
+              <Input
+                aria-label="Chronicle citizen thread"
+                placeholder="Thread ID"
+                value={threadDraft}
+                onChange={(event) => setThreadDraft(event.currentTarget.value)}
+              />
+            </label>
+            <label className="space-y-1 text-xs text-muted-foreground">
+              <span>From</span>
+              <Input
+                aria-label="Chronicle from time"
+                type="datetime-local"
+                value={fromDraft}
+                onChange={(event) => setFromDraft(event.currentTarget.value)}
+              />
+            </label>
+            <label className="space-y-1 text-xs text-muted-foreground">
+              <span>To</span>
+              <Input
+                aria-label="Chronicle to time"
+                type="datetime-local"
+                value={toDraft}
+                onChange={(event) => setToDraft(event.currentTarget.value)}
+              />
+            </label>
+            <Button size="sm" variant="outline" onClick={applyFilters}>
+              Apply filters
+            </Button>
+          </div>
+          {sourceId === undefined ? null : (
             <div className="flex min-w-0 items-center gap-2">
-              <span className="max-w-56 truncate text-xs text-muted-foreground">{sourceId}</span>
+              <span role="status" className="max-w-72 truncate text-xs text-muted-foreground">
+                Linked source: {sourceId}
+              </span>
               <Button
                 size="xs"
                 variant="outline"
@@ -451,64 +478,80 @@ export function CivilizationChronicle({
                 Clear source
               </Button>
             </div>
-          }
-        />
-      )}
-      <div className="space-y-3 px-3 sm:px-4">
-        {page.isPending && page.data === null ? (
-          <div className="text-sm text-muted-foreground">Loading Chronicle…</div>
-        ) : null}
-        {page.error === null ? null : (
-          <div className="text-sm text-destructive">{String(page.error)}</div>
-        )}
-        {page.data !== null && page.data.entries.length === 0 ? (
-          <div className="rounded-lg border border-border/70 p-3 text-sm text-muted-foreground">
-            No Chronicle entries match this view yet. v1.1 does not fabricate pre-migration history.
-          </div>
-        ) : null}
-        <ol className="space-y-2" aria-label="Civilization Chronicle entries">
-          {page.data?.entries.map((entry) => (
-            <ChronicleEntry
-              key={entry.entryId}
-              entry={entry}
-              citizenName={
-                entry.primaryThreadId === null
-                  ? undefined
-                  : chronicleNames.get(entry.primaryThreadId)
-              }
-              relatedCitizenName={
-                entry.secondaryThreadId === null
-                  ? undefined
-                  : chronicleNames.get(entry.secondaryThreadId)
-              }
-              onViewCitizen={onViewCitizen}
-              onViewLineage={onViewLineage}
-              onViewNote={onViewNote}
-              onViewCorrespondence={onViewCorrespondence}
-            />
-          ))}
-        </ol>
-        <div className="flex flex-wrap items-center gap-2">
-          <Button
-            size="sm"
-            variant="outline"
-            disabled={cursorStack.length === 0}
-            onClick={previousPage}
-          >
-            Previous events
-          </Button>
-          <Button size="sm" variant="outline" disabled={nextCursor === null} onClick={nextPage}>
-            Next events
-          </Button>
-          <Button size="sm" variant="ghost" onClick={() => page.refresh()}>
-            Refresh
-          </Button>
-          {page.data === null ? null : (
-            <span className="text-xs text-muted-foreground">
-              chronicle rev {page.data.revision}
-            </span>
           )}
-        </div>
+        </section>
+
+        <section className="space-y-3" aria-labelledby="civilization-chronicle-entries-heading">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <h3 id="civilization-chronicle-entries-heading" className="text-sm font-medium">
+              Chronicle entries
+            </h3>
+            {page.data === null ? null : (
+              <span className="text-xs text-muted-foreground">
+                Chronicle revision {page.data.revision}
+              </span>
+            )}
+          </div>
+          {page.isPending && page.data === null ? (
+            <div role="status" aria-live="polite" className="text-sm text-muted-foreground">
+              Loading Chronicle…
+            </div>
+          ) : null}
+          {page.error === null ? null : (
+            <div role="alert" className="text-sm text-destructive">
+              {String(page.error)}
+            </div>
+          )}
+          {!page.isPending &&
+          page.error === null &&
+          page.data !== null &&
+          page.data.entries.length === 0 ? (
+            <div
+              role="status"
+              className="rounded-lg border border-border/70 p-3 text-sm text-muted-foreground"
+            >
+              No Chronicle entries match these filters.
+            </div>
+          ) : null}
+          <ol className="space-y-2" aria-label="Civilization Chronicle entries">
+            {page.data?.entries.map((entry) => (
+              <ChronicleEntry
+                key={entry.entryId}
+                entry={entry}
+                citizenName={
+                  entry.primaryThreadId === null
+                    ? undefined
+                    : chronicleNames.get(entry.primaryThreadId)
+                }
+                relatedCitizenName={
+                  entry.secondaryThreadId === null
+                    ? undefined
+                    : chronicleNames.get(entry.secondaryThreadId)
+                }
+                onViewCitizen={onViewCitizen}
+                onViewLineage={onViewLineage}
+                onViewNote={onViewNote}
+                onViewCorrespondence={onViewCorrespondence}
+              />
+            ))}
+          </ol>
+          <div className="flex flex-wrap items-center gap-2">
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={cursorStack.length === 0}
+              onClick={previousPage}
+            >
+              Previous events
+            </Button>
+            <Button size="sm" variant="outline" disabled={nextCursor === null} onClick={nextPage}>
+              Next events
+            </Button>
+            <Button size="sm" variant="ghost" onClick={() => page.refresh()}>
+              Refresh
+            </Button>
+          </div>
+        </section>
       </div>
     </SettingsSection>
   );

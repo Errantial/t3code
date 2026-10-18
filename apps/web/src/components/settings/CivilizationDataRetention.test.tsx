@@ -13,6 +13,7 @@ const testState = vi.hoisted(() => ({
   writable: true,
   calls: [] as unknown[],
   purgeResponses: [] as unknown[],
+  retentionApplyPromise: null as Promise<unknown> | null,
   refreshes: 0,
 }));
 
@@ -90,6 +91,7 @@ vi.mock("@effect/atom-react", () => ({
           warnings: ["Retention cleanup is irreversible."],
         };
       case "retentionApply":
+        if (testState.retentionApplyPromise !== null) return testState.retentionApplyPromise;
         return {
           projectId,
           applied: { noteRetentionDays: 7, diagnosticRetentionDays: 3, tombstoneRetentionDays: 14 },
@@ -159,14 +161,33 @@ vi.mock("../ui/button", () => ({
   ),
 }));
 
-vi.mock("../ui/dialog", () => ({
-  Dialog: ({ children }: { children: ReactNode }) => <>{children}</>,
-  DialogDescription: ({ children }: { children: ReactNode }) => <p>{children}</p>,
-  DialogFooter: ({ children }: { children: ReactNode }) => <footer>{children}</footer>,
-  DialogHeader: ({ children }: { children: ReactNode }) => <header>{children}</header>,
-  DialogPanel: ({ children }: { children: ReactNode }) => <div>{children}</div>,
-  DialogPopup: ({ children }: { children: ReactNode }) => <div>{children}</div>,
-  DialogTitle: ({ children }: { children: ReactNode }) => <h3>{children}</h3>,
+vi.mock("../ui/alert-dialog", () => ({
+  AlertDialog: ({
+    open,
+    onOpenChange,
+    children,
+  }: {
+    open: boolean;
+    onOpenChange: (open: boolean) => void;
+    children: ReactNode;
+  }) =>
+    open ? (
+      <div data-alert-dialog="open" onClick={() => onOpenChange(false)}>
+        {children}
+      </div>
+    ) : null,
+  AlertDialogClose: ({
+    children,
+    render: _render,
+    ...props
+  }: { children: ReactNode; render?: ReactNode } & Record<string, unknown>) => (
+    <button {...props}>{children}</button>
+  ),
+  AlertDialogDescription: ({ children }: { children: ReactNode }) => <p>{children}</p>,
+  AlertDialogFooter: ({ children }: { children: ReactNode }) => <footer>{children}</footer>,
+  AlertDialogHeader: ({ children }: { children: ReactNode }) => <header>{children}</header>,
+  AlertDialogPopup: ({ children }: { children: ReactNode }) => <div>{children}</div>,
+  AlertDialogTitle: ({ children }: { children: ReactNode }) => <h3>{children}</h3>,
 }));
 
 vi.mock("./settingsLayout", () => ({
@@ -238,6 +259,7 @@ beforeEach(() => {
   testState.writable = true;
   testState.calls = [];
   testState.purgeResponses = [];
+  testState.retentionApplyPromise = null;
   testState.refreshes = 0;
 });
 
@@ -280,6 +302,7 @@ describe("Civilization data and retention", () => {
     await act(() => button("Apply reduction")!.props.onClick());
     expect(testState.calls).toHaveLength(1);
     expect(text()).toContain("Permission changed");
+    expect(renderer!.root.findByProps({ role: "alert" })).toBeDefined();
 
     testState.writable = true;
     await act(async () => {
@@ -295,6 +318,37 @@ describe("Civilization data and retention", () => {
     expect(
       testState.calls.filter((call) => (call as { type: string }).type === "retentionPreview"),
     ).toHaveLength(1);
+  });
+
+  it("keeps a destructive confirmation open while its apply request is running", async () => {
+    let resolveApply!: (value: unknown) => void;
+    testState.retentionApplyPromise = new Promise((resolve) => {
+      resolveApply = resolve;
+    });
+    await render();
+    await act(async () => {
+      button("Preview reduction")!.props.onClick();
+      await Promise.resolve();
+    });
+
+    await act(async () => {
+      button("Apply reduction")!.props.onClick();
+      await Promise.resolve();
+    });
+    const alertDialog = renderer!.root.findByProps({ "data-alert-dialog": "open" });
+    await act(() => alertDialog.props.onClick());
+    expect(text()).toContain("Apply retention reduction?");
+    expect(button("Cancel")!.props.disabled).toBe(true);
+
+    await act(async () => {
+      resolveApply({
+        projectId,
+        applied: { noteRetentionDays: 7, diagnosticRetentionDays: 3, tombstoneRetentionDays: 14 },
+      });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(text()).not.toContain("Apply retention reduction?");
   });
 
   it("purges in bounded batches with one reviewed token and never silently re-previews", async () => {

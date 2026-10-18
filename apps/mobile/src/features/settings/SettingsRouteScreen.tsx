@@ -175,6 +175,12 @@ function SettingsIndexSections() {
             target="SettingsProjectOverview"
           />
         ) : null}
+        <SettingsRow
+          icon="person.2"
+          label="Civilization"
+          target="SettingsCivilization"
+          disabled={noServerTargets}
+        />
         <SettingsRow icon="folder" label="Organization" target="SettingsOrganization" />
         <SettingsRow icon="text.bubble" label="Thread behavior" target="SettingsThreads" />
         <SettingsRow icon="arrow.turn.left.up" label="Follow-ups" target="SettingsFollowUp" />

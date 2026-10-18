@@ -42,6 +42,12 @@ vi.mock("../ui/input", () => ({
   Input: (props: Record<string, unknown>) => <input {...props} />,
 }));
 
+vi.mock("../ui/number-field", () => ({
+  NumberField: ({ children }: { children: ReactNode }) => <div>{children}</div>,
+  NumberFieldGroup: ({ children }: { children: ReactNode }) => <div>{children}</div>,
+  NumberFieldInput: (props: Record<string, unknown>) => <input {...props} />,
+}));
+
 vi.mock("../ui/textarea", () => ({
   Textarea: (props: Record<string, unknown>) => <textarea {...props} />,
 }));
@@ -125,6 +131,47 @@ describe("Civilization pool editor validation", () => {
     expect(runConfigAction).toHaveBeenCalledTimes(1);
     expect(text()).toContain(reason);
     expect(text()).toContain(`Rejected ${reason}.`);
+    expect(renderer!.root.findByProps({ role: "alert" })).toBeDefined();
+  });
+
+  it("keeps editable entry IDs separate from draft row identity and server payloads", async () => {
+    const runConfigAction = vi
+      .fn()
+      .mockResolvedValueOnce({ valid: true, effective: EFFECTIVE })
+      .mockResolvedValueOnce({ changes: [{ path: "names.pools" }], effective: EFFECTIVE });
+
+    await act(() => {
+      renderer = create(
+        <CivilizationNamePoolEditorDialog
+          open
+          onOpenChange={vi.fn()}
+          environmentId={EnvironmentId.make("environment-draft-keys")}
+          projectId={ProjectId.make("project-draft-keys")}
+          targetLabel="Draft key machine"
+          effective={EFFECTIVE}
+          runConfigAction={runConfigAction}
+          refresh={vi.fn()}
+          maxPools={16}
+          maxEntries={10_000}
+          maxWeight={1_000_000}
+        />,
+      );
+    });
+
+    const idInput = renderer!.root.findByProps({ "aria-label": "Name entry 1 ID" });
+    await act(() => idInput.props.onChange({ currentTarget: { value: "renamed-entry-id" } }));
+    const preview = renderer!.root
+      .findAllByType("button")
+      .find((button) => button.props.children === "Validate & preview");
+    await act(async () => {
+      preview!.props.onClick();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    const override = runConfigAction.mock.calls[0]?.[0].override;
+    expect(override.names.pools[0].entries[0].id).toBe("renamed-entry-id");
+    expect(JSON.stringify(override)).not.toContain("draftKey");
   });
 
   it("requires validate and diff before an exact-revision pool save", async () => {
@@ -231,6 +278,7 @@ describe("Civilization pool editor validation", () => {
 
     const firstOverride = runConfigAction.mock.calls[0]?.[0].override;
     const firstEntry = firstOverride.personalities.pools[0].entries[0];
+    expect(JSON.stringify(firstOverride)).not.toContain("draftKey");
     expect(firstEntry.id).toBe("calm");
     expect(firstEntry.styleText).toBe("Mild edited.");
     expect(firstEntry.rich).toMatchObject({

@@ -45,6 +45,8 @@ const testState = vi.hoisted(() => ({
   threadCalls: [] as unknown[][],
   sensitiveReads: [] as unknown[],
   writable: true,
+  emptyPage: false,
+  emptyThread: false,
 }));
 
 vi.mock("@effect/atom-react", () => ({
@@ -67,7 +69,7 @@ vi.mock("../../state/civilization", () => ({
       data: {
         projectId,
         revision: 4,
-        messages: [message],
+        messages: testState.emptyPage ? [] : [message],
         citizenReferences: [
           { threadId: senderId, name: "Ada Current" },
           { threadId: recipientId, name: "Grace" },
@@ -91,7 +93,9 @@ vi.mock("../../state/civilization", () => ({
               projectId,
               revision: 4,
               selectedMessageId: messageId,
-              entries: [{ message, relation: "selected", depth: 0, unresolvedParent: false }],
+              entries: testState.emptyThread
+                ? []
+                : [{ message, relation: "selected", depth: 0, unresolvedParent: false }],
               citizenReferences: [
                 { threadId: senderId, name: "Ada Current" },
                 { threadId: recipientId, name: "Grace" },
@@ -158,6 +162,8 @@ beforeEach(() => {
   testState.threadCalls = [];
   testState.sensitiveReads = [];
   testState.writable = true;
+  testState.emptyPage = false;
+  testState.emptyThread = false;
   onViewLineage.mockReset();
   onViewChronicleSource.mockReset();
   onViewCitizen.mockReset();
@@ -186,11 +192,11 @@ describe("Civilization correspondence history", () => {
 
     const rendered = renderedText(renderer?.toJSON());
     expect(rendered).toContain("Correspondence history");
-    expect(rendered).toContain("sender epoch 3");
-    expect(rendered).toContain("delivery epoch 7");
+    expect(rendered).toContain("Sender epoch 3");
+    expect(rendered).toContain("Delivery epoch 7");
     expect(rendered).toContain("Grace");
-    expect(rendered).toContain("acknowledged");
-    expect(rendered).toContain("active");
+    expect(rendered).toContain("Acknowledged");
+    expect(rendered).toContain("Active");
     expect(rendered).toContain("Advanced filters");
     expect(rendered).toContain("View message");
     expect(rendered).toContain(
@@ -216,7 +222,7 @@ describe("Civilization correspondence history", () => {
 
     const threadButton = renderer!.root
       .findAllByType("button")
-      .find((button) => button.props.children === "Thread");
+      .find((button) => button.props.children === "Reply chain");
     await act(() => threadButton!.props.onClick());
     expect(testState.threadCalls.at(-1)?.[2]).toBe(messageId);
 
@@ -274,7 +280,7 @@ describe("Civilization correspondence history", () => {
     expect(renderedText(citizenATrigger?.props.children)).not.toContain(String(senderId));
   });
 
-  it("applies an unordered citizen pair as one bounded correspondence query without reading bodies", async () => {
+  it("keeps citizen selectors primary while advanced metadata issues one bounded query", async () => {
     await act(() => {
       renderer = create(
         <CivilizationCorrespondenceHistory
@@ -282,17 +288,35 @@ describe("Civilization correspondence history", () => {
           projectId={projectId}
           pageSize={10}
           allowSensitiveActions
+          initialParticipantThreadId={senderId}
         />,
       );
     });
-    const participant = renderer!.root
-      .findAllByType("input")
-      .find((input) => input.props["aria-label"] === "Correspondence participant thread");
-    await act(() => participant!.props.onChange({ currentTarget: { value: senderId } }));
-    const counterparty = renderer!.root
-      .findAllByType("input")
-      .find((input) => input.props["aria-label"] === "Correspondence counterparty thread");
-    await act(() => counterparty!.props.onChange({ currentTarget: { value: recipientId } }));
+    const inputs = renderer!.root.findAllByType("input");
+    expect(
+      inputs.some((input) => input.props["aria-label"] === "Correspondence participant thread"),
+    ).toBe(false);
+    expect(
+      inputs.some((input) => input.props["aria-label"] === "Correspondence counterparty thread"),
+    ).toBe(false);
+    expect(
+      renderer!.root
+        .findAllByType("button")
+        .some((button) => button.props["aria-label"] === "Conversation citizen A"),
+    ).toBe(true);
+    expect(
+      renderer!.root
+        .findAllByType("button")
+        .some((button) => button.props["aria-label"] === "Conversation citizen B"),
+    ).toBe(true);
+    const sender = inputs.find(
+      (input) => input.props["aria-label"] === "Correspondence sender thread",
+    );
+    const recipient = inputs.find(
+      (input) => input.props["aria-label"] === "Correspondence recipient thread",
+    );
+    await act(() => sender!.props.onChange({ currentTarget: { value: senderId } }));
+    await act(() => recipient!.props.onChange({ currentTarget: { value: recipientId } }));
     const apply = renderer!.root
       .findAllByType("button")
       .find((button) => button.props.children === "Apply advanced filters");
@@ -300,11 +324,35 @@ describe("Civilization correspondence history", () => {
 
     expect(testState.pageCalls.at(-1)?.[2]).toMatchObject({
       participantThreadId: senderId,
-      counterpartyThreadId: recipientId,
+      senderThreadId: senderId,
+      recipientThreadId: recipientId,
       replyRelation: "any",
     });
     expect(testState.pageCalls.at(-1)?.[4]).toBe(10);
     expect(testState.sensitiveReads).toHaveLength(0);
+  });
+
+  it("shows explicit loaded-empty states for conversations and reply chains", async () => {
+    testState.emptyPage = true;
+    testState.emptyThread = true;
+    await act(() => {
+      renderer = create(
+        <CivilizationCorrespondenceHistory
+          environmentId={environmentId}
+          projectId={projectId}
+          pageSize={10}
+          allowSensitiveActions
+          initialMessageId={messageId}
+        />,
+      );
+    });
+
+    const rendered = renderedText(renderer?.toJSON());
+    expect(rendered).toContain(
+      "No retained correspondence matches this conversation and filter set.",
+    );
+    expect(rendered).toContain("No retained messages are available for this reply chain.");
+    expect(renderer!.root.findAll((node) => node.props.role === "status")).toHaveLength(2);
   });
 
   it("rechecks settings permission when body inspection is clicked", async () => {

@@ -8,7 +8,7 @@ import {
   type EnvironmentId,
   type ProjectId,
 } from "@t3tools/contracts";
-import { useState } from "react";
+import { useId, useState } from "react";
 
 import {
   civilizationConfigExpectedRevision,
@@ -26,6 +26,7 @@ import {
   DialogTitle,
 } from "../ui/dialog";
 import { Input } from "../ui/input";
+import { NumberField, NumberFieldGroup, NumberFieldInput } from "../ui/number-field";
 import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
 import { Textarea } from "../ui/textarea";
 
@@ -49,6 +50,29 @@ interface PoolDialogCommonProps {
   readonly maxEntries?: number | undefined;
   readonly maxWeight?: number | undefined;
 }
+
+type DraftNameEntry = CivilizationNamePool["entries"][number] & {
+  readonly draftKey: string;
+};
+
+type DraftNamePool = Omit<CivilizationNamePool, "entries"> & {
+  readonly entries: ReadonlyArray<DraftNameEntry>;
+};
+
+type DraftProfileEntry = CivilizationProfilePool["entries"][number] & {
+  readonly draftKey: string;
+};
+
+type DraftProfilePool = Omit<CivilizationProfilePool, "entries"> & {
+  readonly entries: ReadonlyArray<DraftProfileEntry>;
+};
+
+const withoutDraftKey = <T extends { readonly draftKey: string }>(
+  entry: T,
+): Omit<T, "draftKey"> => {
+  const { draftKey: _draftKey, ...serverEntry } = entry;
+  return serverEntry;
+};
 
 const poolErrorMessage = (error: unknown): string => {
   if (typeof error === "object" && error !== null && "_tag" in error) {
@@ -116,10 +140,15 @@ export function CivilizationNamePoolEditorDialog({
   maxEntries,
   maxWeight,
 }: PoolDialogCommonProps) {
-  const [draft, setDraft] = useState<ReadonlyArray<CivilizationNamePool>>(() =>
-    effective.config.names.pools.map((pool) => ({
+  const draftKeyPrefix = useId();
+  const [nextDraftKey, setNextDraftKey] = useState(0);
+  const [draft, setDraft] = useState<ReadonlyArray<DraftNamePool>>(() =>
+    effective.config.names.pools.map((pool, poolIndex) => ({
       ...pool,
-      entries: pool.entries.map((entry) => ({ ...entry })),
+      entries: pool.entries.map((entry, entryIndex) => ({
+        ...entry,
+        draftKey: `${draftKeyPrefix}:existing:${poolIndex}:${entryIndex}`,
+      })),
     })),
   );
   const [activePoolId, setActivePoolId] = useState(effective.config.names.selectedPoolId);
@@ -133,6 +162,7 @@ export function CivilizationNamePoolEditorDialog({
   const [previewing, setPreviewing] = useState(false);
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
+  const [messageRole, setMessageRole] = useState<"status" | "alert">("status");
   const [conflictReview, setConflictReview] = useState(false);
   const currentRevision = civilizationConfigExpectedRevision(effective, projectId);
   const conflictRefreshPending = conflictReview && expectedRevision === currentRevision;
@@ -147,14 +177,19 @@ export function CivilizationNamePoolEditorDialog({
     if (!conflictReview) setMessage(null);
   };
 
-  const updateActivePool = (update: (pool: CivilizationNamePool) => CivilizationNamePool) => {
+  const updateActivePool = (update: (pool: DraftNamePool) => DraftNamePool) => {
     setDraft((current) => current.map((pool) => (pool.id === activePoolId ? update(pool) : pool)));
     invalidatePreview();
   };
 
   const override = (): CivilizationConfigOverride => ({
     version: CIVILIZATION_CONFIG_VERSION,
-    names: { pools: draft },
+    names: {
+      pools: draft.map((pool) => ({
+        ...pool,
+        entries: pool.entries.map(withoutDraftKey),
+      })),
+    },
   });
 
   const preview = () => {
@@ -166,18 +201,21 @@ export function CivilizationNamePoolEditorDialog({
     const candidate = override();
     setPreviewing(true);
     setMessage(null);
+    setMessageRole("status");
     void runConfigAction({ environmentId, projectId, type: "validate", override: candidate })
       .then(() => runConfigAction({ environmentId, projectId, type: "diff", override: candidate }))
       .then((result) => {
         setPreviewing(false);
         setPreviewEffective(result.effective);
         setPreviewChanges(result.changes?.length ?? 0);
+        setMessageRole("status");
         setMessage(`${result.changes?.length ?? 0} effective changes in the server preview.`);
       })
       .catch((error: unknown) => {
         setPreviewing(false);
         setPreviewEffective(null);
         setPreviewChanges(null);
+        setMessageRole("alert");
         setMessage(poolErrorMessage(error));
       });
   };
@@ -185,11 +223,13 @@ export function CivilizationNamePoolEditorDialog({
   const save = () => {
     if (saving || previewChanges === null || expectedRevision === null) return;
     if (!readEnvironmentScope(environmentId, AuthSettingsWriteScope)) {
+      setMessageRole("alert");
       setMessage("Permission changed before save; settings:write is required.");
       return;
     }
     setSaving(true);
     setMessage(null);
+    setMessageRole("status");
     void runConfigAction({
       environmentId,
       projectId,
@@ -208,10 +248,12 @@ export function CivilizationNamePoolEditorDialog({
           setConflictReview(true);
           setPreviewEffective(null);
           setPreviewChanges(null);
+          setMessageRole("alert");
           setMessage("Configuration changed elsewhere; review and save again.");
           refresh();
           return;
         }
+        setMessageRole("alert");
         setMessage(poolErrorMessage(error));
       });
   };
@@ -293,7 +335,7 @@ export function CivilizationNamePoolEditorDialog({
               <div className="text-sm font-medium">{activePool.id}</div>
               {activePool.entries.map((entry, index) => (
                 <div
-                  key={entry.id}
+                  key={entry.draftKey}
                   className="grid gap-2 rounded-lg border p-3 sm:grid-cols-[1fr_1fr_7rem_auto]"
                 >
                   <Input
@@ -326,14 +368,14 @@ export function CivilizationNamePoolEditorDialog({
                       }))
                     }
                   />
-                  <Input
-                    aria-label={`Name entry ${index + 1} weight`}
-                    type="number"
+                  <NumberField
+                    min={0}
+                    max={maxWeight}
+                    step={1}
                     size="sm"
-                    value={String(entry.weight)}
-                    onChange={(event) => {
-                      const weight = Number(event.currentTarget.value);
-                      if (!Number.isFinite(weight)) return;
+                    value={entry.weight}
+                    onValueChange={(weight) => {
+                      if (weight === null || !Number.isFinite(weight)) return;
                       updateActivePool((pool) => ({
                         ...pool,
                         entries: pool.entries.map((candidate, candidateIndex) =>
@@ -341,7 +383,11 @@ export function CivilizationNamePoolEditorDialog({
                         ),
                       }));
                     }}
-                  />
+                  >
+                    <NumberFieldGroup>
+                      <NumberFieldInput aria-label={`Name entry ${index + 1} weight`} />
+                    </NumberFieldGroup>
+                  </NumberField>
                   <div className="flex items-center gap-1">
                     <span className="min-w-12 text-right text-xs text-muted-foreground">
                       {probabilitiesAvailable
@@ -398,17 +444,19 @@ export function CivilizationNamePoolEditorDialog({
                 size="sm"
                 variant="outline"
                 disabled={maxEntries !== undefined && activePool.entries.length >= maxEntries}
-                onClick={() =>
+                onClick={() => {
+                  const draftKey = `${draftKeyPrefix}:new:${nextDraftKey}`;
+                  setNextDraftKey((current) => current + 1);
                   updateActivePool((pool) => {
                     let suffix = pool.entries.length + 1;
                     let id = `name-${suffix}`;
                     while (pool.entries.some((entry) => entry.id === id)) id = `name-${++suffix}`;
                     return {
                       ...pool,
-                      entries: [...pool.entries, { id, displayName: "", weight: 1 }],
+                      entries: [...pool.entries, { id, displayName: "", weight: 1, draftKey }],
                     };
-                  })
-                }
+                  });
+                }}
               >
                 Add name
               </Button>
@@ -421,7 +469,7 @@ export function CivilizationNamePoolEditorDialog({
             </div>
           )}
           {message !== null ? (
-            <div role="status" className="text-sm text-muted-foreground">
+            <div role={messageRole} className="text-sm text-muted-foreground">
               {message}
             </div>
           ) : null}
@@ -463,13 +511,16 @@ export function CivilizationProfilePoolEditorDialog({
   maxEntries,
   maxWeight,
 }: PoolDialogCommonProps) {
-  const [draft, setDraft] = useState<ReadonlyArray<CivilizationProfilePool>>(() =>
-    effective.config.personalities.pools.map((pool) => ({
+  const draftKeyPrefix = useId();
+  const [nextDraftKey, setNextDraftKey] = useState(0);
+  const [draft, setDraft] = useState<ReadonlyArray<DraftProfilePool>>(() =>
+    effective.config.personalities.pools.map((pool, poolIndex) => ({
       ...pool,
-      entries: pool.entries.map((entry) => ({
+      entries: pool.entries.map((entry, entryIndex) => ({
         ...entry,
         traits: [...entry.traits],
         rich: { ...entry.rich, traits: [...entry.rich.traits] },
+        draftKey: `${draftKeyPrefix}:existing:${poolIndex}:${entryIndex}`,
       })),
     })),
   );
@@ -484,6 +535,7 @@ export function CivilizationProfilePoolEditorDialog({
   const [previewing, setPreviewing] = useState(false);
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
+  const [messageRole, setMessageRole] = useState<"status" | "alert">("status");
   const [conflictReview, setConflictReview] = useState(false);
   const currentRevision = civilizationConfigExpectedRevision(effective, projectId);
   const conflictRefreshPending = conflictReview && expectedRevision === currentRevision;
@@ -499,14 +551,19 @@ export function CivilizationProfilePoolEditorDialog({
     if (!conflictReview) setMessage(null);
   };
 
-  const updateActivePool = (update: (pool: CivilizationProfilePool) => CivilizationProfilePool) => {
+  const updateActivePool = (update: (pool: DraftProfilePool) => DraftProfilePool) => {
     setDraft((current) => current.map((pool) => (pool.id === activePoolId ? update(pool) : pool)));
     invalidatePreview();
   };
 
   const override = (): CivilizationConfigOverride => ({
     version: CIVILIZATION_CONFIG_VERSION,
-    personalities: { pools: draft },
+    personalities: {
+      pools: draft.map((pool) => ({
+        ...pool,
+        entries: pool.entries.map(withoutDraftKey),
+      })),
+    },
   });
 
   const preview = () => {
@@ -518,18 +575,21 @@ export function CivilizationProfilePoolEditorDialog({
     const candidate = override();
     setPreviewing(true);
     setMessage(null);
+    setMessageRole("status");
     void runConfigAction({ environmentId, projectId, type: "validate", override: candidate })
       .then(() => runConfigAction({ environmentId, projectId, type: "diff", override: candidate }))
       .then((result) => {
         setPreviewing(false);
         setPreviewEffective(result.effective);
         setPreviewChanges(result.changes?.length ?? 0);
+        setMessageRole("status");
         setMessage(`${result.changes?.length ?? 0} effective changes in the server preview.`);
       })
       .catch((error: unknown) => {
         setPreviewing(false);
         setPreviewEffective(null);
         setPreviewChanges(null);
+        setMessageRole("alert");
         setMessage(poolErrorMessage(error));
       });
   };
@@ -537,11 +597,13 @@ export function CivilizationProfilePoolEditorDialog({
   const save = () => {
     if (saving || previewChanges === null || expectedRevision === null) return;
     if (!readEnvironmentScope(environmentId, AuthSettingsWriteScope)) {
+      setMessageRole("alert");
       setMessage("Permission changed before save; settings:write is required.");
       return;
     }
     setSaving(true);
     setMessage(null);
+    setMessageRole("status");
     void runConfigAction({
       environmentId,
       projectId,
@@ -560,10 +622,12 @@ export function CivilizationProfilePoolEditorDialog({
           setConflictReview(true);
           setPreviewEffective(null);
           setPreviewChanges(null);
+          setMessageRole("alert");
           setMessage("Configuration changed elsewhere; review and save again.");
           refresh();
           return;
         }
+        setMessageRole("alert");
         setMessage(poolErrorMessage(error));
       });
   };
@@ -645,7 +709,7 @@ export function CivilizationProfilePoolEditorDialog({
             <div className="space-y-3">
               <div className="text-sm font-medium">{activePool.id}</div>
               {activePool.entries.map((entry, index) => (
-                <div key={entry.id} className="space-y-2 rounded-lg border p-3">
+                <div key={entry.draftKey} className="space-y-2 rounded-lg border p-3">
                   <div className="grid gap-2 sm:grid-cols-[1fr_1fr_7rem_auto]">
                     <Input
                       aria-label={`Profile entry ${index + 1} ID`}
@@ -677,14 +741,14 @@ export function CivilizationProfilePoolEditorDialog({
                         }))
                       }
                     />
-                    <Input
-                      aria-label={`Profile entry ${index + 1} weight`}
-                      type="number"
+                    <NumberField
+                      min={0}
+                      max={maxWeight}
+                      step={1}
                       size="sm"
-                      value={String(entry.weight)}
-                      onChange={(event) => {
-                        const weight = Number(event.currentTarget.value);
-                        if (!Number.isFinite(weight)) return;
+                      value={entry.weight}
+                      onValueChange={(weight) => {
+                        if (weight === null || !Number.isFinite(weight)) return;
                         updateActivePool((pool) => ({
                           ...pool,
                           entries: pool.entries.map((candidate, candidateIndex) =>
@@ -692,7 +756,11 @@ export function CivilizationProfilePoolEditorDialog({
                           ),
                         }));
                       }}
-                    />
+                    >
+                      <NumberFieldGroup>
+                        <NumberFieldInput aria-label={`Profile entry ${index + 1} weight`} />
+                      </NumberFieldGroup>
+                    </NumberField>
                     <div className="flex items-center gap-1">
                       <span className="min-w-12 text-right text-xs text-muted-foreground">
                         {probabilitiesAvailable
@@ -883,7 +951,9 @@ export function CivilizationProfilePoolEditorDialog({
                 size="sm"
                 variant="outline"
                 disabled={maxEntries !== undefined && activePool.entries.length >= maxEntries}
-                onClick={() =>
+                onClick={() => {
+                  const draftKey = `${draftKeyPrefix}:new:${nextDraftKey}`;
+                  setNextDraftKey((current) => current + 1);
                   updateActivePool((pool) => {
                     let suffix = pool.entries.length + 1;
                     let id = `profile-${suffix}`;
@@ -900,11 +970,12 @@ export function CivilizationProfilePoolEditorDialog({
                           styleText: "",
                           rich: { label: "", traits: [], axiom: "", voice: "", styleText: "" },
                           weight: 1,
+                          draftKey,
                         },
                       ],
                     };
-                  })
-                }
+                  });
+                }}
               >
                 Add profile
               </Button>
@@ -917,7 +988,7 @@ export function CivilizationProfilePoolEditorDialog({
             </div>
           )}
           {message !== null ? (
-            <div role="status" className="text-sm text-muted-foreground">
+            <div role={messageRole} className="text-sm text-muted-foreground">
               {message}
             </div>
           ) : null}

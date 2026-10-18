@@ -122,6 +122,8 @@ describe("searchSettings", () => {
     ["context packet", "civilization-context"],
     ["context analytics", "civilization-context-analytics"],
     ["packet budget trends", "civilization-context-analytics"],
+    ["context inspector", "civilization-context-inspector"],
+    ["historical provider turn", "civilization-context-inspector"],
     ["agent mail", "civilization-messaging"],
     ["civilization diagnostics", "civilization-diagnostics"],
     ["provider capabilities", "civilization-providers"],
@@ -435,6 +437,19 @@ describe("searchSettings", () => {
 });
 
 describe("settings search targets", () => {
+  it.each([
+    "civilization-context-analytics",
+    "civilization-context-inspector",
+    "civilization-citizens",
+    "civilization-lineage",
+    "civilization-chronicle",
+    "civilization-notes",
+    "civilization-retained-mail",
+    "civilization-data-retention",
+  ])("requires project scope for %s", (targetId) => {
+    expect(getSettingsSearchTargetScope(targetId)).toMatchObject({ scope: "project" });
+  });
+
   it("requires an environment for the resolved telemetry export destination", () => {
     const result = searchSettings("OpenTelemetry export").find(
       (item) => item.id === "telemetry-export",

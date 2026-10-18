@@ -34,6 +34,12 @@ import {
 import { Input } from "../ui/input";
 import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
 import { CivilizationCitizenLink } from "./CivilizationCitizenLink";
+import {
+  CIVILIZATION_CONTEXT_OUTCOME_OPTIONS,
+  CIVILIZATION_CONTEXT_SUPPRESSION_OPTIONS,
+  civilizationContextOutcomeLabel,
+  civilizationContextSuppressionLabel,
+} from "./CivilizationContextLabels";
 import { SettingsSection } from "./settingsLayout";
 
 interface CivilizationContextInspectorProps {
@@ -89,19 +95,6 @@ function draftFiltersFromApplied(filters: CivilizationContextInspectionFilters):
 const filtersIdentity = (filters: CivilizationContextInspectionFilters | undefined): string =>
   JSON.stringify(filters ?? {});
 
-const outcomeLabel = (outcome: CivilizationContextInspectionOutcome): string => {
-  switch (outcome) {
-    case "skipped":
-      return "Skipped";
-    case "built":
-      return "Built - provider start unresolved";
-    case "provider_start_accepted":
-      return "Provider start accepted";
-    case "provider_start_failed":
-      return "Provider start failed";
-  }
-};
-
 const bodyUnavailableMessage = (detail: CivilizationContextInspectionDetail): string => {
   switch (detail.packetTextState) {
     case "pending_provider_start":
@@ -155,6 +148,16 @@ function appliedFilters(draft: DraftFilters): CivilizationContextInspectionFilte
       ? {}
       : { providerTurnOrdinal: ordinal }),
   };
+}
+
+function filterValidationMessage(draft: DraftFilters): string | null {
+  if (draft.providerTurnOrdinal.trim() !== "") {
+    const ordinal = Number(draft.providerTurnOrdinal);
+    if (!Number.isSafeInteger(ordinal) || ordinal < 1) {
+      return "Provider turn must be a positive whole number.";
+    }
+  }
+  return null;
 }
 
 function MetadataValue({
@@ -219,16 +222,32 @@ function DetailDialog({
         </DialogHeader>
         <DialogPanel>
           {loading ? (
-            <div className="text-sm text-muted-foreground">Loading sensitive detail…</div>
+            <div className="text-sm text-muted-foreground" role="status">
+              Loading sensitive detail…
+            </div>
           ) : null}
-          {message === null ? null : <div className="text-sm text-destructive">{message}</div>}
+          {message === null ? null : (
+            <div className="text-sm text-destructive" role="alert">
+              {message}
+            </div>
+          )}
           {detail === null ? null : (
             <div className="space-y-5">
               <section className="space-y-2">
                 <h4 className="font-medium text-sm">Outcome</h4>
                 <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-                  <MetadataValue label="Outcome" value={outcomeLabel(detail.outcome)} />
-                  <MetadataValue label="Suppression" value={detail.suppressionReason} />
+                  <MetadataValue
+                    label="Outcome"
+                    value={civilizationContextOutcomeLabel(detail.outcome)}
+                  />
+                  <MetadataValue
+                    label="Suppression"
+                    value={
+                      detail.suppressionReason === null
+                        ? null
+                        : civilizationContextSuppressionLabel(detail.suppressionReason)
+                    }
+                  />
                   <MetadataValue
                     label="Provider start"
                     value={formatDate(detail.providerStartAt)}
@@ -326,7 +345,9 @@ function DetailDialog({
                   </pre>
                 )}
                 {copyMessage === null ? null : (
-                  <div className="text-xs text-muted-foreground">{copyMessage}</div>
+                  <div className="text-xs text-muted-foreground" role="status">
+                    {copyMessage}
+                  </div>
                 )}
               </section>
             </div>
@@ -368,6 +389,7 @@ export function CivilizationContextInspector({
   const [detail, setDetail] = useState<CivilizationContextInspectionDetail | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
   const [detailMessage, setDetailMessage] = useState<string | null>(null);
+  const [filterMessage, setFilterMessage] = useState<string | null>(null);
 
   useEffect(() => {
     if (lastInitialFiltersKey.current === initialFiltersKey) return;
@@ -396,6 +418,12 @@ export function CivilizationContextInspector({
   const activeFilterCount = Object.values(filters).filter((value) => value !== undefined).length;
 
   const apply = () => {
+    const validationMessage = filterValidationMessage(draft);
+    if (validationMessage !== null) {
+      setFilterMessage(validationMessage);
+      return;
+    }
+    setFilterMessage(null);
     setFilters(appliedFilters(draft));
     setCursor(null);
     setCursorStack([]);
@@ -403,6 +431,7 @@ export function CivilizationContextInspector({
 
   const reset = () => {
     setDraft(EMPTY_FILTERS);
+    setFilterMessage(null);
     setFilters({});
     setCursor(null);
     setCursorStack([]);
@@ -483,6 +512,10 @@ export function CivilizationContextInspector({
             }
           />
           <Select
+            items={[
+              { value: "all", label: "All outcomes" },
+              ...CIVILIZATION_CONTEXT_OUTCOME_OPTIONS,
+            ]}
             value={draft.outcome}
             onValueChange={(value) =>
               setDraft((current) => ({ ...current, outcome: value as DraftFilters["outcome"] }))
@@ -493,13 +526,18 @@ export function CivilizationContextInspector({
             </SelectTrigger>
             <SelectPopup>
               <SelectItem value="all">All outcomes</SelectItem>
-              <SelectItem value="skipped">Skipped</SelectItem>
-              <SelectItem value="built">Built</SelectItem>
-              <SelectItem value="provider_start_accepted">Provider start accepted</SelectItem>
-              <SelectItem value="provider_start_failed">Provider start failed</SelectItem>
+              {CIVILIZATION_CONTEXT_OUTCOME_OPTIONS.map((option) => (
+                <SelectItem key={option.value} value={option.value}>
+                  {option.label}
+                </SelectItem>
+              ))}
             </SelectPopup>
           </Select>
           <Select
+            items={[
+              { value: "all", label: "All suppression reasons" },
+              ...CIVILIZATION_CONTEXT_SUPPRESSION_OPTIONS,
+            ]}
             value={draft.suppressionReason}
             onValueChange={(value) =>
               setDraft((current) => ({
@@ -513,19 +551,11 @@ export function CivilizationContextInspector({
             </SelectTrigger>
             <SelectPopup>
               <SelectItem value="all">All suppression reasons</SelectItem>
-              <SelectItem value="participation_disabled">Participation disabled</SelectItem>
-              <SelectItem value="emergency_off">Emergency off</SelectItem>
-              <SelectItem value="citizen_not_adopted">Citizen not adopted</SelectItem>
-              <SelectItem value="citizen_deleted">Citizen deleted</SelectItem>
-              <SelectItem value="citizen_closed">Citizen closed</SelectItem>
-              <SelectItem value="observed_agent_read_only">Observed agent read only</SelectItem>
-              <SelectItem value="provider_unsupported">Provider unsupported</SelectItem>
-              <SelectItem value="provider_continuation">Provider continuation</SelectItem>
-              <SelectItem value="provider_command">Provider command</SelectItem>
-              <SelectItem value="claude_provider_continuation">Claude continuation</SelectItem>
-              <SelectItem value="claude_slash_command">Claude slash command</SelectItem>
-              <SelectItem value="packet_budget_zero">Packet budget zero</SelectItem>
-              <SelectItem value="packet_budget_too_small">Packet budget too small</SelectItem>
+              {CIVILIZATION_CONTEXT_SUPPRESSION_OPTIONS.map((option) => (
+                <SelectItem key={option.value} value={option.value}>
+                  {option.label}
+                </SelectItem>
+              ))}
             </SelectPopup>
           </Select>
           <Input
@@ -582,17 +612,27 @@ export function CivilizationContextInspector({
           </Button>
           <span className="text-xs text-muted-foreground">{activeFilterCount} active filters</span>
         </div>
+        {filterMessage === null ? null : (
+          <div className="text-sm text-destructive" role="alert">
+            {filterMessage}
+          </div>
+        )}
 
         {page.error === null ? null : (
-          <div className="text-sm text-destructive">
+          <div className="text-sm text-destructive" role="alert">
             Historical context metadata could not be loaded.
           </div>
         )}
         {page.isPending && page.data === null ? (
-          <div className="text-sm text-muted-foreground">Loading historical context metadata…</div>
+          <div className="text-sm text-muted-foreground" role="status">
+            Loading historical context metadata…
+          </div>
         ) : null}
         {!page.isPending && page.data !== null && rows.length === 0 ? (
-          <div className="rounded-md border border-border/70 p-3 text-sm text-muted-foreground">
+          <div
+            className="rounded-md border border-border/70 p-3 text-sm text-muted-foreground"
+            role="status"
+          >
             No retained context-inspection records match these filters.
           </div>
         ) : null}
@@ -603,8 +643,12 @@ export function CivilizationContextInspector({
               <div className="flex flex-wrap items-start justify-between gap-3">
                 <div className="min-w-0 space-y-1">
                   <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm">
-                    <span className="font-medium">{outcomeLabel(row.outcome)}</span>
-                    <span className="text-muted-foreground">{row.providerInstanceId}</span>
+                    <span className="font-medium">
+                      {civilizationContextOutcomeLabel(row.outcome)}
+                    </span>
+                    <span className="wrap-anywhere text-muted-foreground">
+                      {row.providerInstanceId}
+                    </span>
                     <span className="text-muted-foreground">{formatDate(row.createdAt)}</span>
                   </div>
                   <div className="wrap-anywhere text-xs text-muted-foreground">
@@ -636,7 +680,7 @@ export function CivilizationContextInspector({
                   </div>
                   {row.suppressionReason === null ? null : (
                     <div className="text-xs text-muted-foreground">
-                      suppressed: {row.suppressionReason}
+                      Suppressed: {civilizationContextSuppressionLabel(row.suppressionReason)}
                     </div>
                   )}
                 </div>

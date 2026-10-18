@@ -292,7 +292,10 @@ import { CivilizationProjectInspection } from "./CivilizationProjectInspection";
 
 let renderer: ReactTestRenderer | undefined;
 
-const render = async (allowSensitiveActions = true) => {
+const render = async (
+  allowSensitiveActions = true,
+  mode?: "citizens" | "chronicle" | "messages" | "notes" | "data",
+) => {
   await act(() => {
     renderer = create(
       <CivilizationProjectInspection
@@ -301,6 +304,7 @@ const render = async (allowSensitiveActions = true) => {
         targetLabel="UI-3 machine"
         effective={EFFECTIVE}
         allowSensitiveActions={allowSensitiveActions}
+        mode={mode}
       />,
     );
   });
@@ -392,5 +396,48 @@ describe("Civilization project inspection", () => {
     expect(text()).toContain("Citizen detail editor · ");
     expect(text()).toContain("editable");
     expect(testState.citizenCalls).toEqual([]);
+  });
+
+  it("mounts only the selected heavy project surface", async () => {
+    await render(true, "chronicle");
+
+    expect(text()).toContain("civilization-chronicle");
+    expect(text()).not.toContain("Observed Ada");
+    expect(text()).not.toContain("Correspondence history");
+    expect(text()).not.toContain("civilization-data-retention");
+    expect(text()).not.toContain("fact");
+
+    await act(() => renderer?.unmount());
+    renderer = undefined;
+    await render(true, "notes");
+
+    expect(text()).toContain("fact");
+    expect(text()).not.toContain("Observed Ada");
+    expect(text()).not.toContain("civilization-chronicle");
+    expect(text()).not.toContain("Correspondence history");
+    expect(text()).not.toContain("civilization-data-retention");
+  });
+
+  it("routes lineage selection from Citizens instead of opening transient local state", async () => {
+    const onNavigateLineage = vi.fn();
+    await act(() => {
+      renderer = create(
+        <CivilizationProjectInspection
+          environmentId={environmentId}
+          projectId={projectId}
+          targetLabel="UI-3 machine"
+          effective={EFFECTIVE}
+          allowSensitiveActions
+          mode="citizens"
+          onNavigateLineage={onNavigateLineage}
+        />,
+      );
+    });
+    const lineage = renderer!.root
+      .findAllByType("button")
+      .find((button) => button.props.children === "View lineage")!;
+    await act(() => lineage.props.onClick());
+    expect(onNavigateLineage).toHaveBeenCalledWith(threadId);
+    expect(text()).not.toContain("Bounded lineage neighborhood");
   });
 });
