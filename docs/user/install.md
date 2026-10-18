@@ -1,5 +1,12 @@
 # Install T3 Code
 
+> [!IMPORTANT]
+> This page documents the upstream T3 Code distribution inherited by the Civilization fork. The
+> `t3.codes`, npm, package-manager, and `pingdotgg/t3code` release paths below install **upstream T3
+> Code**, not the Civilization fork. To run Civilization, clone/build
+> [`Errantial/t3code`](https://github.com/Errantial/t3code) as described in the repository
+> [README](../../README.md).
+
 T3 Code runs coding agents on your computer and lets you control them from its
 desktop, web, or mobile app. Set up the machine where the agents will work first.
 

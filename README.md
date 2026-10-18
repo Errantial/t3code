@@ -1,141 +1,116 @@
-# T3 Code
+# T3 Civilization
 
-T3 Code is an "agent harness control surface". It enables control of the agents on your machine with a best-in-class mobile app ([iOS](https://apps.apple.com/us/app/t3-code-remote-claude-more/id6787819824), [Android](https://play.google.com/store/apps/details?id=com.t3tools.t3code)), [web app](https://app.t3.codes) and [Electron-based desktop app](https://t3.codes).
+T3 Civilization is a maintained fork of [T3 Code](https://github.com/pingdotgg/t3code) that adds a persistent, project-scoped society for coding-agent threads without replacing T3's core orchestration model.
 
-Works with your subscriptions on Claude Code, Codex, Cursor, Grok Build, OpenCode, and Google Antigravity. If they're set up on your computer, T3 Code can control them.
+Each participating thread can become a durable **citizen** with a stable identity, lineage, optional personality rendering, bounded shared context, notes, and passive correspondence. Civilization is designed to make long-running multi-agent work easier to understand and coordinate while keeping T3's existing permissions, provider boundaries, project ownership, and lifecycle semantics authoritative.
 
-## "Wait, what are you selling me?"
+The fork still includes the normal T3 Code web, desktop, mobile, provider, remote-access, source-control, and agent-control functionality. Civilization is an additional feature layer, not a separate agent runtime.
 
-Nothing. We built T3 Code because we wanted the best possible development experience with agents. We were inspired by existing solutions like the Codex desktop app, Conductor, Claude Desktop and Cursor Glass, but none met our bar.
+> [!NOTE]
+> This is the **Errantial T3 Civilization fork**, not the upstream `pingdotgg/t3code` distribution. Upstream T3 Code documentation and architecture still apply where this fork has not changed behavior.
 
-We wanted something performant, remote-ready, and truly open. If we ever go the wrong direction, we want you to have everything you need to fork and build the editor that you want.
+## Civilization at a glance
 
-## Installation
+- **Persistent citizens** — eligible T3 threads receive stable identities that survive provider/session changes and ordinary restarts.
+- **Managed identity** — optional managed titles use the form `[Name] Topic` while preserving explicit user/agent title ownership.
+- **Lineage** — forks and T3-owned child relationships are exposed as bounded, server-authoritative ancestry rather than a second graph system.
+- **Personality rendering** — stable per-citizen profiles can be rendered as `off`, `mild`, or `rich`; personality changes presentation, never permissions or task authority.
+- **Shared context and notes** — citizens can receive bounded current Civilization context and work with explicit shared notes without automatic transcript ingestion or background model calls.
+- **Passive correspondence** — citizens can address durable messages to one another without waking, steering, polling, or automatically replying on behalf of the recipient.
+- **Chronicle and inspection** — bounded history, achievements, correspondence, lineage, context analytics, and historical context inspection are available from the Civilization Settings surface.
+- **Safe operations** — configuration, retention, import/export, reset, purge, adoption, and participation controls stay inside T3's existing server authority and permission model.
+- **Multi-surface UX** — web and desktop expose the full task-oriented Civilization Settings experience; mobile includes a bounded read-only Civilization overview.
 
-> [!WARNING]
-> T3 Code currently supports Codex, Claude, Cursor, Grok Build, OpenCode, and Antigravity. Install and authenticate at least one provider before use:
->
-> - Codex: install [Codex CLI](https://developers.openai.com/codex/cli) and run `codex login`
-> - Claude: install [Claude Code](https://claude.com/product/claude-code) and run `claude auth login`
-> - Cursor: install [Cursor CLI](https://cursor.com/cli) and run `agent login`
-> - Grok Build: install [Grok Build CLI](https://x.ai/cli) and run `grok login`
-> - OpenCode: install [OpenCode](https://opencode.ai) and run `opencode auth login`
-> - Antigravity: enable it in Settings, then use **Install Antigravity** and **Sign in with Google**. No CLI is required.
+Civilization is **off by default**. It is scoped to one T3 environment/project, and a project's worktrees participate in that same civilization. Cross-environment federation is intentionally not part of the current product.
 
-### Command line
+## Current release
 
-```bash
-curl -fsSL https://t3.codes/install.sh | sh
-```
+The current public Civilization release is **v1.4 — UI overhaul**.
 
-On Windows, in PowerShell:
+[View the Civilization v1.4 release](https://github.com/Errantial/t3code/releases/tag/civilization-v1.4)
 
-```powershell
-irm https://t3.codes/install.ps1 | iex
-```
+v1.4 reorganizes Civilization around five user tasks in **Settings → Civilization**:
 
-Then run `t3` to start the server and open the local web app. `t3 service install` keeps it running in the background, `t3 update` moves to a newer release, and `t3 --help` has the full reference.
+1. **Overview** — status, participation, identity, population, and provider-support summary.
+2. **Citizens** — census, citizen details, and lineage.
+3. **Activity** — Chronicle, correspondence, and notes.
+4. **Context** — analytics and historical context inspection.
+5. **Configuration** — identity, personality, context, messaging, provider, retention, and administrative policy.
 
-To try it once without installing, run `npx t3@latest` instead.
+The task selection is URL-backed, preserves browser history/deep links, integrates with Settings search, and requires an exact project/checkout for rich inspection views. The narrow layout uses the same information architecture without horizontal page overflow.
 
-### Desktop app
+## Provider support
 
-Install the latest version of the desktop app from [GitHub Releases](https://github.com/pingdotgg/t3code/releases), or from your favorite package registry:
+Civilization support is capability-based and provider-path specific. The UI reports the effective support level for the selected target rather than assuming every provider can safely support identity/context/messaging behavior.
 
-#### Windows (`winget`)
+The fork includes full Civilization integration for the validated Codex and Claude paths and for the promoted **managed/local OpenCode 2** path. Other provider paths may remain metadata-only where the provider lifecycle cannot satisfy Civilization's context or passive-messaging guarantees.
 
-```bash
-winget install T3Tools.T3Code
-```
+This distinction affects Civilization features only; it does not remove the underlying provider from T3 Code.
 
-#### Windows (`scoop`)
+## Getting the Civilization fork
 
-```bash
-scoop install extras/t3code
-```
+Civilization currently publishes **source releases**, not fork-specific desktop/CLI installer artifacts.
 
-#### macOS (Homebrew)
+Clone this repository to run or build the fork:
 
 ```bash
-brew install --cask t3-code
+git clone https://github.com/Errantial/t3code.git
+cd t3code
 ```
 
-#### Debian, Ubuntu (`.deb`)
-
-Download the `.deb` from [GitHub Releases](https://github.com/pingdotgg/t3code/releases), then:
-
-```bash
-sudo apt install ./T3-Code-*.deb
-```
-
-#### Arch Linux (AUR)
-
-Stable:
-
-```bash
-yay -S t3code-bin
-```
-
-Nightly:
-
-```bash
-yay -S t3code-nightly-bin
-```
-
-The AUR packaging is maintained in this repository under [`packaging/aur`](./packaging/aur).
-
-## Some notes
-
-We are very very early in this project. Expect bugs.
-
-We are (mostly) not accepting contributions yet. Small fixes may be considered. Big features will not be.
-
-## Documentation
-
-Full docs live in [docs/](./docs). There's no docs site yet.
-
-- [Install and first run](./docs/user/install.md)
-- [Permission modes](./docs/user/permission-modes.md)
-- [Keyboard shortcuts](./docs/user/keybindings.md)
-- [Project settings](./docs/user/project-settings.md)
-- [Appearance preferences](./docs/user/appearance.md)
-- [Remote access from a phone or another machine](./docs/user/remote-access.md)
-- [Connect Claude Code, Codex, ChatGPT and other agents over MCP](./docs/user/outside-agents.md)
-- [Keeping app and server in sync](./docs/user/updating.md)
-- [Source control integrations](./docs/user/source-control.md)
-- Multiple accounts: [Codex](./docs/user/providers-codex.md) · [Claude](./docs/user/providers-claude.md)
-- [Run T3 Code as a background service](./docs/user/background-service.md)
-
-Building from source? Start at [docs/internals/overview.md](./docs/internals/overview.md).
-
-## If you REALLY want to contribute still.... read this first
-
-### Install `vp`
-
-T3 Code uses Vite+ so you'll need to install the global `vp` command-line tool.
-
-#### macOS / Linux
-
-```bash
-curl -fsSL https://vite.plus | bash
-```
-
-#### Windows
-
-```bash
-irm https://vite.plus/ps1 | iex
-```
-
-Checkout their getting started guide for more information: https://viteplus.dev/guide/
-
-### Install dependencies
+The repository uses [Vite+](https://viteplus.dev/) and Node.js 24. Install dependencies with:
 
 ```bash
 vp i
 ```
 
-Read [CONTRIBUTING.md](./CONTRIBUTING.md) before reporting a bug or opening a PR.
+For a development server and web client:
 
-Have a feature request? Start an [Ideas discussion](https://github.com/pingdotgg/t3code/discussions/categories/ideas).
+```bash
+vp run dev
+```
 
-Need support? Join the [Discord](https://discord.gg/jn4EGJjrvv).
+For contributor and production-build details, see the inherited T3 development documentation in [`docs/`](./docs) and [`CONTRIBUTING.md`](./CONTRIBUTING.md).
+
+> [!WARNING]
+> The installers and package-manager commands on `t3.codes`, `npm`, Homebrew, winget, Scoop, AUR, and upstream GitHub Releases install **upstream T3 Code unless they explicitly name this fork**. They should not be used as proof that the Civilization fork is installed.
+
+## Using Civilization
+
+On web or desktop, open **Settings → Civilization**, select the environment/project you want to manage, and start from **Overview**. Civilization uses the same Settings scope model as the rest of T3: environment defaults can be refined by project-specific configuration where supported.
+
+For the user-facing feature guide, see [Civilization](./docs/user/civilization.md).
+
+## Documentation
+
+Civilization-specific documentation:
+
+- [Civilization user guide](./docs/user/civilization.md)
+- [Civilization v1.4 release](https://github.com/Errantial/t3code/releases/tag/civilization-v1.4)
+
+The rest of [`docs/user`](./docs/user) and [`docs/internals`](./docs/internals) document the underlying T3 Code product and architecture that this fork retains. In particular:
+
+- [Install and first run](./docs/user/install.md) — upstream T3 installation behavior; see the fork warning above.
+- [Permission modes](./docs/user/permission-modes.md)
+- [Project settings and overrides](./docs/user/project-settings.md)
+- [Remote access](./docs/user/remote-access.md)
+- [Source control integrations](./docs/user/source-control.md)
+- [Architecture overview](./docs/internals/overview.md)
+
+## Relationship to upstream T3 Code
+
+Civilization deliberately builds inside T3 Code instead of creating a companion daemon, second database, or competing orchestration system. The fork continues to inherit upstream T3 features and architecture while maintaining Civilization-specific server, contract, client-runtime, web/desktop, and mobile integration.
+
+For upstream T3 Code itself, use [pingdotgg/t3code](https://github.com/pingdotgg/t3code). General T3 questions, upstream installers, and upstream feature proposals belong there. Civilization-specific behavior and fork changes belong in this repository.
+
+## Contributing
+
+Read [`CONTRIBUTING.md`](./CONTRIBUTING.md) before opening a change. The contribution guide is largely inherited from upstream T3 and its scope/verification rules remain useful here; the fork note at the top explains where Civilization-specific reports and upstream T3 reports belong.
+
+Public Issues and Discussions are currently disabled on this fork; Civilization-specific code changes can still be proposed as pull requests.
+
+Please keep Civilization changes narrow, evidence-based, and compatible with T3's existing security and lifecycle boundaries.
+
+## License
+
+This fork retains T3 Code's MIT license. See [`LICENSE`](./LICENSE) and the repository's third-party license notices.

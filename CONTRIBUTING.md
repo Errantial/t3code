@@ -1,5 +1,14 @@
 # Contributing
 
+> [!NOTE]
+> This repository is the **Errantial T3 Civilization fork** of
+> [T3 Code](https://github.com/pingdotgg/t3code). Civilization-specific changes belong in this
+> repository. Bugs or proposals that apply to upstream T3 Code independently of Civilization should
+> be reported upstream instead. Public Issues and Discussions are currently disabled on this fork,
+> so do not use the upstream tracker for Civilization-only reports unless the same problem also
+> exists upstream. The engineering and verification rules below are inherited from T3 Code and
+> remain the default contribution standard for this fork unless a fork maintainer says otherwise.
+
 ## Developer setup
 
 See the [development runbook](docs/operations/development.md#first-checkout) for the initial checkout,
@@ -19,9 +28,12 @@ the same reasons as a ready PR; converting a PR to draft does not exempt it from
 Focused bug fixes, reliability fixes, performance improvements, and maintenance work are the most
 likely to be accepted. Unsolicited features, opinionated rewrites, and unrelated cleanup are not.
 
-Report bugs in issues. Feature requests and proposals belong in
-[Ideas discussions](https://github.com/pingdotgg/t3code/discussions/categories/ideas).
-Search existing reports, discussions, and documented workflows before starting work.
+For upstream T3 Code behavior, use the [upstream repository](https://github.com/pingdotgg/t3code).
+Upstream feature requests and proposals belong in
+[T3 Code Ideas discussions](https://github.com/pingdotgg/t3code/discussions/categories/ideas).
+Civilization-specific pull requests belong here; public Issues/Discussions are not currently enabled
+for this fork. Search the relevant repository's existing reports, discussions, and documented
+workflows before starting work.
 
 <a id="prior-approval"></a>
 

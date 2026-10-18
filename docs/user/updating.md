@@ -1,5 +1,12 @@
 # Updating T3 Code
 
+> [!IMPORTANT]
+> These update channels belong to upstream T3 Code. A Civilization source build is not published to
+> the upstream npm/desktop/package-manager channels, so using the normal T3 updater can replace the
+> fork with an upstream build. Update a Civilization checkout from
+> [`Errantial/t3code`](https://github.com/Errantial/t3code) and rebuild it instead. See the fork
+> [README](../../README.md) for the current release/install boundary.
+
 The app you use and the server running your agents can be on different machines.
 When a server is behind your web or desktop app, an update notice appears in the
 conversation and **Settings → Connections**. Update the machine named in that
