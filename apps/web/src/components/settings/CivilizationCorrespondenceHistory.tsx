@@ -290,7 +290,11 @@ export function CivilizationCorrespondenceHistory({
                   }}
                 >
                   <SelectTrigger aria-label="Conversation citizen A">
-                    <SelectValue />
+                    <SelectValue>
+                      {participantDraft === ""
+                        ? "Choose Citizen A"
+                        : (selectorNames.get(ThreadId.make(participantDraft)) ?? participantDraft)}
+                    </SelectValue>
                   </SelectTrigger>
                   <SelectContent>
                     <SelectItem value="__none__">Choose Citizen A</SelectItem>
@@ -311,7 +315,12 @@ export function CivilizationCorrespondenceHistory({
                   }
                 >
                   <SelectTrigger aria-label="Conversation citizen B">
-                    <SelectValue />
+                    <SelectValue>
+                      {counterpartyDraft === ""
+                        ? "All correspondents"
+                        : (selectorNames.get(ThreadId.make(counterpartyDraft)) ??
+                          counterpartyDraft)}
+                    </SelectValue>
                   </SelectTrigger>
                   <SelectContent>
                     <SelectItem value="__all__">All correspondents</SelectItem>

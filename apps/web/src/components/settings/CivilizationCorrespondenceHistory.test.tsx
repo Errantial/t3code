@@ -144,6 +144,11 @@ const renderedText = (value: unknown): string => {
   if (typeof value === "object" && value !== null && "children" in value) {
     return renderedText((value as { readonly children?: unknown }).children);
   }
+  if (typeof value === "object" && value !== null && "props" in value) {
+    return renderedText(
+      (value as { readonly props?: { readonly children?: unknown } }).props?.children,
+    );
+  }
   return "";
 };
 
@@ -233,6 +238,25 @@ describe("Civilization correspondence history", () => {
           pageSize={10}
           allowSensitiveActions
           initialParticipantThreadId={senderId}
+          citizenOptions={[
+            {
+              threadId: senderId,
+              projectId,
+              name: "Ada",
+              profileId: "calm",
+              profileLabel: "Calm",
+              generation: 0,
+              lineageStatus: "resolved",
+              parentThreadId: null,
+              relationshipToParent: null,
+              observedOnly: false,
+              epoch: 3,
+              closed: false,
+              deleted: false,
+              titleManaged: true,
+              revision: 1,
+            },
+          ]}
           initialMessageId={messageId}
         />,
       );
@@ -243,6 +267,11 @@ describe("Civilization correspondence history", () => {
     });
     expect(testState.threadCalls.at(-1)?.[2]).toBe(messageId);
     expect(testState.sensitiveReads).toHaveLength(0);
+    const citizenATrigger = renderer!.root
+      .findAllByType("button")
+      .find((button) => button.props["aria-label"] === "Conversation citizen A");
+    expect(renderedText(citizenATrigger?.props.children)).toContain("Ada");
+    expect(renderedText(citizenATrigger?.props.children)).not.toContain(String(senderId));
   });
 
   it("applies an unordered citizen pair as one bounded correspondence query without reading bodies", async () => {
