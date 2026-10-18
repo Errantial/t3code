@@ -1109,6 +1109,68 @@ export const CivilizationContextInspectionPage = Schema.Struct({
 });
 export type CivilizationContextInspectionPage = typeof CivilizationContextInspectionPage.Type;
 
+export const CivilizationContextAnalyticsBucketSize = Schema.Literals(["hour", "day"]);
+export type CivilizationContextAnalyticsBucketSize =
+  typeof CivilizationContextAnalyticsBucketSize.Type;
+
+export const CivilizationContextAnalyticsOutcomeCounts = Schema.Struct({
+  skipped: Schema.Number,
+  built: Schema.Number,
+  providerStartAccepted: Schema.Number,
+  providerStartFailed: Schema.Number,
+});
+export type CivilizationContextAnalyticsOutcomeCounts =
+  typeof CivilizationContextAnalyticsOutcomeCounts.Type;
+
+export const CivilizationContextAnalyticsSuppressionCount = Schema.Struct({
+  reason: CivilizationContextSuppressionReason,
+  count: Schema.Number,
+});
+export type CivilizationContextAnalyticsSuppressionCount =
+  typeof CivilizationContextAnalyticsSuppressionCount.Type;
+
+export const CivilizationContextAnalyticsHistogram = Schema.Struct({
+  zero: Schema.Number,
+  low: Schema.Number,
+  medium: Schema.Number,
+  high: Schema.Number,
+  over: Schema.Number,
+});
+export type CivilizationContextAnalyticsHistogram =
+  typeof CivilizationContextAnalyticsHistogram.Type;
+
+export const CivilizationContextAnalyticsCompositionTotals = Schema.Struct({
+  candidates: Schema.Number,
+  included: Schema.Number,
+  omitted: Schema.Number,
+});
+export type CivilizationContextAnalyticsCompositionTotals =
+  typeof CivilizationContextAnalyticsCompositionTotals.Type;
+
+export const CivilizationContextAnalyticsBucket = Schema.Struct({
+  bucketStart: IsoDateTime,
+  bucketEnd: IsoDateTime,
+  totalInspections: Schema.Number,
+  outcomes: CivilizationContextAnalyticsOutcomeCounts,
+  suppressions: Schema.Array(CivilizationContextAnalyticsSuppressionCount),
+  packetSize: CivilizationContextAnalyticsHistogram,
+  budgetUtilization: CivilizationContextAnalyticsHistogram,
+  roster: CivilizationContextAnalyticsCompositionTotals,
+  notes: CivilizationContextAnalyticsCompositionTotals,
+  inbox: CivilizationContextAnalyticsCompositionTotals,
+});
+export type CivilizationContextAnalyticsBucket = typeof CivilizationContextAnalyticsBucket.Type;
+
+export const CivilizationContextAnalyticsResult = Schema.Struct({
+  projectId: ProjectId,
+  from: IsoDateTime,
+  to: IsoDateTime,
+  bucketSize: CivilizationContextAnalyticsBucketSize,
+  appliedDiagnosticRetentionDays: Schema.Number,
+  buckets: Schema.Array(CivilizationContextAnalyticsBucket),
+});
+export type CivilizationContextAnalyticsResult = typeof CivilizationContextAnalyticsResult.Type;
+
 export const CivilizationContextReference = Schema.Struct({
   referenceId: TrimmedNonEmptyString,
   projectId: ProjectId,

@@ -13,6 +13,7 @@ import {
   RunId,
   ThreadId,
   type CivilizationCapabilitiesResult,
+  type CivilizationContextAnalyticsResult,
   type CivilizationEffectiveConfig,
   type CivilizationStatus,
 } from "@t3tools/contracts";
@@ -44,6 +45,8 @@ import {
   fetchEnvironmentCivilizationCapabilities,
   fetchEnvironmentCivilizationConfig,
   fetchEnvironmentCivilizationConfigDescription,
+  fetchCurrentEnvironmentCivilizationContextAnalytics,
+  fetchEnvironmentCivilizationContextAnalytics,
   fetchEnvironmentCivilizationContextInspectionDetail,
   fetchEnvironmentCivilizationContextInspectionPage,
   fetchEnvironmentCivilizationNoteBody,
@@ -121,6 +124,14 @@ const EFFECTIVE = {
   selectedNameProbabilities: [],
   selectedProfileProbabilities: [],
 } satisfies CivilizationEffectiveConfig;
+const CONTEXT_ANALYTICS = {
+  projectId: PROJECT_ID,
+  from: "2026-10-17T10:00:00.000Z",
+  to: "2026-10-17T12:00:00.000Z",
+  bucketSize: "hour",
+  appliedDiagnosticRetentionDays: 7,
+  buckets: [],
+} satisfies CivilizationContextAnalyticsResult;
 
 function responseFor(url: string) {
   const parsed = new URL(url);
@@ -139,6 +150,77 @@ function responseFor(url: string) {
 }
 
 describe("Civilization environment HTTP reads", () => {
+  it.effect(
+    "maps only bounded context analytics metadata filters for direct and current reads",
+    () =>
+      Effect.gen(function* () {
+        const calls: string[] = [];
+        const threadId = ThreadId.make("thread:client-runtime:analytics");
+        const providerInstanceId = ProviderInstanceId.make("codex-main");
+        const fetchFn: typeof fetch = async (request) => {
+          const url = String(request);
+          calls.push(url);
+          return new URL(url).pathname === "/api/civilization/context-analytics"
+            ? Response.json(CONTEXT_ANALYTICS)
+            : new Response("not found", { status: 404 });
+        };
+        const provide = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
+          effect.pipe(Effect.provide(RpcHttp.layerRemoteHttpClient(fetchFn)));
+
+        const direct = yield* provide(
+          fetchEnvironmentCivilizationContextAnalytics({
+            prepared: PREPARED,
+            signer: Option.none(),
+            remoteAuthorization: Option.none(),
+            projectId: PROJECT_ID,
+            bucket: "hour",
+            from: "2026-10-17T10:00:00.000Z",
+            to: "2026-10-17T12:00:00.000Z",
+            providerInstanceId,
+            threadId,
+            outcome: "skipped",
+            suppressionReason: "provider_unsupported",
+          }),
+        );
+        expect(direct).toEqual(CONTEXT_ANALYTICS);
+        const directUrl = new URL(calls[0]!);
+        expect(directUrl.pathname).toBe("/api/civilization/context-analytics");
+        expect([...directUrl.searchParams.keys()].sort()).toEqual(
+          [
+            "bucket",
+            "from",
+            "outcome",
+            "projectId",
+            "providerInstanceId",
+            "suppressionReason",
+            "threadId",
+            "to",
+          ].sort(),
+        );
+        expect(directUrl.searchParams.get("projectId")).toBe(PROJECT_ID);
+        expect(directUrl.searchParams.get("bucket")).toBe("hour");
+        expect(directUrl.searchParams.get("from")).toBe("2026-10-17T10:00:00.000Z");
+        expect(directUrl.searchParams.get("to")).toBe("2026-10-17T12:00:00.000Z");
+        expect(directUrl.searchParams.get("providerInstanceId")).toBe(providerInstanceId);
+        expect(directUrl.searchParams.get("threadId")).toBe(threadId);
+        expect(directUrl.searchParams.get("outcome")).toBe("skipped");
+        expect(directUrl.searchParams.get("suppressionReason")).toBe("provider_unsupported");
+
+        const current = yield* provide(
+          fetchCurrentEnvironmentCivilizationContextAnalytics({
+            prepared: PREPARED,
+            projectId: PROJECT_ID,
+            bucket: "day",
+          }),
+        );
+        expect(current).toEqual(CONTEXT_ANALYTICS);
+        const currentUrl = new URL(calls[1]!);
+        expect(currentUrl.pathname).toBe("/api/civilization/context-analytics");
+        expect([...currentUrl.searchParams.keys()].sort()).toEqual(["bucket", "projectId"]);
+        expect(currentUrl.searchParams.get("bucket")).toBe("day");
+      }),
+  );
+
   it.effect(
     "maps bounded correspondence filters and anchored thread reads without fetching bodies",
     () =>
@@ -280,6 +362,9 @@ describe("Civilization environment HTTP reads", () => {
           threadId,
           providerInstanceId,
           outcome: "provider_start_accepted",
+          suppressionReason: "provider_unsupported",
+          from: "2026-10-17T00:00:00.000Z",
+          to: "2026-10-18T00:00:00.000Z",
           runId,
           attemptId,
           providerTurnOrdinal: 2,
@@ -293,6 +378,9 @@ describe("Civilization environment HTTP reads", () => {
       expect(listUrl.searchParams.get("threadId")).toBe(threadId);
       expect(listUrl.searchParams.get("providerInstanceId")).toBe(providerInstanceId);
       expect(listUrl.searchParams.get("outcome")).toBe("provider_start_accepted");
+      expect(listUrl.searchParams.get("suppressionReason")).toBe("provider_unsupported");
+      expect(listUrl.searchParams.get("from")).toBe("2026-10-17T00:00:00.000Z");
+      expect(listUrl.searchParams.get("to")).toBe("2026-10-18T00:00:00.000Z");
       expect(listUrl.searchParams.get("runId")).toBe(runId);
       expect(listUrl.searchParams.get("attemptId")).toBe(attemptId);
       expect(listUrl.searchParams.get("providerTurnOrdinal")).toBe("2");

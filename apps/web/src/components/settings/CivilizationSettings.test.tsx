@@ -69,6 +69,12 @@ vi.mock("./CivilizationContextInspector", () => ({
   ),
 }));
 
+vi.mock("./CivilizationContextAnalytics", () => ({
+  CivilizationContextAnalytics: ({ targetLabel }: { targetLabel: string }) => (
+    <div data-testid="civilization-context-analytics">Context analytics for {targetLabel}</div>
+  ),
+}));
+
 vi.mock("./CivilizationProjectInspection", () => ({
   CivilizationProjectInspection: ({ targetLabel }: { targetLabel: string }) => (
     <div data-testid="civilization-project-inspection">Project inspection · {targetLabel}</div>

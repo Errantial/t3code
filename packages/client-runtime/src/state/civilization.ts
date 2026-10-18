@@ -6,10 +6,13 @@ import {
   type CivilizationChronicleKind,
   type CivilizationCorrespondenceCursor,
   type CivilizationCorrespondenceReplyRelation,
+  type CivilizationContextAnalyticsBucketSize,
+  type CivilizationContextAnalyticsResult,
   type CivilizationLineageCursor,
   type CivilizationContextInspectionCursor,
   type CivilizationContextInspectionId,
   type CivilizationContextInspectionOutcome,
+  type CivilizationContextSuppressionReason,
   CivilizationCitizenNotFoundError,
   type CivilizationCitizenReassignmentRequest,
   type CivilizationCitizenTitleRequest,
@@ -469,6 +472,49 @@ export const fetchEnvironmentCivilizationNotesPage = Effect.fn(
   );
 });
 
+/** Read bounded metadata-only context analytics for one project and time range. */
+export const fetchEnvironmentCivilizationContextAnalytics = Effect.fn(
+  "clientRuntime.state.fetchEnvironmentCivilizationContextAnalytics",
+)(function* (
+  input: CivilizationEnvironmentRequestInput & {
+    readonly projectId: ProjectId;
+    readonly bucket: CivilizationContextAnalyticsBucketSize;
+    readonly from?: string | undefined;
+    readonly to?: string | undefined;
+    readonly providerInstanceId?: ProviderInstanceId | undefined;
+    readonly threadId?: ThreadId | undefined;
+    readonly outcome?: CivilizationContextInspectionOutcome | undefined;
+    readonly suppressionReason?: CivilizationContextSuppressionReason | undefined;
+  },
+) {
+  const query = {
+    projectId: input.projectId,
+    bucket: input.bucket,
+    ...(input.from === undefined ? {} : { from: input.from }),
+    ...(input.to === undefined ? {} : { to: input.to }),
+    ...(input.providerInstanceId === undefined
+      ? {}
+      : { providerInstanceId: input.providerInstanceId }),
+    ...(input.threadId === undefined ? {} : { threadId: input.threadId }),
+    ...(input.outcome === undefined ? {} : { outcome: input.outcome }),
+    ...(input.suppressionReason === undefined
+      ? {}
+      : { suppressionReason: input.suppressionReason }),
+  };
+  const endpoint = { query };
+  const result: CivilizationContextAnalyticsResult = yield* preserveCivilizationConfigErrors(
+    executeAuthenticatedEnvironmentHttpRequest({
+      ...input,
+      group: "civilization",
+      method: "GET",
+      url: (urls) => urls.contextAnalytics(endpoint),
+      timeoutMs: input.timeoutMs ?? DEFAULT_CIVILIZATION_READ_TIMEOUT_MS,
+      request: ({ client, headers }) => client.contextAnalytics({ ...endpoint, headers }),
+    }),
+  );
+  return result;
+});
+
 /** Read one metadata-only historical Civilization context-inspection page. */
 export const fetchEnvironmentCivilizationContextInspectionPage = Effect.fn(
   "clientRuntime.state.fetchEnvironmentCivilizationContextInspectionPage",
@@ -478,6 +524,9 @@ export const fetchEnvironmentCivilizationContextInspectionPage = Effect.fn(
     readonly threadId?: ThreadId | undefined;
     readonly providerInstanceId?: ProviderInstanceId | undefined;
     readonly outcome?: CivilizationContextInspectionOutcome | undefined;
+    readonly suppressionReason?: CivilizationContextSuppressionReason | undefined;
+    readonly from?: string | undefined;
+    readonly to?: string | undefined;
     readonly runId?: RunId | undefined;
     readonly attemptId?: RunAttemptId | undefined;
     readonly providerTurnOrdinal?: number | undefined;
@@ -492,6 +541,11 @@ export const fetchEnvironmentCivilizationContextInspectionPage = Effect.fn(
       ? {}
       : { providerInstanceId: input.providerInstanceId }),
     ...(input.outcome === undefined ? {} : { outcome: input.outcome }),
+    ...(input.suppressionReason === undefined
+      ? {}
+      : { suppressionReason: input.suppressionReason }),
+    ...(input.from === undefined ? {} : { from: input.from }),
+    ...(input.to === undefined ? {} : { to: input.to }),
     ...(input.runId === undefined ? {} : { runId: input.runId }),
     ...(input.attemptId === undefined ? {} : { attemptId: input.attemptId }),
     ...(input.providerTurnOrdinal === undefined
@@ -985,6 +1039,23 @@ export const fetchCurrentEnvironmentCivilizationNotesPage = Effect.fn(
   return yield* fetchEnvironmentCivilizationNotesPage({ ...input, ...auth });
 });
 
+export const fetchCurrentEnvironmentCivilizationContextAnalytics = Effect.fn(
+  "clientRuntime.state.fetchCurrentEnvironmentCivilizationContextAnalytics",
+)(function* (input: {
+  readonly prepared: PreparedConnection;
+  readonly projectId: ProjectId;
+  readonly bucket: CivilizationContextAnalyticsBucketSize;
+  readonly from?: string | undefined;
+  readonly to?: string | undefined;
+  readonly providerInstanceId?: ProviderInstanceId | undefined;
+  readonly threadId?: ThreadId | undefined;
+  readonly outcome?: CivilizationContextInspectionOutcome | undefined;
+  readonly suppressionReason?: CivilizationContextSuppressionReason | undefined;
+}) {
+  const auth = yield* currentCivilizationAuth;
+  return yield* fetchEnvironmentCivilizationContextAnalytics({ ...input, ...auth });
+});
+
 export const fetchCurrentEnvironmentCivilizationContextInspectionPage = Effect.fn(
   "clientRuntime.state.fetchCurrentEnvironmentCivilizationContextInspectionPage",
 )(function* (input: {
@@ -993,6 +1064,9 @@ export const fetchCurrentEnvironmentCivilizationContextInspectionPage = Effect.f
   readonly threadId?: ThreadId | undefined;
   readonly providerInstanceId?: ProviderInstanceId | undefined;
   readonly outcome?: CivilizationContextInspectionOutcome | undefined;
+  readonly suppressionReason?: CivilizationContextSuppressionReason | undefined;
+  readonly from?: string | undefined;
+  readonly to?: string | undefined;
   readonly runId?: RunId | undefined;
   readonly attemptId?: RunAttemptId | undefined;
   readonly providerTurnOrdinal?: number | undefined;

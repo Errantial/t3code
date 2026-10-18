@@ -838,6 +838,7 @@ it.effect("forwards Civilization turn context only after the ownership gate", ()
                 ),
               ),
             forExplicitRead: () => Effect.die("unused explicit Civilization context read"),
+            analytics: () => Effect.die("unused Civilization context analytics"),
             listInspections: () => Effect.die("unused Civilization inspection list"),
             readInspection: () => Effect.die("unused Civilization inspection detail"),
             markProviderStartAccepted: (input) =>

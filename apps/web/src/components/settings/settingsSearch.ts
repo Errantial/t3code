@@ -1002,6 +1002,14 @@ export const SETTINGS_SEARCH_ITEMS = [
     searchTerms: ["knowledge packet roster notes bounded context"],
   },
   {
+    id: "civilization-context-analytics",
+    title: "Civilization context analytics",
+    to: "/settings/civilization",
+    searchTerms: [
+      "analytics context trends outcomes suppression packet budget composition inspections observability",
+    ],
+  },
+  {
     id: "civilization-messaging",
     title: "Civilization messaging",
     to: "/settings/civilization",

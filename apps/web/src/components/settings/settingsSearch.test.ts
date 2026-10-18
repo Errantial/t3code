@@ -120,6 +120,8 @@ describe("searchSettings", () => {
     ["name pool", "civilization-names"],
     ["personality rendering", "civilization-personality"],
     ["context packet", "civilization-context"],
+    ["context analytics", "civilization-context-analytics"],
+    ["packet budget trends", "civilization-context-analytics"],
     ["agent mail", "civilization-messaging"],
     ["civilization diagnostics", "civilization-diagnostics"],
     ["provider capabilities", "civilization-providers"],

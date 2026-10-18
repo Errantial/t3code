@@ -38,6 +38,7 @@ import * as AdministrationService from "./AdministrationService.ts";
 import * as CitizenService from "./CitizenService.ts";
 import * as ChronicleService from "./ChronicleService.ts";
 import * as ConfigService from "./ConfigService.ts";
+import * as ContextService from "./ContextService.ts";
 import * as CivilizationHttp from "./http.ts";
 import * as KnowledgeService from "./KnowledgeService.ts";
 import * as MailService from "./MailService.ts";
@@ -118,6 +119,25 @@ const fakeChronicle = ChronicleService.CivilizationChronicleService.of({
     Effect.succeed({ projectId, revision: 0, awards: [], nextCursor: null, partial: false }),
   record: () => Effect.die("unused chronicle record"),
 });
+const fakeContext = ContextService.CivilizationContextService.of({
+  listCapabilities: () => Effect.succeed([]),
+  forTurn: () => Effect.die("unused Civilization context turn"),
+  forExplicitRead: () => Effect.die("unused explicit Civilization context read"),
+  analytics: ({ projectId, bucketSize }) =>
+    Effect.succeed({
+      projectId,
+      from: "1970-01-01T00:00:00.000Z",
+      to: "1970-01-01T00:00:00.000Z",
+      bucketSize,
+      appliedDiagnosticRetentionDays: 0,
+      buckets: [],
+    }),
+  listInspections: ({ projectId }) =>
+    Effect.succeed({ projectId, inspections: [], nextCursor: null, partial: false }),
+  readInspection: () => Effect.succeed(null),
+  markProviderStartAccepted: () => Effect.void,
+  markProviderStartFailed: () => Effect.void,
+});
 const fakeOperations = OperationsService.CivilizationOperationsService.of({
   exportProjectData: () => Effect.die("unused project data export"),
   previewPurge: () => Effect.die("unused purge preview"),
@@ -135,6 +155,7 @@ const makeRoutes = (
   mail: MailService.CivilizationMailServiceShape = fakeMail,
   operations: OperationsService.CivilizationOperationsServiceShape = fakeOperations,
   chronicle: ChronicleService.CivilizationChronicleServiceShape = fakeChronicle,
+  context: typeof fakeContext = fakeContext,
 ) => {
   const fakeCitizens = CitizenService.CivilizationCitizenService.of({
     adoptExisting: () =>
@@ -165,6 +186,7 @@ const makeRoutes = (
     ),
     Layer.provide(Layer.succeed(KnowledgeService.CivilizationKnowledgeService, knowledge)),
     Layer.provide(Layer.succeed(ChronicleService.CivilizationChronicleService, chronicle)),
+    Layer.provide(Layer.succeed(ContextService.CivilizationContextService, context)),
     Layer.provide(Layer.succeed(MailService.CivilizationMailService, mail)),
     Layer.provide(Layer.succeed(OperationsService.CivilizationOperationsService, operations)),
     Layer.provide(HttpPlatform.layer),
@@ -276,6 +298,22 @@ it.effect(
               entries: [],
             });
 
+            const analyticsResponse = await server.handler(
+              new Request(
+                "http://127.0.0.1/api/civilization/context-analytics?projectId=project%3Aread-only&bucket=day",
+              ),
+              requestContext,
+            );
+            expect(analyticsResponse.status).toBe(200);
+            expect(await analyticsResponse.json()).toEqual({
+              projectId: "project:read-only",
+              from: "1970-01-01T00:00:00.000Z",
+              to: "1970-01-01T00:00:00.000Z",
+              bucketSize: "day",
+              appliedDiagnosticRetentionDays: 0,
+              buckets: [],
+            });
+
             const inspectionListResponse = await server.handler(
               new Request(
                 "http://127.0.0.1/api/civilization/context-inspections?projectId=project%3Aread-only&limit=25",
@@ -385,6 +423,103 @@ it.effect("rejects malformed Civilization context-inspector numeric filters", ()
             );
             expect(response.status).toBe(400);
           }
+        }),
+      (server) => Effect.promise(() => server.dispose()),
+    );
+  }),
+);
+
+it.effect("maps bounded Civilization context analytics filters under read scope", () =>
+  Effect.gen(function* () {
+    const adoptionCalls = yield* Ref.make(0);
+    const analyticsInput = yield* Ref.make<ContextService.CivilizationContextAnalyticsInput | null>(
+      null,
+    );
+    const inspectionInput =
+      yield* Ref.make<ContextService.CivilizationContextInspectionListInput | null>(null);
+    const projectId = ProjectId.make("project:civilization:http-analytics");
+    const providerInstanceId = ProviderInstanceId.make("codex-main");
+    const threadId = ThreadId.make("thread:civilization:http-analytics");
+    const context = ContextService.CivilizationContextService.of({
+      ...fakeContext,
+      analytics: (input) =>
+        Ref.set(analyticsInput, input).pipe(
+          Effect.as({
+            projectId,
+            from: "2026-10-17T00:00:00.000Z",
+            to: "2026-10-18T00:00:00.000Z",
+            bucketSize: "hour" as const,
+            appliedDiagnosticRetentionDays: 7,
+            buckets: [],
+          }),
+        ),
+      listInspections: (input) =>
+        Ref.set(inspectionInput, input).pipe(
+          Effect.as({ projectId, inspections: [], nextCursor: null, partial: false }),
+        ),
+    });
+
+    return yield* Effect.acquireUseRelease(
+      Effect.sync(() =>
+        HttpRouter.toWebHandler(
+          makeRoutes(
+            adoptionCalls,
+            ["orchestration:read"],
+            fakeKnowledge,
+            fakeMail,
+            fakeOperations,
+            fakeChronicle,
+            context,
+          ),
+          { disableLogger: true },
+        ),
+      ),
+      (server) =>
+        Effect.gen(function* () {
+          const response = yield* Effect.promise(() =>
+            server.handler(
+              new Request(
+                `http://127.0.0.1/api/civilization/context-analytics?projectId=${encodeURIComponent(projectId)}&bucket=hour&from=${encodeURIComponent("2026-10-17T00:00:00.000Z")}&to=${encodeURIComponent("2026-10-18T00:00:00.000Z")}&providerInstanceId=${encodeURIComponent(providerInstanceId)}&threadId=${encodeURIComponent(threadId)}&outcome=skipped&suppressionReason=provider_unsupported`,
+              ),
+              requestContext,
+            ),
+          );
+          expect(response.status).toBe(200);
+          expect(yield* Effect.promise(() => response.json())).toMatchObject({
+            projectId,
+            bucketSize: "hour",
+            appliedDiagnosticRetentionDays: 7,
+          });
+          expect(yield* Ref.get(analyticsInput)).toEqual({
+            projectId,
+            bucketSize: "hour",
+            from: "2026-10-17T00:00:00.000Z",
+            to: "2026-10-18T00:00:00.000Z",
+            providerInstanceId,
+            threadId,
+            outcome: "skipped",
+            suppressionReason: "provider_unsupported",
+          });
+
+          const inspectionResponse = yield* Effect.promise(() =>
+            server.handler(
+              new Request(
+                `http://127.0.0.1/api/civilization/context-inspections?projectId=${encodeURIComponent(projectId)}&from=${encodeURIComponent("2026-10-17T00:00:00.000Z")}&to=${encodeURIComponent("2026-10-18T00:00:00.000Z")}&providerInstanceId=${encodeURIComponent(providerInstanceId)}&threadId=${encodeURIComponent(threadId)}&outcome=skipped&suppressionReason=provider_unsupported&limit=25`,
+              ),
+              requestContext,
+            ),
+          );
+          expect(inspectionResponse.status).toBe(200);
+          expect(yield* Ref.get(inspectionInput)).toEqual({
+            projectId,
+            from: "2026-10-17T00:00:00.000Z",
+            to: "2026-10-18T00:00:00.000Z",
+            providerInstanceId,
+            threadId,
+            outcome: "skipped",
+            suppressionReason: "provider_unsupported",
+            limit: 25,
+          });
         }),
       (server) => Effect.promise(() => server.dispose()),
     );

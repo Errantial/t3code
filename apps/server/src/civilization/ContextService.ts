@@ -2,6 +2,9 @@
 import {
   CivilizationContextInspectionCursor,
   CivilizationContextInspectionId,
+  type CivilizationContextAnalyticsBucket,
+  type CivilizationContextAnalyticsBucketSize,
+  type CivilizationContextAnalyticsResult,
   type CivilizationContextBudget,
   type CivilizationContextComposition,
   type CivilizationContextInspectionDetail,
@@ -27,6 +30,7 @@ import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as NodeCrypto from "node:crypto";
@@ -161,11 +165,25 @@ export interface CivilizationContextInspectionListInput {
   readonly threadId?: ThreadId | undefined;
   readonly providerInstanceId?: ProviderInstanceId | undefined;
   readonly outcome?: CivilizationContextInspectionOutcome | undefined;
+  readonly suppressionReason?: CivilizationContextSuppressionReason | undefined;
+  readonly from?: string | undefined;
+  readonly to?: string | undefined;
   readonly runId?: RunId | undefined;
   readonly attemptId?: RunAttemptId | undefined;
   readonly providerTurnOrdinal?: number | undefined;
   readonly cursor?: typeof CivilizationContextInspectionCursor.Type | undefined;
   readonly limit?: number | undefined;
+}
+
+export interface CivilizationContextAnalyticsInput {
+  readonly projectId: ProjectId;
+  readonly bucketSize: CivilizationContextAnalyticsBucketSize;
+  readonly from?: string | undefined;
+  readonly to?: string | undefined;
+  readonly providerInstanceId?: ProviderInstanceId | undefined;
+  readonly threadId?: ThreadId | undefined;
+  readonly outcome?: CivilizationContextInspectionOutcome | undefined;
+  readonly suppressionReason?: CivilizationContextSuppressionReason | undefined;
 }
 
 export interface CivilizationContextInspectionTurnKey {
@@ -176,8 +194,90 @@ export interface CivilizationContextInspectionTurnKey {
 
 export class CivilizationContextInspectionInvalidError extends Schema.TaggedError<CivilizationContextInspectionInvalidError>()(
   "CivilizationContextInspectionInvalidError",
-  { reason: Schema.Literals(["invalid_cursor", "invalid_limit"]) },
+  {
+    reason: Schema.Literals([
+      "invalid_cursor",
+      "invalid_limit",
+      "invalid_time_range",
+      "too_many_buckets",
+      "response_too_large",
+    ]),
+  },
 ) {}
+
+// Rich buckets carry multiple fixed histograms and sparse suppression counts.
+// Keep the request cardinality conservative and enforce the configured response
+// byte ceiling on the final result as a second, data-dependent bound.
+const ANALYTICS_MAX_BUCKETS = 49;
+const DEFAULT_DIAGNOSTIC_RETENTION_DAYS = 7;
+const HOUR_MS = 60 * 60 * 1000;
+const DAY_MS = 24 * HOUR_MS;
+
+type AnalyticsRow = {
+  readonly bucket_start: string;
+  readonly bucket_end: string;
+  readonly total_inspections: number;
+  readonly outcome_skipped: number;
+  readonly outcome_built: number;
+  readonly outcome_provider_start_accepted: number;
+  readonly outcome_provider_start_failed: number;
+  readonly suppression_participation_disabled: number;
+  readonly suppression_emergency_off: number;
+  readonly suppression_citizen_not_adopted: number;
+  readonly suppression_citizen_deleted: number;
+  readonly suppression_citizen_closed: number;
+  readonly suppression_observed_agent_read_only: number;
+  readonly suppression_provider_unsupported: number;
+  readonly suppression_provider_continuation: number;
+  readonly suppression_provider_command: number;
+  readonly suppression_claude_provider_continuation: number;
+  readonly suppression_claude_slash_command: number;
+  readonly suppression_packet_budget_zero: number;
+  readonly suppression_packet_budget_too_small: number;
+  readonly packet_zero: number;
+  readonly packet_low: number;
+  readonly packet_medium: number;
+  readonly packet_high: number;
+  readonly packet_over: number;
+  readonly utilization_zero: number;
+  readonly utilization_low: number;
+  readonly utilization_medium: number;
+  readonly utilization_high: number;
+  readonly utilization_over: number;
+  readonly roster_candidates: number;
+  readonly roster_included: number;
+  readonly note_candidates: number;
+  readonly note_included: number;
+  readonly inbox_candidates: number;
+  readonly inbox_included: number;
+};
+
+const normalizeAnalyticsTime = (value: string | undefined): string | undefined => {
+  if (value === undefined) return undefined;
+  const parsed = DateTime.make(value);
+  return Option.isNone(parsed) ? undefined : DateTime.formatIso(parsed.value);
+};
+
+const suppressionEntries = (
+  row: AnalyticsRow,
+): CivilizationContextAnalyticsBucket["suppressions"] => {
+  const entries: ReadonlyArray<readonly [CivilizationContextSuppressionReason, number]> = [
+    ["participation_disabled", row.suppression_participation_disabled],
+    ["emergency_off", row.suppression_emergency_off],
+    ["citizen_not_adopted", row.suppression_citizen_not_adopted],
+    ["citizen_deleted", row.suppression_citizen_deleted],
+    ["citizen_closed", row.suppression_citizen_closed],
+    ["observed_agent_read_only", row.suppression_observed_agent_read_only],
+    ["provider_unsupported", row.suppression_provider_unsupported],
+    ["provider_continuation", row.suppression_provider_continuation],
+    ["provider_command", row.suppression_provider_command],
+    ["claude_provider_continuation", row.suppression_claude_provider_continuation],
+    ["claude_slash_command", row.suppression_claude_slash_command],
+    ["packet_budget_zero", row.suppression_packet_budget_zero],
+    ["packet_budget_too_small", row.suppression_packet_budget_too_small],
+  ];
+  return entries.filter(([, count]) => count > 0).map(([reason, count]) => ({ reason, count }));
+};
 
 type InspectionCursorPayload = {
   readonly createdAt: string;
@@ -231,6 +331,11 @@ type InspectionRow = {
   readonly provider_start_at: string | null;
 };
 
+type InspectionSummaryRow = Omit<
+  InspectionRow,
+  "packet_text" | "selected_citizen_ids_json" | "selected_note_ids_json" | "selected_inbox_ids_json"
+>;
+
 const inspectionIdFor = (input: CivilizationContextForTurnInput) =>
   CivilizationContextInspectionId.make(
     `civilization-inspection:${input.runId}:${input.attemptId}:${input.providerTurnOrdinal}`,
@@ -281,7 +386,7 @@ const emptyBudget = (limitBytes: number): CivilizationContextBudget => ({
   unusedBytes: Math.max(0, limitBytes),
 });
 
-const inspectionTransport = (row: InspectionRow) =>
+const inspectionTransport = (row: InspectionSummaryRow) =>
   row.transport_kind === null || row.transport_description === null || row.transport_trust === null
     ? null
     : ({
@@ -290,7 +395,7 @@ const inspectionTransport = (row: InspectionRow) =>
         trust: row.transport_trust,
       } as const);
 
-const inspectionSummary = (row: InspectionRow): CivilizationContextInspectionSummary => ({
+const inspectionSummary = (row: InspectionSummaryRow): CivilizationContextInspectionSummary => ({
   inspectionId: CivilizationContextInspectionId.make(row.inspection_id),
   projectId: row.project_id,
   threadId: row.thread_id,
@@ -473,20 +578,51 @@ const make = Effect.gen(function* () {
       return yield* new CivilizationContextInspectionInvalidError({ reason: "invalid_limit" });
     }
     const cursor = input.cursor === undefined ? null : yield* decodeInspectionCursor(input.cursor);
-    const rows = yield* sql<InspectionRow>`
-      SELECT * FROM civilization_context_inspections
-      WHERE project_id = ${input.projectId}
-        AND (${input.threadId ?? null} IS NULL OR thread_id = ${input.threadId ?? null})
-        AND (${input.providerInstanceId ?? null} IS NULL OR provider_instance_id = ${input.providerInstanceId ?? null})
-        AND (${input.outcome ?? null} IS NULL OR outcome = ${input.outcome ?? null})
-        AND (${input.runId ?? null} IS NULL OR run_id = ${input.runId ?? null})
-        AND (${input.attemptId ?? null} IS NULL OR attempt_id = ${input.attemptId ?? null})
-        AND (${input.providerTurnOrdinal ?? null} IS NULL OR provider_turn_ordinal = ${input.providerTurnOrdinal ?? null})
-        AND (
-          ${cursor?.createdAt ?? null} IS NULL
-          OR created_at < ${cursor?.createdAt ?? null}
-          OR (created_at = ${cursor?.createdAt ?? null} AND inspection_id < ${cursor?.inspectionId ?? null})
-        )
+    const from = input.from === undefined ? undefined : normalizeAnalyticsTime(input.from);
+    const to = input.to === undefined ? undefined : normalizeAnalyticsTime(input.to);
+    if (
+      (input.from !== undefined && from === undefined) ||
+      (input.to !== undefined && to === undefined)
+    ) {
+      return yield* new CivilizationContextInspectionInvalidError({ reason: "invalid_time_range" });
+    }
+    if (from !== undefined && to !== undefined && Date.parse(from) >= Date.parse(to)) {
+      return yield* new CivilizationContextInspectionInvalidError({ reason: "invalid_time_range" });
+    }
+    const rows = yield* sql<InspectionSummaryRow>`
+      SELECT
+        inspection_id, context_reference_id, project_id, thread_id, run_id, attempt_id,
+        provider_turn_ordinal, provider_instance_id, provider_driver, outcome, suppression_reason,
+        diagnostics_mode, packet_text_state, transport_kind, transport_description, transport_trust,
+        packet_revision, packet_hash, packet_bytes, packet_budget_bytes, required_bytes,
+        roster_bytes, note_bytes, inbox_bytes, unused_bytes, roster_candidates, roster_included,
+        note_candidates, note_included, inbox_candidates, inbox_included, environment_revision,
+        project_revision, citizen_revision, census_revision, notes_revision, inbox_revision,
+        created_at, updated_at, provider_start_at
+      FROM civilization_context_inspections
+      WHERE ${sql.and([
+        sql`project_id = ${input.projectId}`,
+        ...(input.threadId === undefined ? [] : [sql`thread_id = ${input.threadId}`]),
+        ...(input.providerInstanceId === undefined
+          ? []
+          : [sql`provider_instance_id = ${input.providerInstanceId}`]),
+        ...(input.outcome === undefined ? [] : [sql`outcome = ${input.outcome}`]),
+        ...(input.suppressionReason === undefined
+          ? []
+          : [sql`suppression_reason = ${input.suppressionReason}`]),
+        ...(from === undefined ? [] : [sql`created_at >= ${from}`]),
+        ...(to === undefined ? [] : [sql`created_at < ${to}`]),
+        ...(input.runId === undefined ? [] : [sql`run_id = ${input.runId}`]),
+        ...(input.attemptId === undefined ? [] : [sql`attempt_id = ${input.attemptId}`]),
+        ...(input.providerTurnOrdinal === undefined
+          ? []
+          : [sql`provider_turn_ordinal = ${input.providerTurnOrdinal}`]),
+        ...(cursor === null
+          ? []
+          : [
+              sql`(created_at < ${cursor.createdAt} OR (created_at = ${cursor.createdAt} AND inspection_id < ${cursor.inspectionId}))`,
+            ]),
+      ])}
       ORDER BY created_at DESC, inspection_id DESC
       LIMIT ${limit + 1}
     `;
@@ -500,6 +636,299 @@ const make = Effect.gen(function* () {
           : null,
       partial: rows.length > limit,
     } satisfies CivilizationContextInspectionPage;
+  });
+
+  const analytics = Effect.fn("CivilizationContextService.analytics")(function* (
+    input: CivilizationContextAnalyticsInput,
+  ) {
+    const effective = yield* config.getEffective(input.projectId);
+    const state = (yield* sql<{ readonly applied_diagnostic_retention_days: number }>`
+      SELECT applied_diagnostic_retention_days
+      FROM civilization_project_state
+      WHERE project_id = ${input.projectId}
+      LIMIT 1
+    `)[0];
+    const retentionDays = Math.max(
+      state?.applied_diagnostic_retention_days ?? DEFAULT_DIAGNOSTIC_RETENTION_DAYS,
+      effective.config.operations.diagnosticRetentionDays,
+    );
+    const now = DateTime.formatIso(yield* DateTime.now);
+    const cutoff = (yield* sql<{ readonly cutoff: string }>`
+      SELECT strftime(
+        '%Y-%m-%dT%H:%M:%fZ',
+        ${now},
+        '-' || ${retentionDays} || ' days'
+      ) AS cutoff
+    `)[0]!.cutoff;
+    const normalizedFrom = normalizeAnalyticsTime(input.from);
+    const normalizedTo = normalizeAnalyticsTime(input.to);
+    if (
+      (input.from !== undefined && normalizedFrom === undefined) ||
+      (input.to !== undefined && normalizedTo === undefined) ||
+      (normalizedFrom !== undefined && normalizedTo !== undefined && normalizedFrom >= normalizedTo)
+    ) {
+      return yield* new CivilizationContextInspectionInvalidError({ reason: "invalid_time_range" });
+    }
+    const from = normalizedFrom === undefined || normalizedFrom < cutoff ? cutoff : normalizedFrom;
+    const to = normalizedTo === undefined || normalizedTo > now ? now : normalizedTo;
+    if (from >= to) {
+      return {
+        projectId: input.projectId,
+        from,
+        to: from,
+        bucketSize: input.bucketSize,
+        appliedDiagnosticRetentionDays: retentionDays,
+        buckets: [],
+      } satisfies CivilizationContextAnalyticsResult;
+    }
+    const fromMs = Date.parse(from);
+    const toMs = Date.parse(to);
+    const bucketMs = input.bucketSize === "hour" ? HOUR_MS : DAY_MS;
+    const firstBucketMs = Math.floor(fromMs / bucketMs) * bucketMs;
+    const lastBucketMs = Math.floor((toMs - 1) / bucketMs) * bucketMs;
+    const bucketCount = Math.floor((lastBucketMs - firstBucketMs) / bucketMs) + 1;
+    if (bucketCount > ANALYTICS_MAX_BUCKETS) {
+      return yield* new CivilizationContextInspectionInvalidError({ reason: "too_many_buckets" });
+    }
+
+    const queryRaw = (rawFrom: string, rawTo: string, exclusiveLower: boolean) => {
+      const lowerBound = exclusiveLower
+        ? sql`created_at > ${rawFrom}`
+        : sql`created_at >= ${rawFrom}`;
+      // IMPORTANT: This projection intentionally names only aggregate-safe columns.
+      // Packet text/hash/revision and selected-id JSON never cross this SQL boundary.
+      return sql<AnalyticsRow>`
+        WITH filtered AS (
+          SELECT
+            CASE
+              WHEN ${input.bucketSize} = 'hour'
+                THEN substr(created_at, 1, 13) || ':00:00.000Z'
+              ELSE substr(created_at, 1, 10) || 'T00:00:00.000Z'
+            END AS bucket_start,
+            outcome,
+            suppression_reason,
+            packet_bytes,
+            packet_budget_bytes,
+            roster_candidates,
+            roster_included,
+            note_candidates,
+            note_included,
+            inbox_candidates,
+            inbox_included
+          FROM civilization_context_inspections
+          WHERE ${sql.and([
+            sql`project_id = ${input.projectId}`,
+            lowerBound,
+            sql`created_at < ${rawTo}`,
+            ...(input.providerInstanceId === undefined
+              ? []
+              : [sql`provider_instance_id = ${input.providerInstanceId}`]),
+            ...(input.threadId === undefined ? [] : [sql`thread_id = ${input.threadId}`]),
+            ...(input.outcome === undefined ? [] : [sql`outcome = ${input.outcome}`]),
+            ...(input.suppressionReason === undefined
+              ? []
+              : [sql`suppression_reason = ${input.suppressionReason}`]),
+          ])}
+        )
+        SELECT
+          bucket_start,
+          CASE
+            WHEN ${input.bucketSize} = 'hour'
+              THEN strftime('%Y-%m-%dT%H:%M:%fZ', bucket_start, '+1 hour')
+            ELSE strftime('%Y-%m-%dT%H:%M:%fZ', bucket_start, '+1 day')
+          END AS bucket_end,
+          COUNT(*) AS total_inspections,
+          SUM(CASE WHEN outcome = 'skipped' THEN 1 ELSE 0 END) AS outcome_skipped,
+          SUM(CASE WHEN outcome = 'built' THEN 1 ELSE 0 END) AS outcome_built,
+          SUM(CASE WHEN outcome = 'provider_start_accepted' THEN 1 ELSE 0 END) AS outcome_provider_start_accepted,
+          SUM(CASE WHEN outcome = 'provider_start_failed' THEN 1 ELSE 0 END) AS outcome_provider_start_failed,
+          SUM(CASE WHEN suppression_reason = 'participation_disabled' THEN 1 ELSE 0 END) AS suppression_participation_disabled,
+          SUM(CASE WHEN suppression_reason = 'emergency_off' THEN 1 ELSE 0 END) AS suppression_emergency_off,
+          SUM(CASE WHEN suppression_reason = 'citizen_not_adopted' THEN 1 ELSE 0 END) AS suppression_citizen_not_adopted,
+          SUM(CASE WHEN suppression_reason = 'citizen_deleted' THEN 1 ELSE 0 END) AS suppression_citizen_deleted,
+          SUM(CASE WHEN suppression_reason = 'citizen_closed' THEN 1 ELSE 0 END) AS suppression_citizen_closed,
+          SUM(CASE WHEN suppression_reason = 'observed_agent_read_only' THEN 1 ELSE 0 END) AS suppression_observed_agent_read_only,
+          SUM(CASE WHEN suppression_reason = 'provider_unsupported' THEN 1 ELSE 0 END) AS suppression_provider_unsupported,
+          SUM(CASE WHEN suppression_reason = 'provider_continuation' THEN 1 ELSE 0 END) AS suppression_provider_continuation,
+          SUM(CASE WHEN suppression_reason = 'provider_command' THEN 1 ELSE 0 END) AS suppression_provider_command,
+          SUM(CASE WHEN suppression_reason = 'claude_provider_continuation' THEN 1 ELSE 0 END) AS suppression_claude_provider_continuation,
+          SUM(CASE WHEN suppression_reason = 'claude_slash_command' THEN 1 ELSE 0 END) AS suppression_claude_slash_command,
+          SUM(CASE WHEN suppression_reason = 'packet_budget_zero' THEN 1 ELSE 0 END) AS suppression_packet_budget_zero,
+          SUM(CASE WHEN suppression_reason = 'packet_budget_too_small' THEN 1 ELSE 0 END) AS suppression_packet_budget_too_small,
+          SUM(CASE WHEN packet_bytes = 0 THEN 1 ELSE 0 END) AS packet_zero,
+          SUM(CASE WHEN packet_bytes > 0 AND packet_bytes <= 1024 THEN 1 ELSE 0 END) AS packet_low,
+          SUM(CASE WHEN packet_bytes > 1024 AND packet_bytes <= 4096 THEN 1 ELSE 0 END) AS packet_medium,
+          SUM(CASE WHEN packet_bytes > 4096 AND packet_bytes <= 8192 THEN 1 ELSE 0 END) AS packet_high,
+          SUM(CASE WHEN packet_bytes > 8192 THEN 1 ELSE 0 END) AS packet_over,
+          SUM(CASE WHEN packet_bytes = 0 THEN 1 ELSE 0 END) AS utilization_zero,
+          SUM(CASE WHEN packet_bytes > 0 AND packet_budget_bytes > 0 AND packet_bytes * 100 <= packet_budget_bytes * 50 THEN 1 ELSE 0 END) AS utilization_low,
+          SUM(CASE WHEN packet_budget_bytes > 0 AND packet_bytes * 100 > packet_budget_bytes * 50 AND packet_bytes * 100 <= packet_budget_bytes * 80 THEN 1 ELSE 0 END) AS utilization_medium,
+          SUM(CASE WHEN packet_budget_bytes > 0 AND packet_bytes * 100 > packet_budget_bytes * 80 AND packet_bytes <= packet_budget_bytes THEN 1 ELSE 0 END) AS utilization_high,
+          SUM(CASE WHEN packet_bytes > 0 AND (packet_budget_bytes = 0 OR packet_bytes > packet_budget_bytes) THEN 1 ELSE 0 END) AS utilization_over,
+          SUM(roster_candidates) AS roster_candidates,
+          SUM(roster_included) AS roster_included,
+          SUM(note_candidates) AS note_candidates,
+          SUM(note_included) AS note_included,
+          SUM(inbox_candidates) AS inbox_candidates,
+          SUM(inbox_included) AS inbox_included
+        FROM filtered
+        GROUP BY bucket_start
+        ORDER BY bucket_start ASC
+      `;
+    };
+
+    const queryHourlyAggregate = (aggregateFrom: string, aggregateTo: string) => sql<AnalyticsRow>`
+      SELECT
+        CASE
+          WHEN ${input.bucketSize} = 'hour' THEN bucket_start
+          ELSE substr(bucket_start, 1, 10) || 'T00:00:00.000Z'
+        END AS bucket_start,
+        CASE
+          WHEN ${input.bucketSize} = 'hour'
+            THEN strftime('%Y-%m-%dT%H:%M:%fZ', bucket_start, '+1 hour')
+          ELSE strftime('%Y-%m-%dT%H:%M:%fZ', substr(bucket_start, 1, 10) || 'T00:00:00.000Z', '+1 day')
+        END AS bucket_end,
+        SUM(inspection_count) AS total_inspections,
+        SUM(CASE WHEN outcome = 'skipped' THEN inspection_count ELSE 0 END) AS outcome_skipped,
+        SUM(CASE WHEN outcome = 'built' THEN inspection_count ELSE 0 END) AS outcome_built,
+        SUM(CASE WHEN outcome = 'provider_start_accepted' THEN inspection_count ELSE 0 END) AS outcome_provider_start_accepted,
+        SUM(CASE WHEN outcome = 'provider_start_failed' THEN inspection_count ELSE 0 END) AS outcome_provider_start_failed,
+        SUM(CASE WHEN suppression_reason = 'participation_disabled' THEN inspection_count ELSE 0 END) AS suppression_participation_disabled,
+        SUM(CASE WHEN suppression_reason = 'emergency_off' THEN inspection_count ELSE 0 END) AS suppression_emergency_off,
+        SUM(CASE WHEN suppression_reason = 'citizen_not_adopted' THEN inspection_count ELSE 0 END) AS suppression_citizen_not_adopted,
+        SUM(CASE WHEN suppression_reason = 'citizen_deleted' THEN inspection_count ELSE 0 END) AS suppression_citizen_deleted,
+        SUM(CASE WHEN suppression_reason = 'citizen_closed' THEN inspection_count ELSE 0 END) AS suppression_citizen_closed,
+        SUM(CASE WHEN suppression_reason = 'observed_agent_read_only' THEN inspection_count ELSE 0 END) AS suppression_observed_agent_read_only,
+        SUM(CASE WHEN suppression_reason = 'provider_unsupported' THEN inspection_count ELSE 0 END) AS suppression_provider_unsupported,
+        SUM(CASE WHEN suppression_reason = 'provider_continuation' THEN inspection_count ELSE 0 END) AS suppression_provider_continuation,
+        SUM(CASE WHEN suppression_reason = 'provider_command' THEN inspection_count ELSE 0 END) AS suppression_provider_command,
+        SUM(CASE WHEN suppression_reason = 'claude_provider_continuation' THEN inspection_count ELSE 0 END) AS suppression_claude_provider_continuation,
+        SUM(CASE WHEN suppression_reason = 'claude_slash_command' THEN inspection_count ELSE 0 END) AS suppression_claude_slash_command,
+        SUM(CASE WHEN suppression_reason = 'packet_budget_zero' THEN inspection_count ELSE 0 END) AS suppression_packet_budget_zero,
+        SUM(CASE WHEN suppression_reason = 'packet_budget_too_small' THEN inspection_count ELSE 0 END) AS suppression_packet_budget_too_small,
+        SUM(packet_zero) AS packet_zero,
+        SUM(packet_low) AS packet_low,
+        SUM(packet_medium) AS packet_medium,
+        SUM(packet_high) AS packet_high,
+        SUM(packet_over) AS packet_over,
+        SUM(utilization_zero) AS utilization_zero,
+        SUM(utilization_low) AS utilization_low,
+        SUM(utilization_medium) AS utilization_medium,
+        SUM(utilization_high) AS utilization_high,
+        SUM(utilization_over) AS utilization_over,
+        SUM(roster_candidates) AS roster_candidates,
+        SUM(roster_included) AS roster_included,
+        SUM(note_candidates) AS note_candidates,
+        SUM(note_included) AS note_included,
+        SUM(inbox_candidates) AS inbox_candidates,
+        SUM(inbox_included) AS inbox_included
+      FROM civilization_context_analytics_hourly
+      WHERE ${sql.and([
+        sql`project_id = ${input.projectId}`,
+        sql`bucket_start >= ${aggregateFrom}`,
+        sql`bucket_start < ${aggregateTo}`,
+        ...(input.providerInstanceId === undefined
+          ? []
+          : [sql`provider_instance_id = ${input.providerInstanceId}`]),
+        ...(input.outcome === undefined ? [] : [sql`outcome = ${input.outcome}`]),
+        ...(input.suppressionReason === undefined
+          ? []
+          : [sql`suppression_reason = ${input.suppressionReason}`]),
+      ])}
+      GROUP BY 1
+      ORDER BY 1 ASC
+    `;
+
+    let rows: ReadonlyArray<AnalyticsRow>;
+    if (input.threadId !== undefined) {
+      rows = yield* queryRaw(from, to, from === cutoff);
+    } else {
+      const firstFullBucketMs = Math.ceil(fromMs / bucketMs) * bucketMs;
+      const forceRawFirstBucket = from === cutoff && fromMs === firstBucketMs;
+      const aggregateFromMs = forceRawFirstBucket
+        ? firstFullBucketMs + bucketMs
+        : firstFullBucketMs;
+      const aggregateToMs = Math.floor(toMs / bucketMs) * bucketMs;
+      const leftRawToMs = Math.min(toMs, aggregateFromMs);
+      const leftRows =
+        fromMs < leftRawToMs
+          ? yield* queryRaw(
+              from,
+              DateTime.formatIso(DateTime.makeUnsafe(leftRawToMs)),
+              from === cutoff,
+            )
+          : [];
+      const aggregateRows =
+        aggregateFromMs < aggregateToMs
+          ? yield* queryHourlyAggregate(
+              DateTime.formatIso(DateTime.makeUnsafe(aggregateFromMs)),
+              DateTime.formatIso(DateTime.makeUnsafe(aggregateToMs)),
+            )
+          : [];
+      const rightRawFromMs = Math.max(leftRawToMs, aggregateToMs, fromMs);
+      const rightRows =
+        rightRawFromMs < toMs
+          ? yield* queryRaw(DateTime.formatIso(DateTime.makeUnsafe(rightRawFromMs)), to, false)
+          : [];
+      rows = [...leftRows, ...aggregateRows, ...rightRows].sort((left, right) =>
+        left.bucket_start.localeCompare(right.bucket_start),
+      );
+    }
+    const result = {
+      projectId: input.projectId,
+      from,
+      to,
+      bucketSize: input.bucketSize,
+      appliedDiagnosticRetentionDays: retentionDays,
+      buckets: rows.map((row) => ({
+        bucketStart: row.bucket_start,
+        bucketEnd: row.bucket_end,
+        totalInspections: row.total_inspections,
+        outcomes: {
+          skipped: row.outcome_skipped,
+          built: row.outcome_built,
+          providerStartAccepted: row.outcome_provider_start_accepted,
+          providerStartFailed: row.outcome_provider_start_failed,
+        },
+        suppressions: suppressionEntries(row),
+        packetSize: {
+          zero: row.packet_zero,
+          low: row.packet_low,
+          medium: row.packet_medium,
+          high: row.packet_high,
+          over: row.packet_over,
+        },
+        budgetUtilization: {
+          zero: row.utilization_zero,
+          low: row.utilization_low,
+          medium: row.utilization_medium,
+          high: row.utilization_high,
+          over: row.utilization_over,
+        },
+        roster: {
+          candidates: row.roster_candidates,
+          included: row.roster_included,
+          omitted: row.roster_candidates - row.roster_included,
+        },
+        notes: {
+          candidates: row.note_candidates,
+          included: row.note_included,
+          omitted: row.note_candidates - row.note_included,
+        },
+        inbox: {
+          candidates: row.inbox_candidates,
+          included: row.inbox_included,
+          omitted: row.inbox_candidates - row.inbox_included,
+        },
+      })),
+    } satisfies CivilizationContextAnalyticsResult;
+    if (
+      Buffer.byteLength(JSON.stringify(result), "utf8") >
+      effective.config.operations.responseBodyBytes
+    ) {
+      return yield* new CivilizationContextInspectionInvalidError({ reason: "response_too_large" });
+    }
+    return result;
   });
 
   const readInspection = Effect.fn("CivilizationContextService.readInspection")(function* (input: {
@@ -1362,6 +1791,7 @@ const make = Effect.gen(function* () {
     listCapabilities,
     forTurn,
     forExplicitRead,
+    analytics,
     listInspections,
     readInspection,
     markProviderStartAccepted,
@@ -1408,6 +1838,15 @@ const unavailableContextService = {
       nextCursor: null,
       partial: false,
     } satisfies CivilizationContextInspectionPage),
+  analytics: (input: CivilizationContextAnalyticsInput) =>
+    Effect.succeed({
+      projectId: input.projectId,
+      from: "1970-01-01T00:00:00.000Z",
+      to: "1970-01-01T00:00:00.000Z",
+      bucketSize: input.bucketSize,
+      appliedDiagnosticRetentionDays: 0,
+      buckets: [],
+    } satisfies CivilizationContextAnalyticsResult),
   readInspection: () => Effect.succeed(null),
   markProviderStartAccepted: () => Effect.void,
   markProviderStartFailed: () => Effect.void,

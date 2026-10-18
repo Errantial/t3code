@@ -10,7 +10,7 @@ import {
 } from "@t3tools/contracts";
 import { useAtomSet } from "@effect/atom-react";
 import { RefreshCwIcon } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import {
   applyCivilizationConfigFanout,
@@ -46,6 +46,7 @@ import {
   CivilizationNamePoolEditorDialog,
   CivilizationProfilePoolEditorDialog,
 } from "./CivilizationPoolEditorDialogs";
+import { CivilizationContextAnalytics } from "./CivilizationContextAnalytics";
 import { CivilizationContextInspector } from "./CivilizationContextInspector";
 import { CivilizationProjectInspection } from "./CivilizationProjectInspection";
 import { SettingsPageContainer, SettingsRow, SettingsSection } from "./settingsLayout";
@@ -650,6 +651,16 @@ function CivilizationTargetOverview({
 }) {
   const canRead = useEnvironmentScope(target.environmentId, AuthOrchestrationReadScope);
   const canWrite = useEnvironmentScope(target.environmentId, AuthSettingsWriteScope);
+  const initialInspectionFiltersKey = JSON.stringify(initialInspectionFilters ?? {});
+  const lastInitialInspectionFiltersKey = useRef(initialInspectionFiltersKey);
+  const [inspectionFilters, setInspectionFilters] = useState<CivilizationContextInspectionFilters>(
+    () => initialInspectionFilters ?? {},
+  );
+  useEffect(() => {
+    if (lastInitialInspectionFiltersKey.current === initialInspectionFiltersKey) return;
+    lastInitialInspectionFiltersKey.current = initialInspectionFiltersKey;
+    setInspectionFilters(initialInspectionFilters ?? {});
+  }, [initialInspectionFilters, initialInspectionFiltersKey]);
   const runConfigAction: CivilizationConfigRunner = useAtomSet(civilizationConfigAction, {
     mode: "promise",
   });
@@ -1855,11 +1866,17 @@ function CivilizationTargetOverview({
 
       {target.projectId === null ? null : (
         <>
+          <CivilizationContextAnalytics
+            environmentId={target.environmentId}
+            projectId={target.projectId}
+            targetLabel={target.label}
+            onInspect={setInspectionFilters}
+          />
           <CivilizationContextInspector
             environmentId={target.environmentId}
             projectId={target.projectId}
             targetLabel={target.label}
-            initialFilters={initialInspectionFilters}
+            initialFilters={inspectionFilters}
           />
           <CivilizationProjectInspection
             environmentId={target.environmentId}

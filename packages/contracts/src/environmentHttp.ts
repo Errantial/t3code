@@ -106,11 +106,14 @@ import {
   CivilizationEffectiveConfig,
   CivilizationKnowledgeConflictError,
   CivilizationInboxCursor,
+  CivilizationContextAnalyticsBucketSize,
+  CivilizationContextAnalyticsResult,
   CivilizationContextInspectionCursor,
   CivilizationContextInspectionDetail,
   CivilizationContextInspectionId,
   CivilizationContextInspectionOutcome,
   CivilizationContextInspectionPage,
+  CivilizationContextSuppressionReason,
   CivilizationMailConflictError,
   CivilizationMailInvalidError,
   CivilizationMailNotFoundError,
@@ -836,11 +839,25 @@ const EnvironmentCivilizationContextInspectionQuery = Schema.Struct({
   threadId: Schema.optionalKey(ThreadId),
   providerInstanceId: Schema.optionalKey(ProviderInstanceId),
   outcome: Schema.optionalKey(CivilizationContextInspectionOutcome),
+  suppressionReason: Schema.optionalKey(CivilizationContextSuppressionReason),
+  from: Schema.optionalKey(TrimmedNonEmptyString),
+  to: Schema.optionalKey(TrimmedNonEmptyString),
   runId: Schema.optionalKey(RunId),
   attemptId: Schema.optionalKey(RunAttemptId),
   providerTurnOrdinal: Schema.optionalKey(TrimmedNonEmptyString),
   cursor: Schema.optionalKey(CivilizationContextInspectionCursor),
   limit: Schema.optionalKey(TrimmedNonEmptyString),
+});
+
+const EnvironmentCivilizationContextAnalyticsQuery = Schema.Struct({
+  projectId: ProjectId,
+  bucket: CivilizationContextAnalyticsBucketSize,
+  from: Schema.optionalKey(TrimmedNonEmptyString),
+  to: Schema.optionalKey(TrimmedNonEmptyString),
+  providerInstanceId: Schema.optionalKey(ProviderInstanceId),
+  threadId: Schema.optionalKey(ThreadId),
+  outcome: Schema.optionalKey(CivilizationContextInspectionOutcome),
+  suppressionReason: Schema.optionalKey(CivilizationContextSuppressionReason),
 });
 
 const EnvironmentCivilizationContextInspectionParams = Schema.Struct({
@@ -1104,6 +1121,14 @@ class EnvironmentCivilizationHttpApi extends HttpApiGroup.make("civilization")
         error: EnvironmentCivilizationAdminMailErrors,
       },
     ).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.get("contextAnalytics", "/api/civilization/context-analytics", {
+      headers: OptionalBearerHeaders,
+      query: EnvironmentCivilizationContextAnalyticsQuery,
+      success: CivilizationContextAnalyticsResult,
+      error: [...EnvironmentCivilizationErrors, EnvironmentHttpBadRequestError],
+    }).middleware(EnvironmentAuthenticatedAuth),
   )
   .add(
     HttpApiEndpoint.get("contextInspectionList", "/api/civilization/context-inspections", {

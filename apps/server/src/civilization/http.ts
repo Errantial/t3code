@@ -417,6 +417,34 @@ export const layer = HttpApiBuilder.group(
         }),
       )
       .handle(
+        "contextAnalytics",
+        Effect.fn("environment.civilization.contextAnalytics")(function* (args) {
+          yield* authorizeRead(args.endpoint.name);
+          return yield* context
+            .analytics({
+              projectId: args.query.projectId,
+              bucketSize: args.query.bucket,
+              ...(args.query.from === undefined ? {} : { from: args.query.from }),
+              ...(args.query.to === undefined ? {} : { to: args.query.to }),
+              ...(args.query.providerInstanceId === undefined
+                ? {}
+                : { providerInstanceId: args.query.providerInstanceId }),
+              ...(args.query.threadId === undefined ? {} : { threadId: args.query.threadId }),
+              ...(args.query.outcome === undefined ? {} : { outcome: args.query.outcome }),
+              ...(args.query.suppressionReason === undefined
+                ? {}
+                : { suppressionReason: args.query.suppressionReason }),
+            })
+            .pipe(
+              Effect.catchTags({
+                SqlError: (cause) => failEnvironmentInternal("internal_error", cause),
+                CivilizationContextInspectionInvalidError: (cause) =>
+                  Effect.fail(new EnvironmentHttpBadRequestError({ message: cause.message })),
+              }),
+            );
+        }),
+      )
+      .handle(
         "contextInspectionList",
         Effect.fn("environment.civilization.contextInspectionList")(function* (args) {
           yield* authorizeRead(args.endpoint.name);
@@ -444,6 +472,11 @@ export const layer = HttpApiBuilder.group(
                 ? {}
                 : { providerInstanceId: args.query.providerInstanceId }),
               ...(args.query.outcome === undefined ? {} : { outcome: args.query.outcome }),
+              ...(args.query.suppressionReason === undefined
+                ? {}
+                : { suppressionReason: args.query.suppressionReason }),
+              ...(args.query.from === undefined ? {} : { from: args.query.from }),
+              ...(args.query.to === undefined ? {} : { to: args.query.to }),
               ...(args.query.runId === undefined ? {} : { runId: args.query.runId }),
               ...(args.query.attemptId === undefined ? {} : { attemptId: args.query.attemptId }),
               ...(providerTurnOrdinal === undefined ? {} : { providerTurnOrdinal }),

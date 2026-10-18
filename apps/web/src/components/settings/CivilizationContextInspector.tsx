@@ -5,6 +5,7 @@ import {
   type CivilizationContextInspectionDetail,
   type CivilizationContextInspectionOutcome,
   type CivilizationContextInspectionSummary,
+  type CivilizationContextSuppressionReason,
   type EnvironmentId,
   ProjectId,
   ProviderInstanceId,
@@ -45,6 +46,9 @@ type DraftFilters = {
   readonly threadId: string;
   readonly providerInstanceId: string;
   readonly outcome: CivilizationContextInspectionOutcome | "all";
+  readonly suppressionReason: CivilizationContextSuppressionReason | "all";
+  readonly from: string;
+  readonly to: string;
   readonly runId: string;
   readonly attemptId: string;
   readonly providerTurnOrdinal: string;
@@ -54,6 +58,9 @@ const EMPTY_FILTERS: DraftFilters = {
   threadId: "",
   providerInstanceId: "",
   outcome: "all",
+  suppressionReason: "all",
+  from: "",
+  to: "",
   runId: "",
   attemptId: "",
   providerTurnOrdinal: "",
@@ -66,6 +73,9 @@ function draftFiltersFromApplied(filters: CivilizationContextInspectionFilters):
     threadId: filters.threadId ?? "",
     providerInstanceId: filters.providerInstanceId ?? "",
     outcome: filters.outcome ?? "all",
+    suppressionReason: filters.suppressionReason ?? "all",
+    from: filters.from ?? "",
+    to: filters.to ?? "",
     runId: filters.runId ?? "",
     attemptId: filters.attemptId ?? "",
     providerTurnOrdinal:
@@ -131,6 +141,9 @@ function appliedFilters(draft: DraftFilters): CivilizationContextInspectionFilte
       ? {}
       : { providerInstanceId: ProviderInstanceId.make(draft.providerInstanceId.trim()) }),
     ...(draft.outcome === "all" ? {} : { outcome: draft.outcome }),
+    ...(draft.suppressionReason === "all" ? {} : { suppressionReason: draft.suppressionReason }),
+    ...(draft.from.trim() === "" ? {} : { from: draft.from.trim() }),
+    ...(draft.to.trim() === "" ? {} : { to: draft.to.trim() }),
     ...(draft.runId.trim() === "" ? {} : { runId: RunId.make(draft.runId.trim()) }),
     ...(draft.attemptId.trim() === ""
       ? {}
@@ -478,6 +491,51 @@ export function CivilizationContextInspector({
               <SelectItem value="provider_start_failed">Provider start failed</SelectItem>
             </SelectPopup>
           </Select>
+          <Select
+            value={draft.suppressionReason}
+            onValueChange={(value) =>
+              setDraft((current) => ({
+                ...current,
+                suppressionReason: value as DraftFilters["suppressionReason"],
+              }))
+            }
+          >
+            <SelectTrigger aria-label="Context inspector suppression">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectPopup>
+              <SelectItem value="all">All suppression reasons</SelectItem>
+              <SelectItem value="participation_disabled">Participation disabled</SelectItem>
+              <SelectItem value="emergency_off">Emergency off</SelectItem>
+              <SelectItem value="citizen_not_adopted">Citizen not adopted</SelectItem>
+              <SelectItem value="citizen_deleted">Citizen deleted</SelectItem>
+              <SelectItem value="citizen_closed">Citizen closed</SelectItem>
+              <SelectItem value="observed_agent_read_only">Observed agent read only</SelectItem>
+              <SelectItem value="provider_unsupported">Provider unsupported</SelectItem>
+              <SelectItem value="provider_continuation">Provider continuation</SelectItem>
+              <SelectItem value="provider_command">Provider command</SelectItem>
+              <SelectItem value="claude_provider_continuation">Claude continuation</SelectItem>
+              <SelectItem value="claude_slash_command">Claude slash command</SelectItem>
+              <SelectItem value="packet_budget_zero">Packet budget zero</SelectItem>
+              <SelectItem value="packet_budget_too_small">Packet budget too small</SelectItem>
+            </SelectPopup>
+          </Select>
+          <Input
+            aria-label="Context inspector from"
+            placeholder="From (ISO timestamp)"
+            value={draft.from}
+            onChange={(event) =>
+              setDraft((current) => ({ ...current, from: event.currentTarget.value }))
+            }
+          />
+          <Input
+            aria-label="Context inspector to"
+            placeholder="To (ISO timestamp)"
+            value={draft.to}
+            onChange={(event) =>
+              setDraft((current) => ({ ...current, to: event.currentTarget.value }))
+            }
+          />
           <Input
             aria-label="Context inspector run ID"
             placeholder="Run ID"

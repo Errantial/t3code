@@ -3,6 +3,8 @@ import {
   type CivilizationCensusCursor,
   type CivilizationChronicleCursor,
   type CivilizationChronicleKind,
+  type CivilizationContextAnalyticsBucketSize,
+  type CivilizationContextSuppressionReason,
   type CivilizationCorrespondenceCursor,
   type CivilizationCorrespondenceReplyRelation,
   type CivilizationLineageCursor,
@@ -28,6 +30,7 @@ import {
   fetchCurrentEnvironmentCivilizationAchievementPage,
   fetchCurrentEnvironmentCivilizationCensusPage,
   fetchCurrentEnvironmentCivilizationChroniclePage,
+  fetchCurrentEnvironmentCivilizationContextAnalytics,
   fetchCurrentEnvironmentCivilizationLineageNeighborhood,
   fetchCurrentEnvironmentCivilizationContextInspectionDetail,
   fetchCurrentEnvironmentCivilizationContextInspectionPage,
@@ -251,9 +254,40 @@ export interface CivilizationContextInspectionFilters {
   readonly threadId?: ThreadId | undefined;
   readonly providerInstanceId?: ProviderInstanceId | undefined;
   readonly outcome?: CivilizationContextInspectionOutcome | undefined;
+  readonly suppressionReason?: CivilizationContextSuppressionReason | undefined;
+  readonly from?: string | undefined;
+  readonly to?: string | undefined;
   readonly runId?: RunId | undefined;
   readonly attemptId?: RunAttemptId | undefined;
   readonly providerTurnOrdinal?: number | undefined;
+}
+
+export interface CivilizationContextAnalyticsFilters {
+  readonly bucket: CivilizationContextAnalyticsBucketSize;
+  readonly from?: string | undefined;
+  readonly to?: string | undefined;
+  readonly providerInstanceId?: ProviderInstanceId | undefined;
+  readonly threadId?: ThreadId | undefined;
+  readonly outcome?: CivilizationContextInspectionOutcome | undefined;
+  readonly suppressionReason?: CivilizationContextSuppressionReason | undefined;
+}
+
+export function civilizationContextAnalyticsQueryKey(
+  environmentId: EnvironmentId,
+  projectId: ProjectId,
+  filters: CivilizationContextAnalyticsFilters,
+): string {
+  return JSON.stringify([
+    environmentId,
+    projectId,
+    filters.bucket,
+    filters.from ?? null,
+    filters.to ?? null,
+    filters.providerInstanceId ?? null,
+    filters.threadId ?? null,
+    filters.outcome ?? null,
+    filters.suppressionReason ?? null,
+  ]);
 }
 
 export function civilizationContextInspectionQueryKey(
@@ -269,6 +303,9 @@ export function civilizationContextInspectionQueryKey(
     filters.threadId ?? null,
     filters.providerInstanceId ?? null,
     filters.outcome ?? null,
+    filters.suppressionReason ?? null,
+    filters.from ?? null,
+    filters.to ?? null,
     filters.runId ?? null,
     filters.attemptId ?? null,
     filters.providerTurnOrdinal ?? null,
@@ -519,6 +556,9 @@ const civilizationContextInspectionPageAtom = Atom.family((serializedKey: string
     rawThreadId,
     rawProviderInstanceId,
     rawOutcome,
+    rawSuppressionReason,
+    rawFrom,
+    rawTo,
     rawRunId,
     rawAttemptId,
     rawProviderTurnOrdinal,
@@ -530,6 +570,9 @@ const civilizationContextInspectionPageAtom = Atom.family((serializedKey: string
     string | null,
     string | null,
     CivilizationContextInspectionOutcome | null,
+    CivilizationContextSuppressionReason | null,
+    string | null,
+    string | null,
     string | null,
     string | null,
     number | null,
@@ -552,6 +595,9 @@ const civilizationContextInspectionPageAtom = Atom.family((serializedKey: string
           ? {}
           : { providerInstanceId: ProviderInstanceId.make(rawProviderInstanceId) }),
         ...(rawOutcome === null ? {} : { outcome: rawOutcome }),
+        ...(rawSuppressionReason === null ? {} : { suppressionReason: rawSuppressionReason }),
+        ...(rawFrom === null ? {} : { from: rawFrom }),
+        ...(rawTo === null ? {} : { to: rawTo }),
         ...(rawRunId === null ? {} : { runId: RunId.make(rawRunId) }),
         ...(rawAttemptId === null ? {} : { attemptId: RunAttemptId.make(rawAttemptId) }),
         ...(rawProviderTurnOrdinal === null ? {} : { providerTurnOrdinal: rawProviderTurnOrdinal }),
@@ -565,6 +611,79 @@ const civilizationContextInspectionPageAtom = Atom.family((serializedKey: string
     );
 });
 
+const civilizationContextAnalyticsAtom = Atom.family((serializedKey: string) => {
+  const [
+    rawEnvironmentId,
+    rawProjectId,
+    rawBucket,
+    rawFrom,
+    rawTo,
+    rawProviderInstanceId,
+    rawThreadId,
+    rawOutcome,
+    rawSuppressionReason,
+  ] = JSON.parse(serializedKey) as [
+    string,
+    string,
+    CivilizationContextAnalyticsBucketSize,
+    string | null,
+    string | null,
+    string | null,
+    string | null,
+    CivilizationContextInspectionOutcome | null,
+    CivilizationContextSuppressionReason | null,
+  ];
+  const environmentId = rawEnvironmentId as EnvironmentId;
+  const projectId = ProjectId.make(rawProjectId);
+  return connectionAtomRuntime
+    .atom((get) => {
+      const prepared = Option.getOrNull(
+        get(environmentSession.preparedConnectionValueAtom(environmentId)),
+      );
+      if (prepared === null) return Effect.never;
+      return fetchCurrentEnvironmentCivilizationContextAnalytics({
+        prepared,
+        projectId,
+        bucket: rawBucket,
+        ...(rawFrom === null ? {} : { from: rawFrom }),
+        ...(rawTo === null ? {} : { to: rawTo }),
+        ...(rawProviderInstanceId === null
+          ? {}
+          : { providerInstanceId: ProviderInstanceId.make(rawProviderInstanceId) }),
+        ...(rawThreadId === null ? {} : { threadId: ThreadId.make(rawThreadId) }),
+        ...(rawOutcome === null ? {} : { outcome: rawOutcome }),
+        ...(rawSuppressionReason === null ? {} : { suppressionReason: rawSuppressionReason }),
+      });
+    })
+    .pipe(
+      Atom.setIdleTTL(60_000),
+      Atom.withLabel(`civilization-context-analytics:${serializedKey}`),
+    );
+});
+
+export function useCivilizationContextAnalytics(
+  environmentId: EnvironmentId | null,
+  projectId: ProjectId | null,
+  filters: CivilizationContextAnalyticsFilters,
+) {
+  const { bucket, from, outcome, providerInstanceId, suppressionReason, threadId, to } = filters;
+  const atom =
+    environmentId === null || projectId === null
+      ? null
+      : civilizationContextAnalyticsAtom(
+          civilizationContextAnalyticsQueryKey(environmentId, projectId, {
+            bucket,
+            from,
+            outcome,
+            providerInstanceId,
+            suppressionReason,
+            threadId,
+            to,
+          }),
+        );
+  return useEnvironmentQuery(atom);
+}
+
 export function useCivilizationContextInspectionPage(
   environmentId: EnvironmentId | null,
   projectId: ProjectId | null,
@@ -572,7 +691,17 @@ export function useCivilizationContextInspectionPage(
   cursor: CivilizationContextInspectionCursor | null,
   limit: number,
 ) {
-  const { attemptId, outcome, providerInstanceId, providerTurnOrdinal, runId, threadId } = filters;
+  const {
+    attemptId,
+    from,
+    outcome,
+    providerInstanceId,
+    providerTurnOrdinal,
+    runId,
+    suppressionReason,
+    threadId,
+    to,
+  } = filters;
   const atom =
     environmentId === null || projectId === null
       ? null
@@ -580,7 +709,17 @@ export function useCivilizationContextInspectionPage(
           civilizationContextInspectionQueryKey(
             environmentId,
             projectId,
-            { attemptId, outcome, providerInstanceId, providerTurnOrdinal, runId, threadId },
+            {
+              attemptId,
+              from,
+              outcome,
+              providerInstanceId,
+              providerTurnOrdinal,
+              runId,
+              suppressionReason,
+              threadId,
+              to,
+            },
             cursor,
             limit,
           ),

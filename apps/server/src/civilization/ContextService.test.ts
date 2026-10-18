@@ -10,9 +10,11 @@ import {
   ThreadId,
 } from "@t3tools/contracts";
 import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
+import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as SqlClient from "effect/sql/SqlClient";
+import * as TestClock from "effect/testing/TestClock";
 import * as NodeCrypto from "node:crypto";
 
 import * as ProviderAdapterRegistry from "../orchestration-v2/ProviderAdapterRegistry.ts";
@@ -327,6 +329,269 @@ const seedMail = Effect.fn("ContextService.test.seedMail")(function* (input: {
   `;
   return CivilizationMessageId.make(input.id);
 });
+
+it.effect("aggregates only safe context metadata and applies logical diagnostic retention", () =>
+  Effect.gen(function* () {
+    const service = yield* ContextService.CivilizationContextService;
+    const config = yield* ConfigService.CivilizationConfigService;
+    const sql = yield* SqlClient.SqlClient;
+    yield* TestClock.setTime(
+      DateTime.toEpochMillis(DateTime.makeUnsafe("2026-10-18T12:00:00.000Z")),
+    );
+    yield* setup();
+    const range = {
+      from_time: "2026-10-12T12:00:00.000Z",
+      to_time: "2026-10-18T11:59:00.000Z",
+    } as const;
+    yield* sql`
+      INSERT INTO civilization_context_inspections (
+        inspection_id, context_reference_id, project_id, thread_id, run_id, attempt_id,
+        provider_turn_ordinal, provider_instance_id, provider_driver, outcome,
+        suppression_reason, diagnostics_mode, packet_text_state,
+        packet_revision, packet_hash, packet_bytes, packet_text, packet_budget_bytes,
+        roster_candidates, roster_included, note_candidates, note_included,
+        inbox_candidates, inbox_included,
+        selected_citizen_ids_json, selected_note_ids_json, selected_inbox_ids_json,
+        created_at, updated_at, provider_start_at
+      ) VALUES
+      (
+        'inspection:analytics:recent', NULL, ${projectId}, ${callerThreadId},
+        'run:analytics:recent', 'attempt:analytics:recent', 1, 'codex-main', 'codex',
+        'provider_start_accepted', NULL, 'normal', 'retained_normal',
+        'revision:SECRET_A', 'hash:SECRET_A', 8000, 'PACKET_SECRET_A', 10000,
+        3, 2, 4, 1, 5, 3,
+        '["CITIZEN_SECRET_A"]', '["NOTE_SECRET_A"]', '["MAIL_SECRET_A"]',
+        '2026-10-18T11:00:00.000Z',
+        '2026-10-18T11:00:00.000Z',
+        '2026-10-18T11:01:00.000Z'
+      ),
+      (
+        'inspection:analytics:older', NULL, ${projectId}, ${callerThreadId},
+        'run:analytics:older', 'attempt:analytics:older', 1, 'codex-main', 'codex',
+        'skipped', 'provider_unsupported', 'errors', 'skipped_no_packet',
+        'revision:SECRET_B', 'hash:SECRET_B', 0, 'PACKET_SECRET_B', 10000,
+        2, 0, 1, 0, 1, 0,
+        '["CITIZEN_SECRET_B"]', '["NOTE_SECRET_B"]', '["MAIL_SECRET_B"]',
+        '2026-10-16T12:00:00.000Z',
+        '2026-10-16T12:00:00.000Z', NULL
+      ),
+      (
+        'inspection:analytics:expired', NULL, ${projectId}, ${callerThreadId},
+        'run:analytics:expired', 'attempt:analytics:expired', 1, 'codex-main', 'codex',
+        'provider_start_failed', NULL, 'normal', 'retained_error',
+        'revision:SECRET_C', 'hash:SECRET_C', 2000, 'PACKET_SECRET_C', 10000,
+        99, 99, 99, 99, 99, 99,
+        '["CITIZEN_SECRET_C"]', '["NOTE_SECRET_C"]', '["MAIL_SECRET_C"]',
+        '2026-10-10T12:00:00.000Z',
+        '2026-10-10T12:00:00.000Z', NULL
+      )
+    `;
+
+    const first = yield* service.analytics({
+      projectId,
+      bucketSize: "day",
+      from: range.from_time,
+      to: range.to_time,
+      providerInstanceId: ProviderInstanceId.make("codex-main"),
+    });
+    assert.equal(
+      first.buckets.reduce((sum, bucket) => sum + bucket.totalInspections, 0),
+      2,
+    );
+    assert.equal(
+      first.buckets.reduce((sum, bucket) => sum + bucket.outcomes.providerStartAccepted, 0),
+      1,
+    );
+    assert.equal(
+      first.buckets.reduce((sum, bucket) => sum + bucket.outcomes.skipped, 0),
+      1,
+    );
+    assert.equal(
+      first.buckets.reduce((sum, bucket) => sum + bucket.roster.omitted, 0),
+      3,
+    );
+    assert.equal(
+      first.buckets
+        .flatMap((bucket) => bucket.suppressions)
+        .find((item) => item.reason === "provider_unsupported")?.count,
+      1,
+    );
+    const serialized = JSON.stringify(first);
+    for (const secret of [
+      "SECRET_A",
+      "SECRET_B",
+      "PACKET_SECRET",
+      "CITIZEN_SECRET",
+      "NOTE_SECRET",
+      "MAIL_SECRET",
+    ]) {
+      assert.notInclude(serialized, secret);
+    }
+
+    yield* sql`
+      UPDATE civilization_context_inspections
+      SET packet_revision = 'revision:HOSTILE_CHANGED',
+          packet_hash = 'hash:HOSTILE_CHANGED',
+          packet_text = 'PACKET_HOSTILE_CHANGED',
+          selected_citizen_ids_json = '["CITIZEN_HOSTILE_CHANGED"]',
+          selected_note_ids_json = '["NOTE_HOSTILE_CHANGED"]',
+          selected_inbox_ids_json = '["MAIL_HOSTILE_CHANGED"]'
+      WHERE project_id = ${projectId}
+    `;
+    const afterSecretMutation = yield* service.analytics({
+      projectId,
+      bucketSize: "day",
+      from: range.from_time,
+      to: range.to_time,
+      providerInstanceId: ProviderInstanceId.make("codex-main"),
+      // All fixture rows share this thread. Adding the equivalent selector forces a
+      // distinct cache key so this comparison exercises a fresh safe-column SQL read.
+      threadId: callerThreadId,
+    });
+    assert.deepEqual(afterSecretMutation, first);
+
+    yield* sql`
+      INSERT INTO civilization_context_inspections (
+        inspection_id, project_id, thread_id, run_id, attempt_id, provider_turn_ordinal,
+        provider_instance_id, provider_driver, outcome, diagnostics_mode, packet_text_state,
+        packet_bytes, packet_budget_bytes, roster_candidates, roster_included,
+        note_candidates, note_included, inbox_candidates, inbox_included, created_at, updated_at
+      ) VALUES (
+        'inspection:analytics:retention-boundary', ${projectId}, ${callerThreadId},
+        'run:analytics:retention-boundary', 'attempt:analytics:retention-boundary', 1,
+        'codex-main', 'codex', 'built', 'off', 'diagnostics_off',
+        1024, 10000, 1, 1, 1, 1, 1, 1,
+        '2026-10-17T12:00:00.000Z', '2026-10-17T12:00:00.000Z'
+      )
+    `;
+
+    yield* config.set({
+      projectId,
+      expectedRevision: 0,
+      override: {
+        version: CIVILIZATION_CONFIG_VERSION,
+        operations: { diagnosticRetentionDays: 1 },
+      },
+    });
+    yield* sql`
+      UPDATE civilization_project_state
+      SET applied_diagnostic_retention_days = 1
+      WHERE project_id = ${projectId}
+    `;
+    const reduced = yield* service.analytics({
+      projectId,
+      bucketSize: "day",
+      from: range.from_time,
+      to: range.to_time,
+    });
+    assert.equal(reduced.appliedDiagnosticRetentionDays, 1);
+    assert.equal(
+      reduced.buckets.reduce((sum, bucket) => sum + bucket.totalInspections, 0),
+      1,
+      "logical retention excludes the exact cleanup boundary before physical cleanup deletes it",
+    );
+    assert.equal(
+      (yield* sql<{ readonly count: number }>`
+        SELECT COUNT(*) AS count
+        FROM civilization_context_inspections
+        WHERE inspection_id = 'inspection:analytics:retention-boundary'
+      `)[0]?.count,
+      1,
+      "the retention assertion must not depend on physical cleanup",
+    );
+
+    yield* config.set({
+      projectId,
+      expectedRevision: 1,
+      override: {
+        version: CIVILIZATION_CONFIG_VERSION,
+        operations: { diagnosticRetentionDays: 1, responseBodyBytes: 1 },
+      },
+    });
+    const oversized = yield* Effect.flip(
+      service.analytics({
+        projectId,
+        bucketSize: "day",
+        from: range.from_time,
+        to: range.to_time,
+      }),
+    );
+    assert.equal(oversized.reason, "response_too_large");
+  }).pipe(Effect.provide(Layer.fresh(makeLayer({ "codex-main": "codex" })))),
+);
+
+it.effect(
+  "invalidates cached analytics after provider-start outcome updates and enforces bucket cap",
+  () =>
+    Effect.gen(function* () {
+      const service = yield* ContextService.CivilizationContextService;
+      const sql = yield* SqlClient.SqlClient;
+      yield* TestClock.setTime(
+        DateTime.toEpochMillis(DateTime.makeUnsafe("2026-10-18T12:00:00.000Z")),
+      );
+      yield* setup();
+      const runId = RunId.make("run:analytics:cache");
+      const attemptId = RunAttemptId.make("attempt:analytics:cache");
+      yield* sql`
+      INSERT INTO civilization_context_inspections (
+        inspection_id, project_id, thread_id, run_id, attempt_id, provider_turn_ordinal,
+        provider_instance_id, provider_driver, outcome, diagnostics_mode, packet_text_state,
+        packet_bytes, packet_budget_bytes, roster_candidates, roster_included,
+        note_candidates, note_included, inbox_candidates, inbox_included, created_at, updated_at
+      ) VALUES (
+        'inspection:analytics:cache', ${projectId}, ${callerThreadId}, ${runId}, ${attemptId}, 1,
+        'codex-main', 'codex', 'built', 'normal', 'pending_provider_start',
+        1024, 16384, 1, 1, 1, 1, 1, 1,
+        '2026-10-18T11:00:00.000Z', '2026-10-18T11:00:00.000Z'
+      )
+    `;
+
+      const request = {
+        projectId,
+        bucketSize: "hour" as const,
+        from: "2026-10-18T10:00:00.000Z",
+        to: "2026-10-18T12:00:00.000Z",
+      };
+      const before = yield* service.analytics(request);
+      assert.equal(
+        before.buckets.reduce((sum, bucket) => sum + bucket.outcomes.built, 0),
+        1,
+      );
+
+      yield* service.markProviderStartAccepted({
+        runId,
+        attemptId,
+        providerTurnOrdinal: 1,
+        packetText: "cache invalidation packet",
+      });
+      const after = yield* service.analytics(request);
+      assert.equal(
+        after.buckets.reduce((sum, bucket) => sum + bucket.outcomes.built, 0),
+        0,
+      );
+      assert.equal(
+        after.buckets.reduce((sum, bucket) => sum + bucket.outcomes.providerStartAccepted, 0),
+        1,
+      );
+
+      const allowed = yield* service.analytics({
+        projectId,
+        bucketSize: "hour",
+        from: "2026-10-16T12:00:00.000Z",
+        to: "2026-10-18T12:00:00.000Z",
+      });
+      assert.equal(allowed.buckets.length, 1);
+      const tooWide = yield* Effect.flip(
+        service.analytics({
+          projectId,
+          bucketSize: "hour",
+          from: "2026-10-16T10:00:00.000Z",
+          to: "2026-10-18T12:00:00.000Z",
+        }),
+      );
+      assert.equal(tooWide.reason, "too_many_buckets");
+    }).pipe(Effect.provide(Layer.fresh(makeLayer({ "codex-main": "codex" })))),
+);
 
 it.effect("reports the complete registered provider capability matrix by adapter instance", () =>
   Effect.gen(function* () {

@@ -225,6 +225,8 @@ describe("Civilization context inspector", () => {
     expect(labels).toEqual([
       "Context inspector thread ID",
       "Context inspector provider",
+      "Context inspector from",
+      "Context inspector to",
       "Context inspector run ID",
       "Context inspector attempt ID",
       "Context inspector provider turn",
@@ -233,11 +235,20 @@ describe("Civilization context inspector", () => {
       renderer?.root.findAll((node) => node.props["aria-label"] === "Context inspector outcome")
         .length,
     ).toBeGreaterThan(0);
+    expect(
+      renderer?.root.findAll((node) => node.props["aria-label"] === "Context inspector suppression")
+        .length,
+    ).toBeGreaterThan(0);
   });
 
   it("applies route-provided historical identity to the first metadata query", async () => {
     await render({
       threadId,
+      providerInstanceId,
+      outcome: "provider_start_accepted",
+      suppressionReason: "provider_unsupported",
+      from: "2026-10-16T19:00:00.000Z",
+      to: "2026-10-16T21:00:00.000Z",
       runId,
       attemptId,
       providerTurnOrdinal: 2,
@@ -245,7 +256,17 @@ describe("Civilization context inspector", () => {
     const latest = testState.pageCalls.at(-1);
     expect(latest?.[0]).toBe(environmentId);
     expect(latest?.[1]).toBe(projectId);
-    expect(latest?.[2]).toEqual({ threadId, runId, attemptId, providerTurnOrdinal: 2 });
+    expect(latest?.[2]).toEqual({
+      threadId,
+      providerInstanceId,
+      outcome: "provider_start_accepted",
+      suppressionReason: "provider_unsupported",
+      from: "2026-10-16T19:00:00.000Z",
+      to: "2026-10-16T21:00:00.000Z",
+      runId,
+      attemptId,
+      providerTurnOrdinal: 2,
+    });
     expect(latest?.[3]).toBeNull();
     expect(latest?.[4]).toBe(25);
     expect(testState.sensitiveCalls).toEqual([]);
