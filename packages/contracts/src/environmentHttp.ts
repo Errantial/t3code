@@ -83,6 +83,8 @@ import {
   CivilizationAgentAccessError,
   CivilizationAdminMailPage,
   CivilizationAdminMailRecord,
+  CivilizationAchievementCursor,
+  CivilizationAchievementPage,
   CivilizationCensusCursor,
   CivilizationCensusPage,
   CivilizationChronicleCursor,
@@ -759,6 +761,13 @@ const EnvironmentCivilizationChronicleQuery = Schema.Struct({
   limit: Schema.optionalKey(TrimmedNonEmptyString),
 });
 
+const EnvironmentCivilizationAchievementsQuery = Schema.Struct({
+  projectId: ProjectId,
+  threadId: Schema.optionalKey(ThreadId),
+  cursor: Schema.optionalKey(CivilizationAchievementCursor),
+  limit: Schema.optionalKey(TrimmedNonEmptyString),
+});
+
 const EnvironmentCivilizationNotesQuery = Schema.Struct({
   projectId: ProjectId,
   cursor: Schema.optionalKey(CivilizationNotesCursor),
@@ -1000,6 +1009,14 @@ class EnvironmentCivilizationHttpApi extends HttpApiGroup.make("civilization")
       headers: OptionalBearerHeaders,
       query: EnvironmentCivilizationChronicleQuery,
       success: CivilizationChroniclePage,
+      error: EnvironmentCivilizationKnowledgeReadErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.get("achievements", "/api/civilization/achievements", {
+      headers: OptionalBearerHeaders,
+      query: EnvironmentCivilizationAchievementsQuery,
+      success: CivilizationAchievementPage,
       error: EnvironmentCivilizationKnowledgeReadErrors,
     }).middleware(EnvironmentAuthenticatedAuth),
   )

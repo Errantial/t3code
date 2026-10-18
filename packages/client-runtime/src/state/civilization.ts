@@ -1,5 +1,6 @@
 import {
   CivilizationAgentAccessError,
+  type CivilizationAchievementCursor,
   type CivilizationCensusCursor,
   type CivilizationChronicleCursor,
   type CivilizationChronicleKind,
@@ -401,6 +402,36 @@ export const fetchEnvironmentCivilizationChroniclePage = Effect.fn(
       url: (urls) => urls.chronicle(endpoint),
       timeoutMs: input.timeoutMs ?? DEFAULT_CIVILIZATION_READ_TIMEOUT_MS,
       request: ({ client, headers }) => client.chronicle({ ...endpoint, headers }),
+    }),
+  );
+});
+
+/** Read one bounded deterministic achievement page. */
+export const fetchEnvironmentCivilizationAchievementPage = Effect.fn(
+  "clientRuntime.state.fetchEnvironmentCivilizationAchievementPage",
+)(function* (
+  input: CivilizationEnvironmentRequestInput & {
+    readonly projectId: ProjectId;
+    readonly threadId?: ThreadId | undefined;
+    readonly cursor?: CivilizationAchievementCursor | undefined;
+    readonly limit?: number | undefined;
+  },
+) {
+  const query = {
+    projectId: input.projectId,
+    ...(input.threadId === undefined ? {} : { threadId: input.threadId }),
+    ...(input.cursor === undefined ? {} : { cursor: input.cursor }),
+    ...(input.limit === undefined ? {} : { limit: String(input.limit) }),
+  };
+  const endpoint = { query };
+  return yield* preserveCivilizationConfigErrors(
+    executeAuthenticatedEnvironmentHttpRequest({
+      ...input,
+      group: "civilization",
+      method: "GET",
+      url: (urls) => urls.achievements(endpoint),
+      timeoutMs: input.timeoutMs ?? DEFAULT_CIVILIZATION_READ_TIMEOUT_MS,
+      request: ({ client, headers }) => client.achievements({ ...endpoint, headers }),
     }),
   );
 });
@@ -836,6 +867,19 @@ export const fetchCurrentEnvironmentCivilizationChroniclePage = Effect.fn(
 }) {
   const auth = yield* currentCivilizationAuth;
   return yield* fetchEnvironmentCivilizationChroniclePage({ ...input, ...auth });
+});
+
+export const fetchCurrentEnvironmentCivilizationAchievementPage = Effect.fn(
+  "clientRuntime.state.fetchCurrentEnvironmentCivilizationAchievementPage",
+)(function* (input: {
+  readonly prepared: PreparedConnection;
+  readonly projectId: ProjectId;
+  readonly threadId?: ThreadId | undefined;
+  readonly cursor?: CivilizationAchievementCursor | undefined;
+  readonly limit?: number | undefined;
+}) {
+  const auth = yield* currentCivilizationAuth;
+  return yield* fetchEnvironmentCivilizationAchievementPage({ ...input, ...auth });
 });
 
 export const fetchCurrentEnvironmentCivilizationNotesPage = Effect.fn(

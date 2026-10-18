@@ -1,4 +1,5 @@
 import {
+  type CivilizationAchievementCursor,
   type CivilizationCensusCursor,
   type CivilizationChronicleCursor,
   type CivilizationChronicleKind,
@@ -22,6 +23,7 @@ import {
   type CivilizationNotesCursor,
 } from "@t3tools/contracts";
 import {
+  fetchCurrentEnvironmentCivilizationAchievementPage,
   fetchCurrentEnvironmentCivilizationCensusPage,
   fetchCurrentEnvironmentCivilizationChroniclePage,
   fetchCurrentEnvironmentCivilizationLineageNeighborhood,
@@ -385,6 +387,45 @@ export function useCivilizationChroniclePage(
             cursor,
             limit,
           ]),
+        );
+  return useEnvironmentQuery(atom);
+}
+
+const civilizationAchievementPageAtom = Atom.family((serializedKey: string) => {
+  const [rawEnvironmentId, rawProjectId, rawThreadId, rawCursor, rawLimit] = JSON.parse(
+    serializedKey,
+  ) as [string, string, string | null, string | null, number];
+  const environmentId = rawEnvironmentId as EnvironmentId;
+  const projectId = ProjectId.make(rawProjectId);
+  return connectionAtomRuntime
+    .atom((get) => {
+      const prepared = Option.getOrNull(
+        get(environmentSession.preparedConnectionValueAtom(environmentId)),
+      );
+      if (prepared === null) return Effect.never;
+      return fetchCurrentEnvironmentCivilizationAchievementPage({
+        prepared,
+        projectId,
+        ...(rawThreadId === null ? {} : { threadId: ThreadId.make(rawThreadId) }),
+        ...(rawCursor === null ? {} : { cursor: rawCursor as CivilizationAchievementCursor }),
+        limit: rawLimit,
+      });
+    })
+    .pipe(Atom.setIdleTTL(60_000), Atom.withLabel(`civilization-achievements:${serializedKey}`));
+});
+
+export function useCivilizationAchievementPage(
+  environmentId: EnvironmentId | null,
+  projectId: ProjectId | null,
+  threadId: ThreadId | null,
+  cursor: CivilizationAchievementCursor | null,
+  limit: number,
+) {
+  const atom =
+    environmentId === null || projectId === null
+      ? null
+      : civilizationAchievementPageAtom(
+          civilizationProjectPageKey([environmentId, projectId, threadId, cursor, limit]),
         );
   return useEnvironmentQuery(atom);
 }

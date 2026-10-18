@@ -1,4 +1,5 @@
 import {
+  CivilizationAchievementAwardId,
   CivilizationChronicleEntryId,
   EnvironmentId,
   ProjectId,
@@ -14,6 +15,16 @@ const projectId = ProjectId.make("project-chronicle-ui");
 const parentId = ThreadId.make("thread-chronicle-parent");
 const childId = ThreadId.make("thread-chronicle-child");
 const testState = vi.hoisted(() => ({ calls: [] as unknown[][] }));
+
+const award = {
+  awardId: CivilizationAchievementAwardId.make("award:first-child"),
+  projectId,
+  achievementId: "first_descendant" as const,
+  definitionVersion: 1,
+  subjectThreadId: childId,
+  triggerEntryId: CivilizationChronicleEntryId.make("chronicle:child"),
+  awardedAt: "2026-10-17T20:00:00.000Z",
+};
 
 const entry: CivilizationChronicleEntry = {
   entryId: CivilizationChronicleEntryId.make("chronicle:child"),
@@ -31,8 +42,23 @@ const entry: CivilizationChronicleEntry = {
 };
 
 vi.mock("../../state/civilization", () => ({
+  useCivilizationAchievementPage: (...args: unknown[]) => {
+    testState.calls.push(["achievements", ...args]);
+    return {
+      data: {
+        projectId,
+        revision: 2,
+        awards: [award],
+        nextCursor: null,
+        partial: false,
+      },
+      error: null,
+      isPending: false,
+      refresh: vi.fn(),
+    };
+  },
   useCivilizationChroniclePage: (...args: unknown[]) => {
-    testState.calls.push(args);
+    testState.calls.push(["chronicle", ...args]);
     return {
       data: {
         projectId,
@@ -104,10 +130,12 @@ describe("Civilization Chronicle", () => {
 
     const rendered = JSON.stringify(renderer?.toJSON());
     expect(rendered).toContain("Child joined");
+    expect(rendered).toContain("First descendant");
     expect(rendered).toContain("relationship ");
     expect(rendered).toContain("fork");
     expect(rendered).not.toContain("body");
-    expect(testState.calls.at(-1)?.slice(0, 5)).toEqual([
+    const chronicleCall = testState.calls.find((call) => call[0] === "chronicle");
+    expect(chronicleCall?.slice(1, 6)).toEqual([
       environmentId,
       projectId,
       { kind: undefined },
@@ -139,7 +167,8 @@ describe("Civilization Chronicle", () => {
       .find((button) => button.props.children === "Apply");
     await act(() => apply!.props.onClick());
 
-    expect(testState.calls.at(-1)?.[2]).toEqual({ kind: undefined, threadId: childId });
-    expect(testState.calls.at(-1)?.[4]).toBe(25);
+    const chronicleCall = testState.calls.toReversed().find((call) => call[0] === "chronicle");
+    expect(chronicleCall?.[3]).toEqual({ kind: undefined, threadId: childId });
+    expect(chronicleCall?.[5]).toBe(25);
   });
 });

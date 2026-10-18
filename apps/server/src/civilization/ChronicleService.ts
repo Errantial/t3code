@@ -1,5 +1,10 @@
 // @effect-diagnostics nodeBuiltinImport:off preferSchemaOverJson:off globalDate:off -- Chronicle provenance hashing, canonical HTTP time filters, and bounded metadata JSON are deliberate SQLite persistence boundaries.
 import {
+  CivilizationAchievementAward,
+  CivilizationAchievementAwardId,
+  CivilizationAchievementCursor,
+  type CivilizationAchievementId,
+  type CivilizationAchievementPage,
   CivilizationChronicleCursor,
   CivilizationChronicleEntry,
   CivilizationChronicleEntryId,
@@ -19,6 +24,7 @@ import * as SqlClient from "effect/sql/SqlClient";
 import { getEffectiveCivilizationConfig } from "./ConfigService.ts";
 
 const CURSOR_VERSION = 1 as const;
+const ACHIEVEMENT_CURSOR_VERSION = 1 as const;
 
 export class CivilizationChronicleInvalidError extends Schema.TaggedError<CivilizationChronicleInvalidError>()(
   "CivilizationChronicleInvalidError",
@@ -65,6 +71,32 @@ interface ChronicleCursorPayload {
   readonly to: string | null;
   readonly afterOccurredAt: string;
   readonly afterEntryId: string;
+}
+
+interface AchievementRow {
+  readonly award_id: string;
+  readonly project_id: ProjectId;
+  readonly achievement_id: CivilizationAchievementId;
+  readonly definition_version: number;
+  readonly subject_thread_id: ThreadId | null;
+  readonly trigger_entry_id: string;
+  readonly awarded_at: string;
+}
+
+interface AchievementCursorPayload {
+  readonly v: typeof ACHIEVEMENT_CURSOR_VERSION;
+  readonly projectId: string;
+  readonly revision: number;
+  readonly threadId: string | null;
+  readonly afterAwardedAt: string;
+  readonly afterAwardId: string;
+}
+
+export interface AchievementListInput {
+  readonly projectId: ProjectId;
+  readonly threadId?: ThreadId | undefined;
+  readonly cursor?: string | undefined;
+  readonly limit?: number | undefined;
 }
 
 export interface ChronicleListInput {
@@ -183,6 +215,39 @@ function decodeCursor(
   return parsed;
 }
 
+const encodeAchievementCursor = (
+  payload: AchievementCursorPayload,
+): CivilizationAchievementCursor =>
+  CivilizationAchievementCursor.make(
+    Buffer.from(JSON.stringify(payload), "utf8").toString("base64url"),
+  );
+
+function decodeAchievementCursor(
+  cursor: string | undefined,
+  input: AchievementListInput,
+): AchievementCursorPayload | null {
+  if (cursor === undefined) return null;
+  let parsed: AchievementCursorPayload;
+  try {
+    parsed = JSON.parse(
+      Buffer.from(cursor, "base64url").toString("utf8"),
+    ) as AchievementCursorPayload;
+  } catch {
+    throw new Error("Invalid achievement cursor.");
+  }
+  if (
+    parsed.v !== ACHIEVEMENT_CURSOR_VERSION ||
+    parsed.projectId !== input.projectId ||
+    parsed.threadId !== (input.threadId ?? null) ||
+    !Number.isSafeInteger(parsed.revision) ||
+    typeof parsed.afterAwardedAt !== "string" ||
+    typeof parsed.afterAwardId !== "string"
+  ) {
+    throw new Error("Achievement cursor does not match the current query.");
+  }
+  return parsed;
+}
+
 const decodeChronicleEntry = Schema.decodeUnknownSync(CivilizationChronicleEntry);
 const rowToEntry = (row: ChronicleRow): CivilizationChronicleEntry =>
   decodeChronicleEntry({
@@ -198,6 +263,18 @@ const rowToEntry = (row: ChronicleRow): CivilizationChronicleEntry =>
     sourceSequence: row.source_sequence,
     occurredAt: row.occurred_at,
     metadata: JSON.parse(row.metadata_json) as unknown,
+  });
+
+const decodeAchievementAward = Schema.decodeUnknownSync(CivilizationAchievementAward);
+const rowToAchievement = (row: AchievementRow): CivilizationAchievementAward =>
+  decodeAchievementAward({
+    awardId: CivilizationAchievementAwardId.make(row.award_id),
+    projectId: row.project_id,
+    achievementId: row.achievement_id,
+    definitionVersion: row.definition_version,
+    subjectThreadId: row.subject_thread_id,
+    triggerEntryId: CivilizationChronicleEntryId.make(row.trigger_entry_id),
+    awardedAt: row.awarded_at,
   });
 
 export const recordChronicleEntry = Effect.fn("CivilizationChronicle.record")(function* (
@@ -434,7 +511,120 @@ const make = Effect.gen(function* () {
     );
   });
 
-  return { list, record: recordChronicleEntry } as const;
+  const listAchievements = Effect.fn("CivilizationChronicle.listAchievements")(function* (
+    input: AchievementListInput,
+  ) {
+    return yield* sql.withTransaction(
+      Effect.gen(function* () {
+        const effective = yield* getEffectiveCivilizationConfig(input.projectId).pipe(
+          Effect.provideService(SqlClient.SqlClient, sql),
+        );
+        if (input.limit !== undefined && (!Number.isSafeInteger(input.limit) || input.limit < 1)) {
+          return yield* invalid("invalid_limit", "Achievement limit must be a positive integer.");
+        }
+        const limit = Math.min(
+          input.limit ?? effective.config.operations.censusPageSize,
+          effective.config.operations.censusPageSize,
+        );
+        const state = (yield* sql<{ readonly achievement_revision: number }>`
+          SELECT achievement_revision FROM civilization_project_state
+          WHERE project_id = ${input.projectId} LIMIT 1
+        `)[0] ?? { achievement_revision: 0 };
+        const cursor = yield* Effect.try({
+          try: () => decodeAchievementCursor(input.cursor, input),
+          catch: () =>
+            invalid(
+              "invalid_cursor",
+              "Achievement cursor is invalid or does not match this query.",
+            ),
+        });
+        if (cursor !== null && cursor.revision !== state.achievement_revision) {
+          return yield* invalid(
+            "invalid_cursor",
+            "Achievements changed while paging; restart from the first page.",
+          );
+        }
+        const afterAwardedAt = cursor?.afterAwardedAt ?? "9999-12-31T23:59:59.999Z";
+        const afterAwardId = cursor?.afterAwardId ?? "\uffff";
+        const queryLimit = limit + 1;
+        const rows =
+          input.threadId === undefined
+            ? yield* sql<AchievementRow>`
+                SELECT award_id, project_id, achievement_id, definition_version,
+                       subject_thread_id, trigger_entry_id, awarded_at
+                FROM civilization_achievement_awards
+                WHERE project_id = ${input.projectId}
+                  AND (awarded_at, award_id) < (${afterAwardedAt}, ${afterAwardId})
+                ORDER BY awarded_at DESC, award_id DESC
+                LIMIT ${queryLimit}
+              `
+            : yield* sql<AchievementRow>`
+                SELECT award_id, project_id, achievement_id, definition_version,
+                       subject_thread_id, trigger_entry_id, awarded_at
+                FROM civilization_achievement_awards
+                WHERE project_id = ${input.projectId}
+                  AND subject_thread_id = ${input.threadId}
+                  AND (awarded_at, award_id) < (${afterAwardedAt}, ${afterAwardId})
+                ORDER BY awarded_at DESC, award_id DESC
+                LIMIT ${queryLimit}
+              `;
+        const awards: Array<CivilizationAchievementAward> = [];
+        let byteLimited = false;
+        for (const row of rows.slice(0, limit)) {
+          const candidate = rowToAchievement(row);
+          const candidatePage: CivilizationAchievementPage = {
+            projectId: input.projectId,
+            revision: state.achievement_revision,
+            awards: [...awards, candidate],
+            nextCursor: encodeAchievementCursor({
+              v: ACHIEVEMENT_CURSOR_VERSION,
+              projectId: input.projectId,
+              revision: state.achievement_revision,
+              threadId: input.threadId ?? null,
+              afterAwardedAt: row.awarded_at,
+              afterAwardId: row.award_id,
+            }),
+            partial: true,
+          };
+          if (
+            utf8Length(JSON.stringify(candidatePage)) >
+            effective.config.operations.responseBodyBytes
+          ) {
+            byteLimited = true;
+            break;
+          }
+          awards.push(candidate);
+        }
+        if (rows.length > 0 && awards.length === 0) {
+          return yield* invalid(
+            "response_too_large",
+            "Achievement response limit cannot fit one award.",
+          );
+        }
+        const partial = byteLimited || rows.length > awards.length;
+        const last = awards.length === 0 ? undefined : rows[awards.length - 1];
+        return {
+          projectId: input.projectId,
+          revision: state.achievement_revision,
+          awards,
+          nextCursor:
+            !partial || last === undefined
+              ? null
+              : encodeAchievementCursor({
+                  v: ACHIEVEMENT_CURSOR_VERSION,
+                  projectId: input.projectId,
+                  revision: state.achievement_revision,
+                  threadId: input.threadId ?? null,
+                  afterAwardedAt: last.awarded_at,
+                  afterAwardId: last.award_id,
+                }),
+          partial,
+        } satisfies CivilizationAchievementPage;
+      }),
+    );
+  });
+
+  return { list, listAchievements, record: recordChronicleEntry } as const;
 });
 
 export type CivilizationChronicleServiceShape = Effect.Success<typeof make>;

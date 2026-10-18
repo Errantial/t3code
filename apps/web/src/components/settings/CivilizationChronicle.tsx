@@ -1,4 +1,7 @@
 ﻿import {
+  type CivilizationAchievementAward,
+  type CivilizationAchievementCursor,
+  type CivilizationAchievementId,
   type CivilizationChronicleCursor,
   type CivilizationChronicleEntry,
   type CivilizationChronicleKind,
@@ -8,7 +11,10 @@
 } from "@t3tools/contracts";
 import { useState } from "react";
 
-import { useCivilizationChroniclePage } from "../../state/civilization";
+import {
+  useCivilizationAchievementPage,
+  useCivilizationChroniclePage,
+} from "../../state/civilization";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../ui/select";
@@ -53,6 +59,14 @@ const label = (kind: CivilizationChronicleKind): string =>
     mail_acknowledged: "Mail acknowledged",
     mail_terminal: "Mail became terminal",
   })[kind];
+
+const achievementLabel = (achievementId: CivilizationAchievementId): string =>
+  ({
+    project_founder: "Project founder",
+    first_descendant: "First descendant",
+    first_acknowledged_correspondence: "First acknowledged correspondence",
+    lineage_generation_3: "Third generation reached",
+  })[achievementId];
 
 function ChronicleThreadLink({
   threadId,
@@ -116,6 +130,36 @@ function ChronicleEntry({
   );
 }
 
+function AchievementAward({
+  award,
+  onViewLineage,
+}: {
+  readonly award: CivilizationAchievementAward;
+  readonly onViewLineage?: ((threadId: ThreadId) => void) | undefined;
+}) {
+  return (
+    <li className="rounded-lg border border-border/70 p-3">
+      <div className="flex flex-wrap items-start justify-between gap-2">
+        <div className="min-w-0">
+          <div className="font-medium text-sm">{achievementLabel(award.achievementId)}</div>
+          <div className="wrap-anywhere text-xs text-muted-foreground">
+            {award.subjectThreadId === null ? (
+              "project"
+            ) : (
+              <ChronicleThreadLink threadId={award.subjectThreadId} onViewLineage={onViewLineage} />
+            )}
+            {` · definition v${award.definitionVersion}`}
+          </div>
+        </div>
+        <div className="text-right text-xs text-muted-foreground">
+          <div>{new Date(award.awardedAt).toLocaleString()}</div>
+          <div className="wrap-anywhere">trigger {award.triggerEntryId}</div>
+        </div>
+      </div>
+    </li>
+  );
+}
+
 export function CivilizationChronicle({
   environmentId,
   projectId,
@@ -133,6 +177,19 @@ export function CivilizationChronicle({
   }>({});
   const [cursor, setCursor] = useState<CivilizationChronicleCursor | null>(null);
   const [cursorStack, setCursorStack] = useState<Array<CivilizationChronicleCursor | null>>([]);
+  const [achievementCursor, setAchievementCursor] = useState<CivilizationAchievementCursor | null>(
+    null,
+  );
+  const [achievementCursorStack, setAchievementCursorStack] = useState<
+    Array<CivilizationAchievementCursor | null>
+  >([]);
+  const achievements = useCivilizationAchievementPage(
+    environmentId,
+    projectId,
+    null,
+    achievementCursor,
+    pageSize,
+  );
   const page = useCivilizationChroniclePage(
     environmentId,
     projectId,
@@ -140,6 +197,7 @@ export function CivilizationChronicle({
     cursor,
     pageSize,
   );
+  const achievementNextCursor = achievements.data?.nextCursor ?? null;
   const nextCursor = page.data?.nextCursor ?? null;
 
   const resetPaging = () => {
@@ -158,6 +216,18 @@ export function CivilizationChronicle({
       return current.slice(0, -1);
     });
   };
+  const nextAchievementPage = () => {
+    if (achievementNextCursor === null) return;
+    setAchievementCursorStack((current) => [...current, achievementCursor]);
+    setAchievementCursor(achievementNextCursor);
+  };
+  const previousAchievementPage = () => {
+    setAchievementCursorStack((current) => {
+      if (current.length === 0) return current;
+      setAchievementCursor(current.at(-1) ?? null);
+      return current.slice(0, -1);
+    });
+  };
   const applyFilters = () => {
     const thread = threadDraft.trim();
     const from = fromDraft === "" ? undefined : new Date(fromDraft).toISOString();
@@ -172,6 +242,51 @@ export function CivilizationChronicle({
 
   return (
     <SettingsSection title="Chronicle" id="civilization-chronicle">
+      <SettingsRow
+        title="Achievements"
+        description="Versioned awards derived from authoritative Chronicle facts only. No model inference."
+        control={
+          <div className="min-w-0 space-y-2">
+            {achievements.isPending && achievements.data === null ? (
+              <div className="text-sm text-muted-foreground">Loading achievements…</div>
+            ) : null}
+            {achievements.error === null ? null : (
+              <div className="text-sm text-destructive">{String(achievements.error)}</div>
+            )}
+            {achievements.data !== null && achievements.data.awards.length === 0 ? (
+              <div className="text-sm text-muted-foreground">
+                No deterministic achievements have been awarded yet.
+              </div>
+            ) : null}
+            <ol className="space-y-2" aria-label="Civilization achievements">
+              {achievements.data?.awards.map((award) => (
+                <AchievementAward key={award.awardId} award={award} onViewLineage={onViewLineage} />
+              ))}
+            </ol>
+            <div className="flex flex-wrap items-center gap-2">
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={achievementCursorStack.length === 0}
+                onClick={previousAchievementPage}
+              >
+                Previous awards
+              </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={achievementNextCursor === null}
+                onClick={nextAchievementPage}
+              >
+                Next awards
+              </Button>
+              <Button size="sm" variant="ghost" onClick={() => achievements.refresh()}>
+                Refresh awards
+              </Button>
+            </div>
+          </div>
+        }
+      />
       <SettingsRow
         title="Deterministic history"
         description="Typed, provenance-bearing Civilization facts only. No transcript summarization or model-generated lore."

@@ -82,6 +82,18 @@ const seedSensitiveData = Effect.fn("OperationsService.test.seedSensitiveData")(
   yield* seedCitizen(threadA, "Ada Secret");
   yield* seedCitizen(threadB, "Grace Secret");
   yield* sql`
+    INSERT INTO civilization_chronicle_entries (
+      entry_id, project_id, kind, primary_thread_id, secondary_thread_id,
+      citizen_epoch, citizen_revision, source_kind, source_id, source_sequence,
+      provenance_key, occurred_at, metadata_json
+    ) VALUES (
+      'chronicle:operations:founder', ${projectId}, 'citizen_joined', ${threadA}, NULL,
+      0, 1, 'host_event', 'event:operations:founder', 1,
+      'host_event\u001foperations-founder\u001fcitizen_joined\u001fthread-a\u001f',
+      '2026-10-16T00:00:00.000Z', '{}'
+    )
+  `;
+  yield* sql`
     INSERT INTO civilization_notes (
       note_id, project_id, category, body, body_bytes, author_thread_id, author_epoch,
       accepted_runtime_mode, accepted_interaction_mode, source_refs_json, revision,
@@ -168,12 +180,17 @@ it.effect(
       const operations = yield* OperationsService.CivilizationOperationsService;
       yield* setup;
       const exported = yield* operations.exportProjectData(projectId);
-      assert.equal(exported.schemaVersion, 2);
+      assert.equal(exported.schemaVersion, 3);
       assert.equal(exported.projectRevision, 1);
       assert.equal(exported.citizens.length, 2);
       assert.equal(exported.notes.length, 2);
       assert.equal(exported.mail.length, 2);
-      assert.equal(exported.chronicle.length, 4);
+      assert.equal(exported.chronicle.length, 5);
+      assert.equal(exported.achievements.length, 1);
+      assert.equal(
+        (exported.achievements[0] as { readonly achievement_id?: string }).achievement_id,
+        "project_founder",
+      );
       assert.equal(exported.limitations.mode, "inspection_backup_only");
       assert.isTrue(exported.limitations.inspectionBackupOnly);
       assert.isFalse(exported.limitations.restorable);
@@ -213,7 +230,8 @@ it.effect("previews exact purge counts/body bytes and rejects a stale preview", 
       noteBodyBytes: 16,
       messages: 2,
       messageBodyBytes: 21,
-      chronicleEntries: 4,
+      chronicleEntries: 5,
+      achievementAwards: 1,
       contextReferences: 1,
       contextInspections: 1,
       receipts: 1,
@@ -509,5 +527,11 @@ it.effect("resumes project-deletion cleanup in bounded idempotent batches", () =
     `)[0]!;
     assert.equal(projectTombstone.deletion_at, "2026-10-16T01:00:00.000Z");
     assert.equal(projectTombstone.progress_state, "complete");
+    assert.equal(
+      (yield* sql<{ readonly count: number }>`
+        SELECT COUNT(*) AS count FROM civilization_achievement_awards WHERE project_id = ${projectId}
+      `)[0]?.count,
+      0,
+    );
   }).pipe(Effect.provide(Layer.fresh(layer))),
 );

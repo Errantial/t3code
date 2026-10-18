@@ -310,15 +310,53 @@ const readFeatureState = Effect.fn("RecoveryAcceptance.readFeatureState")(functi
         ORDER BY message_id ASC
       `),
     ],
+    chronicle: [
+      ...(yield* sql<{
+        readonly entry_id: string;
+        readonly kind: string;
+        readonly primary_thread_id: string | null;
+        readonly secondary_thread_id: string | null;
+        readonly source_kind: string;
+        readonly source_id: string;
+        readonly source_sequence: number | null;
+        readonly occurred_at: string;
+        readonly metadata_json: string;
+      }>`
+        SELECT entry_id, kind, primary_thread_id, secondary_thread_id,
+               source_kind, source_id, source_sequence, occurred_at, metadata_json
+        FROM civilization_chronicle_entries
+        WHERE project_id = ${projectId}
+        ORDER BY occurred_at ASC, entry_id ASC
+      `),
+    ],
+    achievements: [
+      ...(yield* sql<{
+        readonly award_id: string;
+        readonly achievement_id: string;
+        readonly definition_version: number;
+        readonly subject_thread_id: string | null;
+        readonly trigger_entry_id: string;
+        readonly awarded_at: string;
+      }>`
+        SELECT award_id, achievement_id, definition_version, subject_thread_id,
+               trigger_entry_id, awarded_at
+        FROM civilization_achievement_awards
+        WHERE project_id = ${projectId}
+        ORDER BY awarded_at ASC, award_id ASC
+      `),
+    ],
     projectState: [
       ...(yield* sql<{
         readonly census_revision: number;
         readonly notes_revision: number;
         readonly mail_revision: number;
+        readonly chronicle_revision: number;
+        readonly achievement_revision: number;
         readonly retained_message_count: number;
         readonly retained_body_bytes: number;
       }>`
         SELECT census_revision, notes_revision, mail_revision,
+               chronicle_revision, achievement_revision,
                retained_message_count, retained_body_bytes
         FROM civilization_project_state
         WHERE project_id = ${projectId}
@@ -538,7 +576,7 @@ it.effect(
       const migrated = yield* runMigrations();
       assert.deepEqual(
         migrated.map(([id]) => id),
-        [65, 66, 67, 68, 69, 70, 71, 72, 73],
+        [65, 66, 67, 68, 69, 70, 71, 72, 73, 74],
       );
       assert.deepEqual(
         (yield* sql<{
@@ -734,8 +772,24 @@ it.effect("VACUUM INTO snapshot restore preserves config, notes, mail and epochs
         override: { version: CIVILIZATION_CONFIG_VERSION, context: { rosterCount: 6 } },
       });
       yield* seedLatestFeatureRows({ projectId, threadId, lastAppliedSequence: 12 });
+      yield* sql`
+        INSERT INTO civilization_chronicle_entries (
+          entry_id, project_id, kind, primary_thread_id, secondary_thread_id,
+          citizen_epoch, citizen_revision, source_kind, source_id, source_sequence,
+          provenance_key, occurred_at, metadata_json
+        ) VALUES (
+          'chronicle:recovery:snapshot:founder', ${projectId}, 'citizen_joined', ${threadId}, NULL,
+          7, 5, 'host_event', 'event:recovery:snapshot:founder', 12,
+          'host_event\u001frecovery-snapshot-founder\u001fcitizen_joined\u001fthread\u001f',
+          ${fixedTime}, '{}'
+        )
+      `;
       yield* assertRetainedStateCoherent(projectId);
       snapshotted = yield* readFeatureState(projectId);
+      assert.isAbove(snapshotted.achievements.length, 0);
+      assert.isAbove(snapshotted.chronicle.length, 0);
+      assert.isAbove(snapshotted.projectState[0]?.achievement_revision ?? 0, 0);
+      assert.isAbove(snapshotted.projectState[0]?.chronicle_revision ?? 0, 0);
       yield* sql`VACUUM INTO ${snapshotPath}`;
       NodeFS.copyFileSync(snapshotPath, restoredPath);
 

@@ -691,6 +691,44 @@ export const CivilizationChroniclePage = Schema.Struct({
 });
 export type CivilizationChroniclePage = typeof CivilizationChroniclePage.Type;
 
+export const CivilizationAchievementAwardId = TrimmedNonEmptyString.pipe(
+  Schema.brand("CivilizationAchievementAwardId"),
+);
+export type CivilizationAchievementAwardId = typeof CivilizationAchievementAwardId.Type;
+
+export const CivilizationAchievementCursor = TrimmedNonEmptyString.pipe(
+  Schema.brand("CivilizationAchievementCursor"),
+);
+export type CivilizationAchievementCursor = typeof CivilizationAchievementCursor.Type;
+
+export const CivilizationAchievementId = Schema.Literals([
+  "project_founder",
+  "first_descendant",
+  "first_acknowledged_correspondence",
+  "lineage_generation_3",
+]);
+export type CivilizationAchievementId = typeof CivilizationAchievementId.Type;
+
+export const CivilizationAchievementAward = Schema.Struct({
+  awardId: CivilizationAchievementAwardId,
+  projectId: ProjectId,
+  achievementId: CivilizationAchievementId,
+  definitionVersion: Schema.Number,
+  subjectThreadId: Schema.NullOr(ThreadId),
+  triggerEntryId: CivilizationChronicleEntryId,
+  awardedAt: IsoDateTime,
+});
+export type CivilizationAchievementAward = typeof CivilizationAchievementAward.Type;
+
+export const CivilizationAchievementPage = Schema.Struct({
+  projectId: ProjectId,
+  revision: Schema.Number,
+  awards: Schema.Array(CivilizationAchievementAward),
+  nextCursor: Schema.NullOr(CivilizationAchievementCursor),
+  partial: Schema.Boolean,
+});
+export type CivilizationAchievementPage = typeof CivilizationAchievementPage.Type;
+
 export const CivilizationNoteId = TrimmedNonEmptyString.pipe(Schema.brand("CivilizationNoteId"));
 export type CivilizationNoteId = typeof CivilizationNoteId.Type;
 
@@ -1103,7 +1141,7 @@ export const CivilizationCitizenTitleResult = Schema.Struct({
 });
 export type CivilizationCitizenTitleResult = typeof CivilizationCitizenTitleResult.Type;
 
-export const CIVILIZATION_EXPORT_SCHEMA_VERSION = 2 as const;
+export const CIVILIZATION_EXPORT_SCHEMA_VERSION = 3 as const;
 
 export const CivilizationExportLimitations = Schema.Struct({
   mode: Schema.Literal("inspection_backup_only"),
@@ -1125,6 +1163,7 @@ export const CivilizationProjectDataExport = Schema.Struct({
   notes: Schema.Array(Schema.Unknown),
   mail: Schema.Array(Schema.Unknown),
   chronicle: Schema.Array(Schema.Unknown),
+  achievements: Schema.Array(Schema.Unknown),
 });
 export type CivilizationProjectDataExport = typeof CivilizationProjectDataExport.Type;
 
@@ -1135,6 +1174,7 @@ export const CivilizationPurgeCounts = Schema.Struct({
   messages: Schema.Number,
   messageBodyBytes: Schema.Number,
   chronicleEntries: Schema.Number,
+  achievementAwards: Schema.Number,
   contextReferences: Schema.Number,
   contextInspections: Schema.Number,
   receipts: Schema.Number,
@@ -1153,6 +1193,7 @@ export const CivilizationPurgePreview = Schema.Struct({
   notesRevision: Schema.Number,
   mailRevision: Schema.Number,
   chronicleRevision: Schema.Number,
+  achievementRevision: Schema.Number,
   counts: CivilizationPurgeCounts,
   limitations: CivilizationExportLimitations,
   warnings: Schema.Array(Schema.String),

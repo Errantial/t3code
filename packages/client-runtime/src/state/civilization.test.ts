@@ -35,6 +35,7 @@ import {
   diffEnvironmentCivilizationConfig,
   exportEnvironmentCivilizationProjectData,
   exportEnvironmentCivilizationConfig,
+  fetchEnvironmentCivilizationAchievementPage,
   fetchEnvironmentCivilizationCensusPage,
   fetchEnvironmentCivilizationChroniclePage,
   fetchEnvironmentCivilizationLineageNeighborhood,
@@ -618,6 +619,14 @@ describe("Civilization project inspection and citizen administration", () => {
                 nextCursor: null,
                 partial: false,
               });
+            case "/api/civilization/achievements":
+              return Response.json({
+                projectId: PROJECT_ID,
+                revision: 15,
+                awards: [],
+                nextCursor: null,
+                partial: false,
+              });
             case "/api/civilization/notes":
               return Response.json({
                 projectId: PROJECT_ID,
@@ -697,6 +706,14 @@ describe("Civilization project inspection and citizen administration", () => {
           }),
         );
         yield* provide(
+          fetchEnvironmentCivilizationAchievementPage({
+            ...auth,
+            projectId: PROJECT_ID,
+            threadId,
+            limit: 4,
+          }),
+        );
+        yield* provide(
           fetchEnvironmentCivilizationNotesPage({
             ...auth,
             projectId: PROJECT_ID,
@@ -716,6 +733,7 @@ describe("Civilization project inspection and citizen administration", () => {
           "/api/civilization/census",
           "/api/civilization/lineage",
           "/api/civilization/chronicle",
+          "/api/civilization/achievements",
           "/api/civilization/notes",
           "/api/civilization/inbox",
         ]);
@@ -756,6 +774,7 @@ describe("Civilization project inspection and citizen administration", () => {
           "/api/civilization/census",
           "/api/civilization/lineage",
           "/api/civilization/chronicle",
+          "/api/civilization/achievements",
           "/api/civilization/notes",
           "/api/civilization/inbox",
           `/api/civilization/notes/${encodeURIComponent(noteId)}`,
@@ -765,8 +784,8 @@ describe("Civilization project inspection and citizen administration", () => {
           "/api/civilization/citizens/title/restore",
           "/api/civilization/citizens/title/reclaim",
         ]);
-        expect(calls.slice(0, 7).every((call) => call.init.method === "GET")).toBe(true);
-        expect(calls.slice(7).every((call) => call.init.method === "POST")).toBe(true);
+        expect(calls.slice(0, 8).every((call) => call.init.method === "GET")).toBe(true);
+        expect(calls.slice(8).every((call) => call.init.method === "POST")).toBe(true);
         expect(calls.every((call) => call.init.credentials === "include")).toBe(true);
         expect(new URL(calls[0]!.url).searchParams.get("limit")).toBe("25");
         expect(new URL(calls[1]!.url).searchParams.get("threadId")).toBe(threadId);
@@ -777,7 +796,10 @@ describe("Civilization project inspection and citizen administration", () => {
         expect(chronicleUrl.searchParams.get("from")).toBe("2026-10-16T17:00:00.000Z");
         expect(chronicleUrl.searchParams.get("to")).toBe("2026-10-16T19:00:00.000Z");
         expect(chronicleUrl.searchParams.get("limit")).toBe("10");
-        expect(new URL(calls[3]!.url).searchParams.get("includeResolved")).toBe("true");
+        const achievementUrl = new URL(calls[3]!.url);
+        expect(achievementUrl.searchParams.get("threadId")).toBe(threadId);
+        expect(achievementUrl.searchParams.get("limit")).toBe("4");
+        expect(new URL(calls[4]!.url).searchParams.get("includeResolved")).toBe("true");
       }),
   );
 });
@@ -792,7 +814,7 @@ describe("Civilization project data and retention operations", () => {
         switch (new URL(url).pathname) {
           case "/api/civilization/export":
             return Response.json({
-              schemaVersion: 2,
+              schemaVersion: 3,
               projectId: PROJECT_ID,
               exportedAt: "2026-10-16T18:00:00.000Z",
               environmentRevision: 2,
@@ -808,6 +830,7 @@ describe("Civilization project data and retention operations", () => {
               notes: [],
               mail: [],
               chronicle: [],
+              achievements: [],
             });
           case "/api/civilization/retention":
             return Response.json({
@@ -878,6 +901,7 @@ describe("Civilization project data and retention operations", () => {
               notesRevision: 5,
               mailRevision: 6,
               chronicleRevision: 7,
+              achievementRevision: 8,
               counts: {
                 citizens: 1,
                 notes: 2,
@@ -885,6 +909,7 @@ describe("Civilization project data and retention operations", () => {
                 messages: 3,
                 messageBodyBytes: 64,
                 chronicleEntries: 8,
+                achievementAwards: 4,
                 contextReferences: 4,
                 contextInspections: 7,
                 receipts: 5,

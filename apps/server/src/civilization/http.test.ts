@@ -1,6 +1,7 @@
 import {
   AuthSessionId,
   CIVILIZATION_CONFIG_VERSION,
+  CivilizationAchievementCursor,
   CivilizationCensusCursor,
   CivilizationChronicleCursor,
   CivilizationLineageCursor,
@@ -110,6 +111,8 @@ const fakeMail = MailService.CivilizationMailService.of({
 const fakeChronicle = ChronicleService.CivilizationChronicleService.of({
   list: ({ projectId }) =>
     Effect.succeed({ projectId, revision: 0, entries: [], nextCursor: null, partial: false }),
+  listAchievements: ({ projectId }) =>
+    Effect.succeed({ projectId, revision: 0, awards: [], nextCursor: null, partial: false }),
   record: () => Effect.die("unused chronicle record"),
 });
 const fakeOperations = OperationsService.CivilizationOperationsService.of({
@@ -455,6 +458,72 @@ it.effect("maps bounded Chronicle filters and rejects malformed limits", () =>
             to: "2026-10-17T22:00:00.000Z",
             cursor: "chronicle-cursor",
             limit: 7,
+          });
+        }),
+      ),
+    );
+  }),
+);
+
+it.effect("maps bounded achievement reads through orchestration:read", () =>
+  Effect.gen(function* () {
+    const adoptionCalls = yield* Ref.make(0);
+    const projectId = ProjectId.make("project:civilization:http-achievements");
+    const threadId = ThreadId.make("thread:civilization:http-achievements");
+    const listInput = yield* Ref.make<ChronicleService.AchievementListInput | null>(null);
+    const chronicle = ChronicleService.CivilizationChronicleService.of({
+      ...fakeChronicle,
+      listAchievements: (input) =>
+        Ref.set(listInput, input).pipe(
+          Effect.as({
+            projectId,
+            revision: 5,
+            awards: [],
+            nextCursor: CivilizationAchievementCursor.make("achievement-next"),
+            partial: true,
+          }),
+        ),
+    });
+
+    return yield* Effect.acquireUseRelease(
+      Effect.sync(() =>
+        HttpRouter.toWebHandler(
+          makeRoutes(
+            adoptionCalls,
+            ["orchestration:read"],
+            fakeKnowledge,
+            fakeMail,
+            fakeOperations,
+            chronicle,
+          ),
+          { disableLogger: true },
+        ),
+      ),
+      (server) =>
+        Effect.tryPromise(async () => {
+          const response = await server.handler(
+            new Request(
+              `http://127.0.0.1/api/civilization/achievements?projectId=${encodeURIComponent(projectId)}&threadId=${encodeURIComponent(threadId)}&cursor=achievement-cursor&limit=4`,
+            ),
+            requestContext,
+          );
+          expect(response.status).toBe(200);
+          expect(await response.json()).toMatchObject({
+            revision: 5,
+            nextCursor: "achievement-next",
+            partial: true,
+          });
+        }),
+      (server) => Effect.promise(() => server.dispose()),
+    ).pipe(
+      Effect.andThen(Ref.get(listInput)),
+      Effect.tap((input) =>
+        Effect.sync(() => {
+          expect(input).toEqual({
+            projectId,
+            threadId,
+            cursor: "achievement-cursor",
+            limit: 4,
           });
         }),
       ),

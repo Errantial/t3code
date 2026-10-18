@@ -198,3 +198,66 @@ it.effect("binds kind, citizen, and canonical time filters to bounded Chronicle 
     if (isInvalid(inverted)) assert.equal(inverted.reason, "invalid_time_range");
   }).pipe(Effect.provide(testLayer)),
 );
+
+it.effect("pages achievement awards by stable revision and binds citizen filters", () =>
+  Effect.gen(function* () {
+    yield* runMigrations();
+    const service = yield* CivilizationChronicleService;
+    const sql = yield* SqlClient.SqlClient;
+    const otherCitizenId = ThreadId.make("thread:chronicle:achievement-other");
+    yield* sql`
+      INSERT INTO civilization_achievement_awards (
+        award_id, project_id, achievement_id, definition_version, subject_thread_id,
+        subject_key, trigger_entry_id, awarded_at
+      ) VALUES
+        ('award:test:1', ${projectId}, 'project_founder', 1, ${citizenId}, ${citizenId},
+         'chronicle:test:award:1', '2026-10-17T20:00:00.000Z'),
+        ('award:test:2', ${projectId}, 'first_descendant', 1, ${otherCitizenId}, ${otherCitizenId},
+         'chronicle:test:award:2', '2026-10-17T20:01:00.000Z'),
+        ('award:test:3', ${projectId}, 'lineage_generation_3', 1, ${citizenId}, ${citizenId},
+         'chronicle:test:award:3', '2026-10-17T20:02:00.000Z')
+    `;
+
+    const first = yield* service.listAchievements({ projectId, limit: 2 });
+    assert.deepEqual(
+      first.awards.map((award) => award.achievementId),
+      ["lineage_generation_3", "first_descendant"],
+    );
+    assert.isTrue(first.partial);
+    assert.isNotNull(first.nextCursor);
+    const second = yield* service.listAchievements({
+      projectId,
+      limit: 2,
+      cursor: first.nextCursor!,
+    });
+    assert.deepEqual(
+      second.awards.map((award) => award.achievementId),
+      ["project_founder"],
+    );
+
+    const citizenAwards = yield* service.listAchievements({
+      projectId,
+      threadId: citizenId,
+      limit: 10,
+    });
+    assert.deepEqual(
+      citizenAwards.awards.map((award) => award.achievementId),
+      ["lineage_generation_3", "project_founder"],
+    );
+
+    yield* sql`
+      INSERT INTO civilization_achievement_awards (
+        award_id, project_id, achievement_id, definition_version, subject_thread_id,
+        subject_key, trigger_entry_id, awarded_at
+      ) VALUES (
+        'award:test:4', ${projectId}, 'first_acknowledged_correspondence', 1,
+        ${citizenId}, ${citizenId}, 'chronicle:test:award:4', '2026-10-17T20:03:00.000Z'
+      )
+    `;
+    const stale = yield* Effect.flip(
+      service.listAchievements({ projectId, limit: 2, cursor: first.nextCursor! }),
+    );
+    assert.isTrue(isInvalid(stale));
+    if (isInvalid(stale)) assert.equal(stale.reason, "invalid_cursor");
+  }).pipe(Effect.provide(testLayer)),
+);

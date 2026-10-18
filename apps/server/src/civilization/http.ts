@@ -1,6 +1,7 @@
 import {
   AuthOrchestrationReadScope,
   AuthSettingsWriteScope,
+  CivilizationAchievementCursor,
   CivilizationCensusCursor,
   CivilizationChronicleCursor,
   CivilizationLineageCursor,
@@ -320,6 +321,39 @@ export const layer = HttpApiBuilder.group(
                   page.nextCursor === null
                     ? null
                     : CivilizationChronicleCursor.make(page.nextCursor),
+              })),
+              Effect.catchTags({
+                SqlError: (cause) => failEnvironmentInternal("internal_error", cause),
+                CivilizationChronicleInvalidError: (cause) =>
+                  Effect.fail(new EnvironmentHttpBadRequestError({ message: cause.message })),
+              }),
+            );
+        }),
+      )
+      .handle(
+        "achievements",
+        Effect.fn("environment.civilization.achievements")(function* (args) {
+          yield* authorizeRead(args.endpoint.name);
+          const limitResult = parseOptionalPositiveInteger(args.query.limit);
+          if (!limitResult.ok) {
+            return yield* new EnvironmentHttpBadRequestError({
+              message: "limit must be a positive integer.",
+            });
+          }
+          return yield* chronicle
+            .listAchievements({
+              projectId: args.query.projectId,
+              ...(args.query.threadId === undefined ? {} : { threadId: args.query.threadId }),
+              ...(args.query.cursor === undefined ? {} : { cursor: args.query.cursor }),
+              ...(limitResult.value === undefined ? {} : { limit: limitResult.value }),
+            })
+            .pipe(
+              Effect.map((page) => ({
+                ...page,
+                nextCursor:
+                  page.nextCursor === null
+                    ? null
+                    : CivilizationAchievementCursor.make(page.nextCursor),
               })),
               Effect.catchTags({
                 SqlError: (cause) => failEnvironmentInternal("internal_error", cause),

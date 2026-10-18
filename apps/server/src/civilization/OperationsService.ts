@@ -42,6 +42,7 @@ type StateRow = {
   readonly notes_revision: number;
   readonly mail_revision: number;
   readonly chronicle_revision: number;
+  readonly achievement_revision: number;
 };
 
 type ConfigRow = { readonly revision: number };
@@ -437,6 +438,13 @@ const make = Effect.gen(function* () {
           WHERE project_id = ${projectId}
           ORDER BY occurred_at ASC, entry_id ASC
         `;
+        const achievements = yield* sql<Record<string, unknown>>`
+          SELECT award_id, project_id, achievement_id, definition_version,
+                 subject_thread_id, trigger_entry_id, awarded_at
+          FROM civilization_achievement_awards
+          WHERE project_id = ${projectId}
+          ORDER BY awarded_at ASC, award_id ASC
+        `;
         return {
           schemaVersion: CIVILIZATION_EXPORT_SCHEMA_VERSION,
           projectId,
@@ -462,6 +470,7 @@ const make = Effect.gen(function* () {
                 typeof metadataJson === "string" ? (JSON.parse(metadataJson) as unknown) : {},
             };
           }),
+          achievements,
         } satisfies CivilizationProjectDataExport;
       }),
     );
@@ -480,13 +489,15 @@ const make = Effect.gen(function* () {
             SELECT revision FROM civilization_project_config WHERE project_id = ${projectId} LIMIT 1
           `)[0]?.revision ?? 0;
       const state = (yield* sql<StateRow>`
-            SELECT census_revision, notes_revision, mail_revision, chronicle_revision
+            SELECT census_revision, notes_revision, mail_revision, chronicle_revision,
+                   achievement_revision
             FROM civilization_project_state WHERE project_id = ${projectId} LIMIT 1
           `)[0] ?? {
         census_revision: 0,
         notes_revision: 0,
         mail_revision: 0,
         chronicle_revision: 0,
+        achievement_revision: 0,
       };
       const citizens =
         (yield* sql<CountRow>`SELECT COUNT(*) AS count, 0 AS bytes FROM civilization_citizens WHERE project_id = ${projectId}`)[0]!;
@@ -496,6 +507,8 @@ const make = Effect.gen(function* () {
         (yield* sql<CountRow>`SELECT COUNT(*) AS count, COALESCE(SUM(body_bytes), 0) AS bytes FROM civilization_messages WHERE project_id = ${projectId}`)[0]!;
       const chronicle =
         (yield* sql<CountRow>`SELECT COUNT(*) AS count, 0 AS bytes FROM civilization_chronicle_entries WHERE project_id = ${projectId}`)[0]!;
+      const achievements =
+        (yield* sql<CountRow>`SELECT COUNT(*) AS count, 0 AS bytes FROM civilization_achievement_awards WHERE project_id = ${projectId}`)[0]!;
       const contextReferences =
         (yield* sql<CountRow>`SELECT COUNT(*) AS count, 0 AS bytes FROM civilization_context_references WHERE project_id = ${projectId}`)[0]!;
       const contextInspections =
@@ -515,6 +528,7 @@ const make = Effect.gen(function* () {
         messages: messages.count,
         messageBodyBytes: messages.bytes,
         chronicleEntries: chronicle.count,
+        achievementAwards: achievements.count,
         contextReferences: contextReferences.count,
         contextInspections: contextInspections.count,
         receipts: receipts.count,
@@ -530,6 +544,7 @@ const make = Effect.gen(function* () {
         notesRevision: state.notes_revision,
         mailRevision: state.mail_revision,
         chronicleRevision: state.chronicle_revision,
+        achievementRevision: state.achievement_revision,
         counts,
       };
       return {
@@ -541,6 +556,7 @@ const make = Effect.gen(function* () {
         notesRevision: state.notes_revision,
         mailRevision: state.mail_revision,
         chronicleRevision: state.chronicle_revision,
+        achievementRevision: state.achievement_revision,
         counts,
         limitations,
         warnings: [...PURGE_WARNINGS],
@@ -564,6 +580,7 @@ const make = Effect.gen(function* () {
       counts.notes +
       counts.messages +
       counts.chronicleEntries +
+      counts.achievementAwards +
       counts.contextReferences +
       counts.contextInspections +
       counts.receipts +
@@ -634,6 +651,7 @@ const make = Effect.gen(function* () {
     yield* deleteRows("civilization_context_references");
     yield* deleteRows("civilization_mail_operation_receipts");
     yield* deleteRows("civilization_mail_quota_windows");
+    yield* deleteRows("civilization_achievement_awards");
     yield* deleteRows("civilization_chronicle_entries");
     yield* deleteRows("civilization_messages");
     yield* deleteRows("civilization_notes");
