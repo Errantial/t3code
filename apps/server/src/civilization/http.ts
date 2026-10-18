@@ -218,6 +218,8 @@ export const layer = HttpApiBuilder.group(
           return yield* administration.applyReassignment(args.payload).pipe(
             Effect.catchTags({
               SqlError: (cause) => failEnvironmentInternal("internal_error", cause),
+              CivilizationAdministrationError: (cause) =>
+                failEnvironmentInternal("internal_error", cause),
             }),
           );
         }),

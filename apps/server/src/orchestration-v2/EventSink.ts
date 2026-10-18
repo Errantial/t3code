@@ -79,7 +79,11 @@ export interface EventSinkPersistenceParticipant {
   readonly apply: (committed: {
     readonly storedEvents: ReadonlyArray<OrchestrationV2StoredEvent>;
     readonly projectEvents: ReadonlyArray<ApplicationProjectEvent>;
-  }) => Effect.Effect<void, unknown, SqlClient.SqlClient>;
+  }) => Effect.Effect<
+    void | ReadonlyArray<EffectOutbox.PendingOrchestrationEffectV2>,
+    unknown,
+    SqlClient.SqlClient
+  >;
 }
 
 export class EventSinkPersistenceParticipants extends Context.Reference<
@@ -403,7 +407,12 @@ const layerBase: Layer.Layer<
         ],
         (participant) => participant.apply(committed),
         { concurrency: 1 },
-      ).pipe(Effect.provideService(SqlClient.SqlClient, sql));
+      ).pipe(
+        Effect.map((results) =>
+          results.flatMap((result) => (result === undefined ? [] : Array.from(result))),
+        ),
+        Effect.provideService(SqlClient.SqlClient, sql),
+      );
 
     const writeEffect = Effect.fn("orchestrationV2.EventSink.write")(function* (
       input: Parameters<EventSinkV2Shape["writeWithEffects"]>[0],
@@ -426,21 +435,22 @@ const layerBase: Layer.Layer<
             events: normalized,
           });
           yield* applyStoredEvents(committed);
-          yield* runParticipants(input.participants, {
+          const participantEffects = yield* runParticipants(input.participants, {
             storedEvents: committed,
             projectEvents: [],
           });
-          yield* effectOutbox.enqueue(input.effects);
-          return committed;
+          const effects = [...input.effects, ...participantEffects];
+          yield* effectOutbox.enqueue(effects);
+          return { committed, effectCount: effects.length };
         }).pipe(Effect.withTracerEnabled(false)),
-        (storedEvents) =>
+        (result) =>
           Effect.gen(function* () {
-            if (input.effects.length > 0) {
-              yield* effectOutbox.notifyAvailable(input.effects.length);
+            if (result.effectCount > 0) {
+              yield* effectOutbox.notifyAvailable(result.effectCount);
             }
-            yield* publishStoredEvents(storedEvents);
+            yield* publishStoredEvents(result.committed);
           }),
-      );
+      ).pipe(Effect.map((result) => result.committed));
     });
 
     const writeIfRunCurrentEffect = Effect.fn("orchestrationV2.EventSink.writeIfRunCurrent")(
@@ -488,15 +498,19 @@ const layerBase: Layer.Layer<
               events: normalized,
             });
             yield* applyStoredEvents(storedEvents);
-            yield* runParticipants(undefined, { storedEvents, projectEvents: [] });
-            yield* effectOutbox.enqueue(input.effects ?? []);
-            return { committed: true as const, storedEvents };
+            const participantEffects = yield* runParticipants(undefined, {
+              storedEvents,
+              projectEvents: [],
+            });
+            const effects = [...(input.effects ?? []), ...participantEffects];
+            yield* effectOutbox.enqueue(effects);
+            return { committed: true as const, storedEvents, effectCount: effects.length };
           }),
           (result) =>
             Effect.gen(function* () {
               if (!result.committed) return;
-              if (input.effects !== undefined && input.effects.length > 0) {
-                yield* effectOutbox.notifyAvailable(input.effects.length);
+              if (result.effectCount > 0) {
+                yield* effectOutbox.notifyAvailable(result.effectCount);
               }
               yield* publishStoredEvents(result.storedEvents);
             }),
@@ -554,10 +568,24 @@ const layerBase: Layer.Layer<
             events: normalized,
           });
           yield* applyStoredEvents(storedEvents);
-          yield* runParticipants(undefined, { storedEvents, projectEvents: [] });
-          return { committed: true as const, storedEvents };
+          const participantEffects = yield* runParticipants(undefined, {
+            storedEvents,
+            projectEvents: [],
+          });
+          yield* effectOutbox.enqueue(participantEffects);
+          return {
+            committed: true as const,
+            storedEvents,
+            effectCount: participantEffects.length,
+          };
         }),
-        (result) => (result.committed ? publishStoredEvents(result.storedEvents) : Effect.void),
+        (result) =>
+          result.committed
+            ? Effect.gen(function* () {
+                if (result.effectCount > 0) yield* effectOutbox.notifyAvailable(result.effectCount);
+                yield* publishStoredEvents(result.storedEvents);
+              })
+            : Effect.void,
       );
     });
 
@@ -588,10 +616,24 @@ const layerBase: Layer.Layer<
           const normalized = yield* normalizeEvents(input.events);
           const storedEvents = yield* eventStore.append({ events: normalized });
           yield* applyStoredEvents(storedEvents);
-          yield* runParticipants(undefined, { storedEvents, projectEvents: [] });
-          return { committed: true as const, storedEvents };
+          const participantEffects = yield* runParticipants(undefined, {
+            storedEvents,
+            projectEvents: [],
+          });
+          yield* effectOutbox.enqueue(participantEffects);
+          return {
+            committed: true as const,
+            storedEvents,
+            effectCount: participantEffects.length,
+          };
         }),
-        (result) => (result.committed ? publishStoredEvents(result.storedEvents) : Effect.void),
+        (result) =>
+          result.committed
+            ? Effect.gen(function* () {
+                if (result.effectCount > 0) yield* effectOutbox.notifyAvailable(result.effectCount);
+                yield* publishStoredEvents(result.storedEvents);
+              })
+            : Effect.void,
       );
     });
 
@@ -641,7 +683,11 @@ const layerBase: Layer.Layer<
             );
           }
           yield* applyStoredEvents(storedEvents);
-          yield* runParticipants(undefined, { storedEvents, projectEvents: [] });
+          const participantEffects = yield* runParticipants(undefined, {
+            storedEvents,
+            projectEvents: [],
+          });
+          yield* effectOutbox.enqueue(participantEffects);
           yield* effectOutbox.enqueue(input.effects);
           const receipt: CommandReceiptStore.CommandReceiptV2 = {
             commandId: input.commandId,
@@ -660,13 +706,19 @@ const layerBase: Layer.Layer<
                   threadId: input.threadId,
                   ...input.cancelUnsettledEffects,
                 });
-          return { receipt, storedEvents, committed: true as const, cancelledEffectIds };
+          return {
+            receipt,
+            storedEvents,
+            committed: true as const,
+            cancelledEffectIds,
+            effectCount: participantEffects.length + input.effects.length,
+          };
         }),
         (result) =>
           Effect.gen(function* () {
             yield* effectOutbox.signalCancellations(result.cancelledEffectIds);
-            if (result.committed && input.effects.length > 0) {
-              yield* effectOutbox.notifyAvailable(input.effects.length);
+            if (result.committed && result.effectCount > 0) {
+              yield* effectOutbox.notifyAvailable(result.effectCount);
             }
             if (result.committed) yield* publishStoredEvents(result.storedEvents);
           }),
@@ -735,14 +787,21 @@ const layerBase: Layer.Layer<
             yield* projectStore.apply(event);
             const receipt = { ...reserved, resultSequence: event.sequence };
             yield* commandReceipts.upsert(receipt);
-            yield* runParticipants(input.participants, {
+            const participantEffects = yield* runParticipants(input.participants, {
               storedEvents: [],
               projectEvents: [event],
             });
-            return { receipt, event };
+            yield* effectOutbox.enqueue(participantEffects);
+            return { receipt, event, effectCount: participantEffects.length };
           }),
           (result) =>
-            result.event === undefined ? Effect.void : eventStore.publishCommitted([result.event]),
+            result.event === undefined
+              ? Effect.void
+              : Effect.gen(function* () {
+                  if (result.effectCount > 0)
+                    yield* effectOutbox.notifyAvailable(result.effectCount);
+                  yield* eventStore.publishCommitted([result.event]);
+                }),
         );
         return { receipt: result.receipt, committed: result.event !== undefined };
       },

@@ -14,6 +14,7 @@ type CitizenTitleRow = {
   readonly name_display: string;
   readonly generation: number;
   readonly title_managed: number;
+  readonly title_topic: string;
 };
 
 const byteLength = (value: string) => Buffer.byteLength(value, "utf8");
@@ -32,7 +33,7 @@ function composeTitle(
     .replaceAll("{generation}", String(input.generation));
 }
 
-function fitManagedTitle(
+export function fitCivilizationManagedTitle(
   template: string,
   input: {
     readonly name: string;
@@ -56,11 +57,11 @@ export const makeCivilizationTitleTransform = (sql: SqlClient.SqlClient) => ({
   transform: (input: {
     readonly threadId: ThreadId;
     readonly requestId: CommandId;
-    readonly generatedTitle: string;
+    readonly generatedTitle?: string | undefined;
   }) =>
     Effect.gen(function* () {
       const citizen = (yield* sql<CitizenTitleRow>`
-          SELECT project_id, name_display, generation, title_managed
+          SELECT project_id, name_display, generation, title_managed, title_topic
           FROM civilization_citizens
           WHERE thread_id = ${input.threadId}
           LIMIT 1
@@ -78,9 +79,10 @@ export const makeCivilizationTitleTransform = (sql: SqlClient.SqlClient) => ({
         return input.generatedTitle;
       }
 
-      const managedTitle = fitManagedTitle(effective.config.names.titleTemplate, {
+      const topic = input.generatedTitle ?? citizen.title_topic;
+      const managedTitle = fitCivilizationManagedTitle(effective.config.names.titleTemplate, {
         name: citizen.name_display,
-        topic: input.generatedTitle,
+        topic,
         generation: citizen.generation,
       });
       const completionCommandId = CommandId.make(`${input.requestId}:title-complete`);
@@ -88,7 +90,7 @@ export const makeCivilizationTitleTransform = (sql: SqlClient.SqlClient) => ({
         UPDATE civilization_citizens
         SET pending_title_command_id = ${completionCommandId},
             pending_managed_title = ${managedTitle},
-            pending_title_topic = ${input.generatedTitle},
+            pending_title_topic = ${topic},
             revision = revision + 1,
             updated_at = datetime('now')
         WHERE thread_id = ${input.threadId} AND title_managed = 1

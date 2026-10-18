@@ -195,6 +195,61 @@ it("does not retry pure interrupt races where the turn is already gone", () => {
   );
 });
 
+it.effect("applies deterministic thread titles through the authoritative metadata command", () =>
+  Effect.gen(function* () {
+    const now = DateTime.formatIso(yield* DateTime.now);
+    const events = yield* Ref.make<ReadonlyArray<string>>([]);
+    const title = yield* Ref.make("Seed topic");
+    const layer = layerExecutorFor({
+      events,
+      threads: {
+        getThreadProjection: () =>
+          Ref.get(title).pipe(Effect.map((current) => ({ thread: { title: current } }) as never)),
+        dispatch: (command) => {
+          assert.equal(command.type, "thread.metadata.update");
+          if (command.type !== "thread.metadata.update" || command.title === undefined) {
+            return Effect.die("unexpected command");
+          }
+          return Effect.gen(function* () {
+            const current = yield* Ref.get(title);
+            assert.equal(command.expectedTitle, current);
+            yield* Ref.set(title, command.title!);
+            yield* Ref.update(events, (items) => [...items, command.title!]);
+            return { sequence: 1, storedEvents: [] } as never;
+          });
+        },
+      },
+    });
+    const effect: EffectOutbox.OrchestrationEffectV2 = {
+      id: "effect:civilization-title-apply",
+      commandId: CommandId.make("civilization:title:apply:test"),
+      threadId,
+      request: {
+        type: "thread-title.apply",
+        expectedTitle: "Seed topic",
+        title: "[Ada] Seed topic",
+      },
+      status: "running",
+      attemptCount: 1,
+      availableAt: now,
+      leaseOwner: "test-worker",
+      leaseExpiresAt: now,
+      createdAt: now,
+      updatedAt: now,
+      completedAt: null,
+      lastError: null,
+    };
+
+    yield* Effect.gen(function* () {
+      const executor = yield* EffectWorker.OrchestrationEffectExecutorV2;
+      yield* executor.execute(effect);
+      yield* executor.execute(effect);
+    }).pipe(Effect.provide(layer));
+    assert.equal(yield* Ref.get(title), "[Ada] Seed topic");
+    assert.deepEqual(yield* Ref.get(events), ["[Ada] Seed topic"]);
+  }),
+);
+
 it.effect("settles a stopped run when its adapter has already lost the native turn", () =>
   Effect.gen(function* () {
     const now = yield* DateTime.now;

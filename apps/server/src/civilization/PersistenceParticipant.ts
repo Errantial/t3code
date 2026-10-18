@@ -1,6 +1,7 @@
 // @effect-diagnostics preferSchemaOverJson:off
 import {
   CIVILIZATION_NAME_GENERATOR_VERSION,
+  CommandId,
   type CivilizationLineageStatus,
   isProviderNativeSubagentThread,
   OrchestrationV2AppThread,
@@ -15,15 +16,20 @@ import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
 
 import type { EventSinkPersistenceParticipant } from "../orchestration-v2/EventSink.ts";
+import type { PendingOrchestrationEffectV2 } from "../orchestration-v2/EffectOutbox.ts";
 import { recordChronicleEntry } from "./ChronicleService.ts";
 import {
   getEffectiveCivilizationConfig,
   normalizeCivilizationName,
   weightedCivilizationEntry,
 } from "./ConfigService.ts";
+import { fitCivilizationManagedTitle } from "./TitleOwnership.ts";
 
 type CitizenLifecycleRow = {
   readonly thread_id: string;
+  readonly project_id: ProjectId;
+  readonly name_display: string;
+  readonly generation: number;
   readonly epoch: number;
   readonly closed: number;
   readonly deleted: number;
@@ -39,6 +45,7 @@ type CitizenLifecycleRow = {
   readonly pending_title_command_id: string | null;
   readonly pending_managed_title: string | null;
   readonly pending_title_topic: string | null;
+  readonly title_topic: string;
 };
 
 type ProjectionLineageRow = {
@@ -47,6 +54,24 @@ type ProjectionLineageRow = {
 };
 
 const CIVILIZATION_MAX_LINEAGE_DEPTH = 256;
+
+function titleApplyEffect(input: {
+  readonly threadId: ThreadId;
+  readonly commandId: CommandId;
+  readonly expectedTitle: string;
+  readonly title: string;
+}): PendingOrchestrationEffectV2 {
+  return {
+    id: `effect:${input.commandId}:thread-title.apply`,
+    commandId: input.commandId,
+    threadId: input.threadId,
+    request: {
+      type: "thread-title.apply",
+      expectedTitle: input.expectedTitle,
+      title: input.title,
+    },
+  };
+}
 
 const isAppThread = Schema.is(OrchestrationV2AppThread);
 
@@ -204,6 +229,17 @@ export const enrollCivilizationThread = Effect.fn("civilization.enrollThread")(f
     effective.config.names.automaticTitles &&
     !observedOnly &&
     (!input.adoption || effective.config.names.adoptionTitlePolicy === "managed");
+  const initialManagedTitle = titleManaged
+    ? fitCivilizationManagedTitle(effective.config.names.titleTemplate, {
+        name: name.displayName,
+        topic: thread.title,
+        generation: lineage.generation,
+      })
+    : null;
+  const initialTitleCommandId =
+    initialManagedTitle !== null && initialManagedTitle !== thread.title
+      ? CommandId.make(`civilization:title:enroll:${thread.id}:${input.sequence}`)
+      : null;
 
   yield* sql`
     INSERT INTO civilization_citizens (
@@ -227,8 +263,8 @@ export const enrollCivilizationThread = Effect.fn("civilization.enrollThread")(f
       ${profileEntry.id}, ${profileEntry.label}, ${JSON.stringify(profileEntry.traits)}, ${profileEntry.styleText}, ${profilePool.id},
       ${profileEntry.rich.label}, ${JSON.stringify(profileEntry.rich.traits)}, ${profileEntry.rich.axiom}, ${profileEntry.rich.voice}, ${profileEntry.rich.styleText},
       ${effective.environmentRevision}, ${effective.projectRevision},
-      ${titleManaged ? 1 : 0}, ${thread.title}, NULL, ${thread.title},
-      NULL, NULL, NULL,
+      ${titleManaged ? 1 : 0}, ${thread.title}, ${initialTitleCommandId === null ? initialManagedTitle : null}, ${thread.title},
+      ${initialTitleCommandId}, ${initialTitleCommandId === null ? null : initialManagedTitle}, ${initialTitleCommandId === null ? null : thread.title},
       0, ${closed ? 1 : 0}, ${thread.deletedAt === null ? 0 : 1},
       0, ${delivery.settled ? 1 : 0}, ${delivery.archived ? 1 : 0}, ${delivery.deleted ? 1 : 0},
       1, ${createdAt}, ${updatedAt}
@@ -257,7 +293,19 @@ export const enrollCivilizationThread = Effect.fn("civilization.enrollThread")(f
       metadata: { relationship: thread.lineage.relationshipToParent },
     });
   }
-  return true;
+  return {
+    effects:
+      initialTitleCommandId === null || initialManagedTitle === null
+        ? []
+        : [
+            titleApplyEffect({
+              threadId: thread.id,
+              commandId: initialTitleCommandId,
+              expectedTitle: thread.title,
+              title: initialManagedTitle,
+            }),
+          ],
+  } as const;
 });
 
 export const reconcileCivilizationStoredEvent = Effect.fn("civilization.reconcileThreadEvent")(
@@ -267,27 +315,29 @@ export const reconcileCivilizationStoredEvent = Effect.fn("civilization.reconcil
   }) {
     const { stored } = input;
     const sql = yield* SqlClient.SqlClient;
+    const effects: Array<PendingOrchestrationEffectV2> = [];
     if (input.allowEnrollment && stored.event.type === "thread.created") {
-      yield* enrollCivilizationThread({
+      const enrolled = yield* enrollCivilizationThread({
         sequence: stored.sequence,
         thread: stored.event.payload,
         adoption: false,
         chronicleSourceId: stored.event.id,
         chronicleOccurredAt: DateTime.formatIso(stored.event.occurredAt),
       });
+      if (enrolled !== false) effects.push(...enrolled.effects);
     }
     const thread = isAppThread(stored.event.payload) ? stored.event.payload : undefined;
     const row = (yield* sql<CitizenLifecycleRow>`
-      SELECT thread_id, epoch, closed, deleted,
+      SELECT thread_id, project_id, name_display, generation, epoch, closed, deleted,
              delivery_epoch, delivery_settled, delivery_archived, delivery_deleted,
              last_applied_sequence, title_managed, revision,
-             preserved_title, last_managed_title,
+             preserved_title, last_managed_title, title_topic,
              pending_title_command_id, pending_managed_title, pending_title_topic
       FROM civilization_citizens
       WHERE thread_id = ${stored.event.threadId}
       LIMIT 1
     `)[0];
-    if (row === undefined || stored.sequence <= row.last_applied_sequence) return;
+    if (row === undefined || stored.sequence <= row.last_applied_sequence) return effects;
 
     if (thread === undefined || thread.id !== stored.event.threadId) {
       yield* sql`
@@ -295,7 +345,7 @@ export const reconcileCivilizationStoredEvent = Effect.fn("civilization.reconcil
       SET last_applied_sequence = ${stored.sequence}, updated_at = datetime('now')
       WHERE thread_id = ${stored.event.threadId}
     `;
-      return;
+      return effects;
     }
 
     const nextClosed = civilizationThreadClosed(thread);
@@ -324,6 +374,47 @@ export const reconcileCivilizationStoredEvent = Effect.fn("civilization.reconcil
       stored.commandId === row.pending_title_command_id &&
       row.pending_managed_title !== null &&
       thread.title === row.pending_managed_title;
+    let convergence: {
+      readonly commandId: CommandId;
+      readonly title: string;
+      readonly topic: string;
+      readonly effect: PendingOrchestrationEffectV2;
+    } | null = null;
+    if (
+      row.title_managed === 1 &&
+      !pendingTitleLanded &&
+      row.pending_title_command_id === null &&
+      thread.titleRegeneration != null
+    ) {
+      const effective = yield* getEffectiveCivilizationConfig(row.project_id).pipe(
+        Effect.provideService(SqlClient.SqlClient, sql),
+      );
+      if (
+        effective.config.participation.enabled &&
+        !effective.config.participation.emergencyOff &&
+        effective.config.names.automaticTitles
+      ) {
+        const title = fitCivilizationManagedTitle(effective.config.names.titleTemplate, {
+          name: row.name_display,
+          topic: row.title_topic,
+          generation: row.generation,
+        });
+        if (thread.title !== title) {
+          const commandId = CommandId.make(`civilization:title:converge:${stored.event.id}`);
+          convergence = {
+            commandId,
+            title,
+            topic: row.title_topic,
+            effect: titleApplyEffect({
+              threadId: thread.id,
+              commandId,
+              expectedTitle: thread.title,
+              title,
+            }),
+          };
+        }
+      }
+    }
     const expectedManagedTitle = row.last_managed_title ?? row.preserved_title;
     const titleRelinquished =
       row.title_managed === 1 &&
@@ -336,7 +427,8 @@ export const reconcileCivilizationStoredEvent = Effect.fn("civilization.reconcil
       nextDeleted !== row.deleted ||
       deliveryStateChanged ||
       pendingTitleLanded ||
-      titleRelinquished;
+      titleRelinquished ||
+      convergence !== null;
     yield* sql`
     UPDATE civilization_citizens
     SET epoch = epoch + ${changedLifecycle ? 1 : 0},
@@ -351,9 +443,21 @@ export const reconcileCivilizationStoredEvent = Effect.fn("civilization.reconcil
         preserved_title = CASE WHEN ${titleRelinquished ? 1 : 0} = 1 THEN ${thread.title} ELSE preserved_title END,
         last_managed_title = CASE WHEN ${pendingTitleLanded ? 1 : 0} = 1 THEN ${row.pending_managed_title} ELSE last_managed_title END,
         title_topic = CASE WHEN ${pendingTitleLanded ? 1 : 0} = 1 THEN ${row.pending_title_topic} ELSE title_topic END,
-        pending_title_command_id = CASE WHEN ${pendingTitleLanded || titleRelinquished ? 1 : 0} = 1 THEN NULL ELSE pending_title_command_id END,
-        pending_managed_title = CASE WHEN ${pendingTitleLanded || titleRelinquished ? 1 : 0} = 1 THEN NULL ELSE pending_managed_title END,
-        pending_title_topic = CASE WHEN ${pendingTitleLanded || titleRelinquished ? 1 : 0} = 1 THEN NULL ELSE pending_title_topic END,
+        pending_title_command_id = CASE
+          WHEN ${convergence !== null ? 1 : 0} = 1 THEN ${convergence?.commandId ?? null}
+          WHEN ${pendingTitleLanded || titleRelinquished ? 1 : 0} = 1 THEN NULL
+          ELSE pending_title_command_id
+        END,
+        pending_managed_title = CASE
+          WHEN ${convergence !== null ? 1 : 0} = 1 THEN ${convergence?.title ?? null}
+          WHEN ${pendingTitleLanded || titleRelinquished ? 1 : 0} = 1 THEN NULL
+          ELSE pending_managed_title
+        END,
+        pending_title_topic = CASE
+          WHEN ${convergence !== null ? 1 : 0} = 1 THEN ${convergence?.topic ?? null}
+          WHEN ${pendingTitleLanded || titleRelinquished ? 1 : 0} = 1 THEN NULL
+          ELSE pending_title_topic
+        END,
         revision = revision + ${citizenStateChanged ? 1 : 0},
         updated_at = ${DateTime.formatIso(thread.updatedAt)}
     WHERE thread_id = ${stored.event.threadId}
@@ -394,6 +498,8 @@ export const reconcileCivilizationStoredEvent = Effect.fn("civilization.reconcil
         AND acknowledged_at IS NULL
     `;
     }
+    if (convergence !== null) effects.push(convergence.effect);
+    return effects;
   },
 );
 
@@ -430,14 +536,15 @@ export const civilizationPersistenceParticipant: EventSinkPersistenceParticipant
   name: "civilization",
   apply: ({ storedEvents, projectEvents }) =>
     Effect.gen(function* () {
-      yield* Effect.forEach(
+      const effects = yield* Effect.forEach(
         storedEvents,
         (stored) => reconcileCivilizationStoredEvent({ stored, allowEnrollment: true }),
-        { concurrency: 1, discard: true },
+        { concurrency: 1 },
       );
       yield* Effect.forEach(projectEvents, reconcileProjectEvent, {
         concurrency: 1,
         discard: true,
       });
+      return effects.flatMap((items) => items);
     }),
 };

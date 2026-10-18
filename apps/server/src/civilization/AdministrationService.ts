@@ -27,6 +27,7 @@ import {
   normalizeCivilizationName,
 } from "./ConfigService.ts";
 import { resolveCivilizationAvailableName } from "./PersistenceParticipant.ts";
+import { fitCivilizationManagedTitle } from "./TitleOwnership.ts";
 
 type CitizenAdministrationRow = {
   readonly thread_id: ThreadId;
@@ -46,6 +47,7 @@ type CitizenAdministrationRow = {
   readonly profile_rich_voice: string;
   readonly profile_rich_style_text: string;
   readonly profile_pool_id: string;
+  readonly generation: number;
   readonly title_managed: number;
   readonly preserved_title: string | null;
   readonly last_managed_title: string | null;
@@ -101,7 +103,7 @@ const make = Effect.gen(function* () {
                profile_entry_id, profile_label, profile_traits_json, profile_style_text,
                profile_rich_label, profile_rich_traits_json, profile_rich_axiom, profile_rich_voice,
                profile_rich_style_text, profile_pool_id,
-               title_managed, preserved_title, last_managed_title, title_topic,
+               generation, title_managed, preserved_title, last_managed_title, title_topic,
                observed_only, deleted, revision
         FROM civilization_citizens
         WHERE thread_id = ${threadId}
@@ -176,6 +178,12 @@ const make = Effect.gen(function* () {
     yield* assertProject(row, input.projectId);
     yield* assertCitizenRevision(row, input.expectedCitizenRevision);
     yield* assertMutable(row);
+    if (row.observed_only === 1) {
+      return yield* invalidOperation(
+        "observed_agent_read_only",
+        "Provider-owned observed agents cannot be reassigned.",
+      );
+    }
     const effective = yield* getEffectiveCivilizationConfig(row.project_id).pipe(
       Effect.provideService(SqlClient.SqlClient, sql),
     );
@@ -371,6 +379,52 @@ const make = Effect.gen(function* () {
     } satisfies CivilizationCitizenSummary;
   });
 
+  const dispatchManagedTitle = Effect.fn("CivilizationAdministration.dispatchManagedTitle")(
+    function* (input: {
+      readonly operation: string;
+      readonly threadId: ThreadId;
+      readonly commandId: CommandId;
+      readonly expectedTitle: string;
+      readonly title: string;
+    }) {
+      const failure = (cause: unknown) =>
+        new CivilizationAdministrationError({ operation: input.operation, cause });
+      yield* threads
+        .dispatch({
+          type: "thread.metadata.update",
+          commandId: input.commandId,
+          threadId: input.threadId,
+          expectedTitle: input.expectedTitle,
+          title: input.title,
+        })
+        .pipe(
+          Effect.mapError(failure),
+          Effect.catch((error) =>
+            threads.getThreadProjection(input.threadId).pipe(
+              Effect.flatMap((latest) =>
+                latest.thread.title === input.expectedTitle
+                  ? Effect.void
+                  : sql`
+                      UPDATE civilization_citizens
+                      SET title_managed = 0,
+                          preserved_title = ${latest.thread.title},
+                          pending_title_command_id = NULL,
+                          pending_managed_title = NULL,
+                          pending_title_topic = NULL,
+                          revision = revision + 1,
+                          updated_at = datetime('now')
+                      WHERE thread_id = ${input.threadId}
+                        AND pending_title_command_id = ${input.commandId}
+                    `.pipe(Effect.asVoid),
+              ),
+              Effect.ignore({ log: true }),
+              Effect.andThen(Effect.fail(error)),
+            ),
+          ),
+        );
+    },
+  );
+
   const previewReassignment = Effect.fn("CivilizationAdministration.previewReassignment")(
     function* (input: CivilizationCitizenReassignmentRequest) {
       return (yield* buildReassignment(input)).preview;
@@ -380,9 +434,34 @@ const make = Effect.gen(function* () {
   const applyReassignment = Effect.fn("CivilizationAdministration.applyReassignment")(function* (
     input: CivilizationCitizenReassignmentRequest,
   ) {
-    return yield* sql.withTransaction(
+    const plan = yield* buildReassignment(input);
+    const nameChanged = plan.next.nameDisplay !== plan.row.name_display;
+    const projection =
+      nameChanged && plan.row.title_managed === 1
+        ? yield* threads.getThreadProjection(input.threadId).pipe(
+            Effect.mapError(
+              (cause) =>
+                new CivilizationAdministrationError({
+                  operation: "get-thread-for-identity-title-refresh",
+                  cause,
+                }),
+            ),
+          )
+        : null;
+    const managedTitle =
+      projection === null
+        ? null
+        : fitCivilizationManagedTitle(plan.effective.config.names.titleTemplate, {
+            name: plan.next.nameDisplay,
+            topic: plan.row.title_topic,
+            generation: plan.row.generation,
+          });
+    const titleCommandId =
+      managedTitle !== null && managedTitle !== projection?.thread.title
+        ? CommandId.make(`civilization:title:identity:${input.threadId}:${plan.row.revision + 1}`)
+        : null;
+    yield* sql.withTransaction(
       Effect.gen(function* () {
-        const plan = yield* buildReassignment(input);
         const nextRevision = plan.row.revision + 1;
         yield* sql`
           UPDATE civilization_citizens
@@ -405,13 +484,38 @@ const make = Effect.gen(function* () {
               profile_pool_id = ${plan.next.profilePoolId},
               profile_environment_revision = ${plan.effective.environmentRevision},
               profile_project_revision = ${plan.effective.projectRevision},
+              last_managed_title = CASE
+                WHEN ${managedTitle !== null && titleCommandId === null ? 1 : 0} = 1 THEN ${managedTitle}
+                ELSE last_managed_title
+              END,
+              pending_title_command_id = CASE
+                WHEN ${titleCommandId !== null ? 1 : 0} = 1 THEN ${titleCommandId}
+                ELSE pending_title_command_id
+              END,
+              pending_managed_title = CASE
+                WHEN ${titleCommandId !== null ? 1 : 0} = 1 THEN ${managedTitle}
+                ELSE pending_managed_title
+              END,
+              pending_title_topic = CASE
+                WHEN ${titleCommandId !== null ? 1 : 0} = 1 THEN ${plan.row.title_topic}
+                ELSE pending_title_topic
+              END,
               revision = ${nextRevision},
               updated_at = datetime('now')
           WHERE thread_id = ${plan.row.thread_id} AND revision = ${plan.row.revision}
         `;
-        return yield* requireCitizen(plan.row.thread_id);
       }),
     );
+    if (titleCommandId !== null && managedTitle !== null && projection !== null) {
+      yield* dispatchManagedTitle({
+        operation: "refresh-managed-title-after-identity",
+        threadId: input.threadId,
+        commandId: titleCommandId,
+        expectedTitle: projection.thread.title,
+        title: managedTitle,
+      });
+    }
+    return yield* requireCitizen(plan.row.thread_id);
   });
 
   const reclaimTitle = Effect.fn("CivilizationAdministration.reclaimTitle")(function* (
@@ -426,7 +530,7 @@ const make = Effect.gen(function* () {
           }),
       ),
     );
-    yield* sql.withTransaction(
+    const plan = yield* sql.withTransaction(
       Effect.gen(function* () {
         const row = yield* readRow(input.threadId);
         yield* assertProject(row, input.projectId);
@@ -456,26 +560,45 @@ const make = Effect.gen(function* () {
             "Managed titles cannot be reclaimed while automatic titles are disabled.",
           );
         }
+        const managedTitle = fitCivilizationManagedTitle(effective.config.names.titleTemplate, {
+          name: row.name_display,
+          topic: projection.thread.title,
+          generation: row.generation,
+        });
+        const commandId = CommandId.make(
+          `civilization:title:reclaim:${input.threadId}:${row.revision + 1}`,
+        );
+        const needsApply = managedTitle !== projection.thread.title;
         yield* sql`
           UPDATE civilization_citizens
           SET title_managed = 1,
               preserved_title = ${projection.thread.title},
-              last_managed_title = NULL,
+              last_managed_title = ${needsApply ? null : managedTitle},
               title_topic = ${projection.thread.title},
-              pending_title_command_id = NULL,
-              pending_managed_title = NULL,
-              pending_title_topic = NULL,
+              pending_title_command_id = ${needsApply ? commandId : null},
+              pending_managed_title = ${needsApply ? managedTitle : null},
+              pending_title_topic = ${needsApply ? projection.thread.title : null},
               revision = revision + 1,
               updated_at = datetime('now')
           WHERE thread_id = ${input.threadId} AND revision = ${row.revision}
         `;
+        return { managedTitle, commandId, needsApply } as const;
       }),
     );
+    if (plan.needsApply) {
+      yield* dispatchManagedTitle({
+        operation: "reclaim-managed-title",
+        threadId: input.threadId,
+        commandId: plan.commandId,
+        expectedTitle: projection.thread.title,
+        title: plan.managedTitle,
+      });
+    }
     const citizen = yield* requireCitizen(input.threadId);
     return {
       citizen,
       changed: true,
-      threadTitle: projection.thread.title,
+      threadTitle: plan.managedTitle,
     } satisfies CivilizationCitizenTitleResult;
   });
 

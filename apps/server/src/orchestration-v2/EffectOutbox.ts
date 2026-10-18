@@ -111,6 +111,11 @@ export const OrchestrationEffectRequestV2 = Schema.Union([
     ]),
   }),
   Schema.Struct({
+    type: Schema.Literal("thread-title.apply"),
+    expectedTitle: Schema.String,
+    title: Schema.String,
+  }),
+  Schema.Struct({
     type: Schema.Literal("delegated-tasks.stop"),
     reason: Schema.optional(Schema.String),
   }),
@@ -125,6 +130,7 @@ export const REPLAY_SAFE_EFFECT_TYPES_AFTER_PROCESS_LOSS = [
   "terminal.cleanup",
   "preview.cleanup",
   "attachment.cleanup",
+  "thread-title.apply",
   "thread-title.generate",
   "delegated-tasks.stop",
 ] as const satisfies ReadonlyArray<OrchestrationEffectRequestV2["type"]>;

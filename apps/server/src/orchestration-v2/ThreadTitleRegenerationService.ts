@@ -36,8 +36,8 @@ export class ThreadTitleRegenerationTransform extends Context.Reference<{
   readonly transform: (input: {
     readonly threadId: ThreadId;
     readonly requestId: CommandId;
-    readonly generatedTitle: string;
-  }) => Effect.Effect<string, ThreadTitleRegenerationTransformError>;
+    readonly generatedTitle?: string | undefined;
+  }) => Effect.Effect<string | undefined, ThreadTitleRegenerationTransformError>;
 }>("t3/orchestration-v2/ThreadTitleRegenerationTransform", {
   defaultValue: () => ({ transform: (input) => Effect.succeed(input.generatedTitle) }),
 }) {}
@@ -162,24 +162,25 @@ const make = Effect.gen(function* () {
     if (outcome.type === "stale") {
       return;
     }
-    const transformedTitle =
-      outcome.title === undefined
-        ? undefined
-        : yield* titleTransform
-            .transform({
-              threadId: input.threadId,
-              requestId: input.requestId,
-              generatedTitle: outcome.title,
-            })
-            .pipe(
-              Effect.catchCause((cause) =>
-                Effect.logWarning("Thread title transform failed", {
-                  threadId: input.threadId,
-                  requestId: input.requestId,
-                  cause,
-                }).pipe(Effect.as(outcome.title!)),
-              ),
-            );
+    const latest = yield* threads.getThreadProjection(input.threadId);
+    if (latest.thread.titleRegeneration?.requestId !== input.requestId) {
+      return;
+    }
+    const transformedTitle = yield* titleTransform
+      .transform({
+        threadId: input.threadId,
+        requestId: input.requestId,
+        ...(outcome.title === undefined ? {} : { generatedTitle: outcome.title }),
+      })
+      .pipe(
+        Effect.catchCause((cause) =>
+          Effect.logWarning("Thread title transform failed", {
+            threadId: input.threadId,
+            requestId: input.requestId,
+            cause,
+          }).pipe(Effect.as(outcome.title)),
+        ),
+      );
     yield* complete({
       ...input,
       ...(transformedTitle === undefined ? {} : { title: transformedTitle }),

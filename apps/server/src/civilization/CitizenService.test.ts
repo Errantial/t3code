@@ -13,6 +13,7 @@ import * as Layer from "effect/Layer";
 import * as SqlClient from "effect/sql/SqlClient";
 
 import * as EventSink from "../orchestration-v2/EventSink.ts";
+import * as EffectOutbox from "../orchestration-v2/EffectOutbox.ts";
 import * as EventStore from "../orchestration-v2/EventStore.ts";
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
@@ -21,7 +22,9 @@ import * as ConfigService from "./ConfigService.ts";
 import { enrollCivilizationThread } from "./PersistenceParticipant.ts";
 
 const database = SqlitePersistence.layerMemory;
-const stores = Layer.merge(EventStore.layer, ProjectionStore.layer).pipe(Layer.provide(database));
+const stores = Layer.mergeAll(EventStore.layer, ProjectionStore.layer, EffectOutbox.layer).pipe(
+  Layer.provide(database),
+);
 const hostOnlySink = EventSink.layer.pipe(
   Layer.provide(Layer.mergeAll(stores, database)),
   Layer.provide(Layer.succeed(EventSink.EventSinkPersistenceParticipants, [])),
@@ -75,6 +78,18 @@ const enableAllExisting = Effect.fn("CitizenService.test.enableAllExisting")(fun
     override: {
       version: CIVILIZATION_CONFIG_VERSION,
       participation: { enabled: true, adoption: "all_existing" },
+    },
+  });
+});
+
+const enableManagedAdoption = Effect.fn("CitizenService.test.enableManagedAdoption")(function* () {
+  const config = yield* ConfigService.CivilizationConfigService;
+  yield* config.set({
+    expectedRevision: 0,
+    override: {
+      version: CIVILIZATION_CONFIG_VERSION,
+      participation: { enabled: true, adoption: "all_existing" },
+      names: { adoptionTitlePolicy: "managed" },
     },
   });
 });
@@ -161,6 +176,46 @@ it.effect("adopts all existing projections across bounded 100-row batches", () =
     assert.deepEqual(first, { candidates: 105, adopted: 105, skipped: 0 });
     const second = yield* citizens.adoptExisting({ projectId });
     assert.deepEqual(second, { candidates: 0, adopted: 0, skipped: 0 });
+  }).pipe(Effect.provide(Layer.fresh(layer))),
+);
+
+it.effect("queues replay-safe managed title application for managed adoption", () =>
+  Effect.gen(function* () {
+    const sink = yield* EventSink.EventSinkV2;
+    const citizens = yield* CitizenService.CivilizationCitizenService;
+    const sql = yield* SqlClient.SqlClient;
+    const now = yield* DateTime.now;
+    const projectId = ProjectId.make("project:civilization:managed-adoption");
+    const threadId = ThreadId.make("thread:civilization:managed-adoption");
+    const thread = makeThread(threadId, projectId, now);
+    yield* sink.write({
+      events: [
+        {
+          id: EventId.make("event:civilization:managed-adoption:create"),
+          type: "thread.created",
+          threadId,
+          occurredAt: now,
+          payload: thread,
+        },
+      ],
+    });
+    yield* enableManagedAdoption();
+
+    assert.deepEqual(yield* citizens.adoptExisting({ projectId }), {
+      candidates: 1,
+      adopted: 1,
+      skipped: 0,
+    });
+    const effects = yield* sql<{ readonly effect_type: string; readonly payload_json: string }>`
+      SELECT effect_type, payload_json
+      FROM orchestration_v2_effect_outbox
+      ORDER BY rowid ASC
+    `;
+    assert.lengthOf(effects, 1);
+    assert.equal(effects[0]!.effect_type, "thread-title.apply");
+    const citizen = yield* citizens.getCitizen(threadId);
+    assert.isNotNull(citizen);
+    assert.include(effects[0]!.payload_json, `[${citizen!.name}] Existing thread title`);
   }).pipe(Effect.provide(Layer.fresh(layer))),
 );
 

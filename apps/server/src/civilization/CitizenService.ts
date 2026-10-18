@@ -13,6 +13,7 @@ import * as Stream from "effect/Stream";
 import * as SqlClient from "effect/sql/SqlClient";
 
 import * as EventStore from "../orchestration-v2/EventStore.ts";
+import * as EffectOutbox from "../orchestration-v2/EffectOutbox.ts";
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
 import { getEffectiveCivilizationConfig } from "./ConfigService.ts";
 import {
@@ -53,6 +54,7 @@ type CitizenSummaryRow = {
 const make = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
   const eventStore = yield* EventStore.EventStoreV2;
+  const effectOutbox = yield* EffectOutbox.EffectOutboxV2;
   const projections = yield* ProjectionStore.ProjectionStoreV2;
   const provideSql = <A, E>(effect: Effect.Effect<A, E, SqlClient.SqlClient>) =>
     effect.pipe(Effect.provideService(SqlClient.SqlClient, sql));
@@ -123,8 +125,17 @@ const make = Effect.gen(function* () {
         const thread = yield* projections.getThread(threadId);
         const sequence = yield* eventStore.latestSequence({ threadId });
         const inserted = yield* sql.withTransaction(
-          provideSql(enrollCivilizationThread({ sequence, thread, adoption: true })),
+          Effect.gen(function* () {
+            const result = yield* provideSql(
+              enrollCivilizationThread({ sequence, thread, adoption: true }),
+            );
+            if (result !== false) yield* effectOutbox.enqueue(result.effects);
+            return result;
+          }),
         );
+        if (inserted !== false && inserted.effects.length > 0) {
+          yield* effectOutbox.notifyAvailable(inserted.effects.length);
+        }
         if (inserted) adopted += 1;
         else skipped += 1;
       }

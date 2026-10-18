@@ -134,6 +134,7 @@ it.effect(
         requestId,
         generatedTitle: "Fresh topic",
       });
+      assert.isDefined(managed);
       assert.equal(managed, "[Ada] Fresh topic");
       const pending = yield* readTitleRow(threadId);
       assert.equal(pending.pending_title_command_id, `${requestId}:title-complete`);
@@ -220,5 +221,40 @@ it.effect(
       const relinquished = yield* readTitleRow(threadId);
       assert.equal(relinquished.title_managed, 0);
       assert.equal(relinquished.preserved_title, "User title");
+    }).pipe(Effect.provide(Layer.fresh(layer))),
+);
+
+it.effect(
+  "falls back to the stored managed topic when host title generation produces no title",
+  () =>
+    Effect.gen(function* () {
+      yield* enableTitles();
+      const eventSink = yield* EventSink.EventSinkV2;
+      const sql = yield* SqlClient.SqlClient;
+      const now = yield* DateTime.now;
+      const projectId = ProjectId.make("project:civilization:title-fallback");
+      const threadId = ThreadId.make("thread:civilization:title-fallback");
+      const thread = makeThread(threadId, projectId, now);
+      yield* eventSink.write({
+        events: [
+          {
+            id: EventId.make("event:civilization:title-fallback:create"),
+            type: "thread.created",
+            threadId,
+            occurredAt: now,
+            payload: thread,
+          },
+        ],
+      });
+
+      const requestId = CommandId.make("command:civilization:title-fallback");
+      const managed = yield* makeCivilizationTitleTransform(sql).transform({
+        threadId,
+        requestId,
+      });
+      assert.equal(managed, "[Ada] New thread");
+      const pending = yield* readTitleRow(threadId);
+      assert.equal(pending.pending_title_command_id, `${requestId}:title-complete`);
+      assert.equal(pending.pending_managed_title, "[Ada] New thread");
     }).pipe(Effect.provide(Layer.fresh(layer))),
 );

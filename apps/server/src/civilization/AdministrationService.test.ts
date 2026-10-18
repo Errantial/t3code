@@ -242,6 +242,7 @@ it.effect(
         assert.equal(applied.name, "Grace");
         assert.equal(applied.profileId, "warm");
         assert.equal(applied.revision, 2);
+        assert.equal(yield* Ref.get(title), "[Grace] Managed topic");
 
         const stale = yield* administration.applyReassignment(request).pipe(Effect.flip);
         assert.isTrue(isConflict(stale));
@@ -276,6 +277,29 @@ it.effect(
           assert.equal(error.reason, "name_conflict");
       }).pipe(Effect.provide(layer));
     }),
+);
+
+it.effect("renames a manual-title citizen without overwriting the host title", () =>
+  Effect.gen(function* () {
+    const title = yield* Ref.make("User-owned title");
+    const layer = makeLayer(makeThreadService(title, false));
+    yield* Effect.gen(function* () {
+      yield* enableFeature();
+      yield* seedCitizen({ titleManaged: false, preservedTitle: "User-owned title" });
+      const administration = yield* AdministrationService.CivilizationAdministrationService;
+      const applied = yield* administration.applyReassignment({
+        projectId,
+        threadId,
+        expectedCitizenRevision: 1,
+        expectedEnvironmentRevision: 1,
+        expectedProjectRevision: 0,
+        nameEntryId: "grace",
+      });
+      assert.equal(applied.name, "Grace");
+      assert.isFalse(applied.titleManaged);
+      assert.equal(yield* Ref.get(title), "User-owned title");
+    }).pipe(Effect.provide(layer));
+  }),
 );
 
 it.effect("restores only the still-managed title and relinquishes ownership", () =>
@@ -339,7 +363,7 @@ it.effect("preserves managed ownership when title restore fails without a compet
   }),
 );
 
-it.effect("reclaims future title management without overwriting the current title", () =>
+it.effect("reclaims title management and immediately applies the managed title", () =>
   Effect.gen(function* () {
     const title = yield* Ref.make("User-owned title");
     const layer = makeLayer(makeThreadService(title, false));
@@ -357,8 +381,8 @@ it.effect("reclaims future title management without overwriting the current titl
         expectedCitizenRevision: 1,
       });
       assert.isTrue(result.citizen.titleManaged);
-      assert.equal(result.threadTitle, "User-owned title");
-      assert.equal(yield* Ref.get(title), "User-owned title");
+      assert.equal(result.threadTitle, "[Ada] User-owned title");
+      assert.equal(yield* Ref.get(title), "[Ada] User-owned title");
       const sql = yield* SqlClient.SqlClient;
       const row = (yield* sql<{
         readonly preserved_title: string;
@@ -389,6 +413,32 @@ it.effect("refuses title reclaim for provider-owned observed agents", () =>
         assert.equal(error.reason, "observed_agent_read_only");
       }
       assert.equal(yield* Ref.get(title), "Provider-owned conversation");
+    }).pipe(Effect.provide(layer));
+  }),
+);
+
+it.effect("refuses identity reassignment for provider-owned observed agents", () =>
+  Effect.gen(function* () {
+    const title = yield* Ref.make("Provider-owned conversation");
+    const layer = makeLayer(makeThreadService(title, false));
+    yield* Effect.gen(function* () {
+      yield* enableFeature();
+      yield* seedCitizen({ observedOnly: true });
+      const administration = yield* AdministrationService.CivilizationAdministrationService;
+      const error = yield* administration
+        .previewReassignment({
+          projectId,
+          threadId,
+          expectedCitizenRevision: 1,
+          expectedEnvironmentRevision: 1,
+          expectedProjectRevision: 0,
+          nameEntryId: "grace",
+        })
+        .pipe(Effect.flip);
+      assert.equal(error._tag, "CivilizationOperationInvalidError");
+      if (error._tag === "CivilizationOperationInvalidError") {
+        assert.equal(error.reason, "observed_agent_read_only");
+      }
     }).pipe(Effect.provide(layer));
   }),
 );

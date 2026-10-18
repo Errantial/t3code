@@ -89,6 +89,11 @@ type CitizenRow = {
   readonly relationship_to_parent: "fork" | "subagent" | null;
   readonly observed_only: number;
   readonly title_managed: number;
+  readonly preserved_title: string | null;
+  readonly last_managed_title: string | null;
+  readonly title_topic: string;
+  readonly pending_title_command_id: string | null;
+  readonly pending_managed_title: string | null;
   readonly generation: number;
   readonly lineage_status: string;
   readonly epoch: number;
@@ -116,7 +121,8 @@ const readCitizen = Effect.fn("PersistenceParticipant.test.readCitizen")(functio
   return (yield* sql<CitizenRow>`
       SELECT thread_id, name_display, name_key, name_entry_id, name_generator_version, profile_entry_id,
              parent_thread_id, relationship_to_parent, generation, lineage_status, observed_only,
-             title_managed, epoch, closed, deleted,
+             title_managed, preserved_title, last_managed_title, title_topic,
+             pending_title_command_id, pending_managed_title, epoch, closed, deleted,
              delivery_epoch, delivery_settled, delivery_archived, delivery_deleted,
              last_applied_sequence, revision
       FROM civilization_citizens WHERE thread_id = ${threadId} LIMIT 1
@@ -225,12 +231,29 @@ it.effect(
       assert.notEqual(first?.name_key, second?.name_key);
       assert.equal(first?.profile_entry_id.length > 0, true);
       assert.equal(first?.name_generator_version, CIVILIZATION_NAME_GENERATOR_VERSION);
+      assert.equal(first?.title_managed, 1);
+      assert.equal(first?.preserved_title, "New thread");
+      assert.equal(first?.title_topic, "New thread");
+      assert.equal(first?.pending_managed_title, "[Ada] New thread");
+      assert.isNotNull(first?.pending_title_command_id ?? null);
 
       const sql = yield* SqlClient.SqlClient;
       const count = (yield* sql<{
         readonly count: number;
       }>`SELECT COUNT(*) AS count FROM civilization_citizens`)[0]!.count;
       assert.equal(count, 2);
+      const effects = yield* sql<{
+        readonly effect_type: string;
+        readonly payload_json: string;
+      }>`
+        SELECT effect_type, payload_json
+        FROM orchestration_v2_effect_outbox
+        ORDER BY rowid ASC
+      `;
+      assert.lengthOf(effects, 2);
+      assert.isTrue(effects.every((effect) => effect.effect_type === "thread-title.apply"));
+      assert.isTrue(effects.every((effect) => !effect.payload_json.includes("provider")));
+      assert.isFalse(effects.some((effect) => effect.effect_type === "thread-title.generate"));
     }).pipe(Effect.provide(Layer.fresh(layer))),
 );
 

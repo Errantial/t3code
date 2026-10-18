@@ -509,6 +509,35 @@ export const layerExecutor: Layer.Layer<
                     }),
                 ),
               );
+          case "thread-title.apply":
+            const titleRequest = effect.request;
+            return threads.getThreadProjection(effect.threadId).pipe(
+              Effect.flatMap((projection) => {
+                if (
+                  projection.thread.title === titleRequest.title ||
+                  projection.thread.title !== titleRequest.expectedTitle
+                ) {
+                  return Effect.void;
+                }
+                return threads
+                  .dispatch({
+                    type: "thread.metadata.update",
+                    commandId: effect.commandId,
+                    threadId: effect.threadId,
+                    expectedTitle: titleRequest.expectedTitle,
+                    title: titleRequest.title,
+                  })
+                  .pipe(Effect.asVoid);
+              }),
+              Effect.mapError(
+                (cause) =>
+                  new OrchestrationEffectExecutionError({
+                    effectId: effect.id,
+                    effectType: effect.request.type,
+                    cause,
+                  }),
+              ),
+            );
           case "delegated-tasks.stop":
             return threads
               .stopDelegatedTasks({
@@ -893,7 +922,3 @@ export const runDaemonWithOptions = (options: OrchestrationEffectDaemonOptions =
   );
 
 export const runDaemon = runDaemonWithOptions();
-
-const layerDaemon: Layer.Layer<never, never, OrchestrationEffectWorkerV2> = Layer.effectDiscard(
-  runDaemon.pipe(Effect.forkScoped),
-);
