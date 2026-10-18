@@ -40,6 +40,7 @@ interface CivilizationContextInspectorProps {
   readonly projectId: ProjectId;
   readonly targetLabel: string;
   readonly initialFilters?: CivilizationContextInspectionFilters | undefined;
+  readonly onViewLineage?: ((threadId: ThreadId) => void) | undefined;
 }
 
 type DraftFilters = {
@@ -344,6 +345,7 @@ export function CivilizationContextInspector({
   projectId,
   targetLabel,
   initialFilters,
+  onViewLineage,
 }: CivilizationContextInspectorProps) {
   const canWrite = useEnvironmentScope(environmentId, AuthSettingsWriteScope);
   const readSensitive = useAtomSet(civilizationSensitiveReadAction, { mode: "promise" });
@@ -600,8 +602,16 @@ export function CivilizationContextInspector({
                     <span className="text-muted-foreground">{formatDate(row.createdAt)}</span>
                   </div>
                   <div className="wrap-anywhere text-xs text-muted-foreground">
-                    thread {row.threadId} ? run {row.runId} ? attempt {row.attemptId} ? provider
-                    turn {row.providerTurnOrdinal}
+                    thread{" "}
+                    {onViewLineage === undefined ? (
+                      row.threadId
+                    ) : (
+                      <Button size="xs" variant="ghost" onClick={() => onViewLineage(row.threadId)}>
+                        {row.threadId}
+                      </Button>
+                    )}{" "}
+                    ? run {row.runId} ? attempt {row.attemptId} ? provider turn{" "}
+                    {row.providerTurnOrdinal}
                   </div>
                   <div className="text-xs text-muted-foreground">
                     {row.packetBytes} B ? roster {row.composition.roster.included}/

@@ -395,6 +395,14 @@ it.effect(
       const sql = yield* SqlClient.SqlClient;
       yield* setup;
       yield* disableParticipation;
+      assert.equal(
+        (yield* sql<{ readonly count: number }>`
+          SELECT COUNT(*) AS count
+          FROM civilization_context_analytics_hourly
+          WHERE project_id = ${projectId}
+        `)[0]?.count,
+        1,
+      );
 
       const preview = yield* operations.previewPurge(projectId);
       const first = yield* operations.applyPurge({
@@ -423,6 +431,7 @@ it.effect(
       assert.equal(repeated.deletedThisBatch, 0);
 
       for (const table of [
+        "civilization_context_analytics_hourly",
         "civilization_context_inspections",
         "civilization_context_references",
         "civilization_mail_operation_receipts",
@@ -505,6 +514,14 @@ it.effect("resumes project-deletion cleanup in bounded idempotent batches", () =
     const operations = yield* OperationsService.CivilizationOperationsService;
     const sql = yield* SqlClient.SqlClient;
     yield* setup;
+    assert.equal(
+      (yield* sql<{ readonly count: number }>`
+        SELECT COUNT(*) AS count
+        FROM civilization_context_analytics_hourly
+        WHERE project_id = ${projectId}
+      `)[0]?.count,
+      1,
+    );
     yield* sql`
       UPDATE projection_projects SET deleted_at = '2026-10-16T01:00:00.000Z'
       WHERE project_id = ${projectId}
@@ -530,6 +547,14 @@ it.effect("resumes project-deletion cleanup in bounded idempotent batches", () =
     assert.equal(
       (yield* sql<{ readonly count: number }>`
         SELECT COUNT(*) AS count FROM civilization_achievement_awards WHERE project_id = ${projectId}
+      `)[0]?.count,
+      0,
+    );
+    assert.equal(
+      (yield* sql<{ readonly count: number }>`
+        SELECT COUNT(*) AS count
+        FROM civilization_context_analytics_hourly
+        WHERE project_id = ${projectId}
       `)[0]?.count,
       0,
     );

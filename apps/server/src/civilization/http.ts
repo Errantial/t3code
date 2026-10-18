@@ -318,6 +318,7 @@ export const layer = HttpApiBuilder.group(
               projectId: args.query.projectId,
               ...(args.query.kind === undefined ? {} : { kind: args.query.kind }),
               ...(args.query.threadId === undefined ? {} : { threadId: args.query.threadId }),
+              ...(args.query.sourceId === undefined ? {} : { sourceId: args.query.sourceId }),
               ...(args.query.from === undefined ? {} : { from: args.query.from }),
               ...(args.query.to === undefined ? {} : { to: args.query.to }),
               ...(args.query.cursor === undefined ? {} : { cursor: args.query.cursor }),

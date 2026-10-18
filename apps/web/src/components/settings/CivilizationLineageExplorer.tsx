@@ -17,6 +17,9 @@ interface CivilizationLineageExplorerProps {
   readonly initialThreadId: ThreadId;
   readonly pageSize: number;
   readonly onClose: () => void;
+  readonly onViewChronicle?: ((threadId: ThreadId) => void) | undefined;
+  readonly onViewCorrespondence?: ((threadId: ThreadId) => void) | undefined;
+  readonly onViewContext?: ((threadId: ThreadId) => void) | undefined;
 }
 
 function CitizenLineageButton({
@@ -68,6 +71,9 @@ export function CivilizationLineageExplorer({
   initialThreadId,
   pageSize,
   onClose,
+  onViewChronicle,
+  onViewCorrespondence,
+  onViewContext,
 }: CivilizationLineageExplorerProps) {
   const [focusThreadId, setFocusThreadId] = useState<ThreadId>(initialThreadId);
   const [cursor, setCursor] = useState<CivilizationLineageCursor | null>(null);
@@ -149,6 +155,35 @@ export function CivilizationLineageExplorer({
                   {lineage.data.focus.parentThreadId === null
                     ? "Root citizen"
                     : `${lineage.data.focus.relationshipToParent ?? "child"} of ${lineage.data.focus.parentThreadId}`}
+                </div>
+                <div className="mt-3 flex flex-wrap gap-2" aria-label="Focus citizen related views">
+                  {onViewChronicle === undefined ? null : (
+                    <Button
+                      size="xs"
+                      variant="outline"
+                      onClick={() => onViewChronicle(lineage.data!.focus.threadId)}
+                    >
+                      Chronicle
+                    </Button>
+                  )}
+                  {onViewCorrespondence === undefined ? null : (
+                    <Button
+                      size="xs"
+                      variant="outline"
+                      onClick={() => onViewCorrespondence(lineage.data!.focus.threadId)}
+                    >
+                      Correspondence
+                    </Button>
+                  )}
+                  {onViewContext === undefined ? null : (
+                    <Button
+                      size="xs"
+                      variant="outline"
+                      onClick={() => onViewContext(lineage.data!.focus.threadId)}
+                    >
+                      Context
+                    </Button>
+                  )}
                 </div>
               </div>
             </div>

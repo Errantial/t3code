@@ -886,6 +886,7 @@ describe("Civilization project inspection and citizen administration", () => {
             projectId: PROJECT_ID,
             kind: "child_joined",
             threadId,
+            sourceId: "mail:client-runtime:source",
             from: "2026-10-16T17:00:00.000Z",
             to: "2026-10-16T19:00:00.000Z",
             limit: 10,
@@ -979,6 +980,7 @@ describe("Civilization project inspection and citizen administration", () => {
         const chronicleUrl = new URL(calls[2]!.url);
         expect(chronicleUrl.searchParams.get("kind")).toBe("child_joined");
         expect(chronicleUrl.searchParams.get("threadId")).toBe(threadId);
+        expect(chronicleUrl.searchParams.get("sourceId")).toBe("mail:client-runtime:source");
         expect(chronicleUrl.searchParams.get("from")).toBe("2026-10-16T17:00:00.000Z");
         expect(chronicleUrl.searchParams.get("to")).toBe("2026-10-16T19:00:00.000Z");
         expect(chronicleUrl.searchParams.get("limit")).toBe("10");

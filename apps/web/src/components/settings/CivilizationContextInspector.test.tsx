@@ -216,7 +216,7 @@ describe("Civilization context inspector", () => {
     expect(text()).toContain("historical records");
     expect(text()).toContain(String(runId));
     expect(text()).toContain(String(attemptId));
-    expect(text()).toContain("provider turn ");
+    expect(text()).toContain("provider turn");
     expect(text()).toContain("Detail requires settings:write");
     expect(text()).not.toContain(packetText);
     expect(testState.sensitiveCalls).toEqual([]);
@@ -239,6 +239,26 @@ describe("Civilization context inspector", () => {
       renderer?.root.findAll((node) => node.props["aria-label"] === "Context inspector suppression")
         .length,
     ).toBeGreaterThan(0);
+  });
+
+  it("links retained metadata back to Ancestral Hall without reading packet detail", async () => {
+    const onViewLineage = vi.fn();
+    await act(() => {
+      renderer = create(
+        <CivilizationContextInspector
+          environmentId={environmentId}
+          projectId={projectId}
+          targetLabel="Inspector machine"
+          onViewLineage={onViewLineage}
+        />,
+      );
+    });
+    const lineageButton = renderer!.root
+      .findAllByType("button")
+      .find((button) => button.props.children === threadId);
+    await act(() => lineageButton!.props.onClick());
+    expect(onViewLineage).toHaveBeenCalledWith(threadId);
+    expect(testState.sensitiveCalls).toEqual([]);
   });
 
   it("applies route-provided historical identity to the first metadata query", async () => {

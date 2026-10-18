@@ -25,6 +25,10 @@ interface CivilizationChronicleProps {
   readonly projectId: ProjectId;
   readonly pageSize: number;
   readonly onViewLineage?: ((threadId: ThreadId) => void) | undefined;
+  readonly initialThreadId?: ThreadId | undefined;
+  readonly initialSourceId?: string | undefined;
+  readonly onViewNote?: ((noteId: string) => void) | undefined;
+  readonly onViewCorrespondence?: ((messageId: string) => void) | undefined;
 }
 
 const KINDS: ReadonlyArray<CivilizationChronicleKind> = [
@@ -87,10 +91,22 @@ function ChronicleThreadLink({
 function ChronicleEntry({
   entry,
   onViewLineage,
+  onViewNote,
+  onViewCorrespondence,
 }: {
   readonly entry: CivilizationChronicleEntry;
   readonly onViewLineage?: ((threadId: ThreadId) => void) | undefined;
+  readonly onViewNote?: ((noteId: string) => void) | undefined;
+  readonly onViewCorrespondence?: ((messageId: string) => void) | undefined;
 }) {
+  const noteId =
+    entry.kind === "note_created" || entry.kind === "note_resolved" ? entry.metadata.noteId : null;
+  const messageId =
+    entry.kind === "mail_sent" ||
+    entry.kind === "mail_acknowledged" ||
+    entry.kind === "mail_terminal"
+      ? entry.metadata.messageId
+      : null;
   return (
     <li className="rounded-lg border border-border/70 p-3">
       <div className="flex flex-wrap items-start justify-between gap-2">
@@ -117,6 +133,16 @@ function ChronicleEntry({
               relationship {entry.metadata.relationship}
             </div>
           ) : null}
+          {noteId === null || onViewNote === undefined ? null : (
+            <Button size="xs" variant="outline" onClick={() => onViewNote(noteId)}>
+              Open source note
+            </Button>
+          )}
+          {messageId === null || onViewCorrespondence === undefined ? null : (
+            <Button size="xs" variant="outline" onClick={() => onViewCorrespondence(messageId)}>
+              Open correspondence
+            </Button>
+          )}
         </div>
         <div className="text-right text-xs text-muted-foreground">
           <div>{new Date(entry.occurredAt).toLocaleString()}</div>
@@ -165,16 +191,21 @@ export function CivilizationChronicle({
   projectId,
   pageSize,
   onViewLineage,
+  initialThreadId,
+  initialSourceId,
+  onViewNote,
+  onViewCorrespondence,
 }: CivilizationChronicleProps) {
   const [kind, setKind] = useState<CivilizationChronicleKind | undefined>(undefined);
-  const [threadDraft, setThreadDraft] = useState("");
+  const [threadDraft, setThreadDraft] = useState(initialThreadId ?? "");
+  const [sourceId, setSourceId] = useState(initialSourceId);
   const [fromDraft, setFromDraft] = useState("");
   const [toDraft, setToDraft] = useState("");
   const [appliedFilters, setAppliedFilters] = useState<{
     readonly threadId?: ThreadId | undefined;
     readonly from?: string | undefined;
     readonly to?: string | undefined;
-  }>({});
+  }>(initialThreadId === undefined ? {} : { threadId: initialThreadId });
   const [cursor, setCursor] = useState<CivilizationChronicleCursor | null>(null);
   const [cursorStack, setCursorStack] = useState<Array<CivilizationChronicleCursor | null>>([]);
   const [achievementCursor, setAchievementCursor] = useState<CivilizationAchievementCursor | null>(
@@ -193,7 +224,7 @@ export function CivilizationChronicle({
   const page = useCivilizationChroniclePage(
     environmentId,
     projectId,
-    { kind, ...appliedFilters },
+    { kind, ...appliedFilters, ...(sourceId === undefined ? {} : { sourceId }) },
     cursor,
     pageSize,
   );
@@ -341,6 +372,27 @@ export function CivilizationChronicle({
           </div>
         }
       />
+      {sourceId === undefined ? null : (
+        <SettingsRow
+          title="Linked source"
+          description="Showing only Chronicle facts with this exact persisted source identifier."
+          control={
+            <div className="flex min-w-0 items-center gap-2">
+              <span className="max-w-56 truncate text-xs text-muted-foreground">{sourceId}</span>
+              <Button
+                size="xs"
+                variant="outline"
+                onClick={() => {
+                  setSourceId(undefined);
+                  resetPaging();
+                }}
+              >
+                Clear source
+              </Button>
+            </div>
+          }
+        />
+      )}
       <div className="space-y-3 px-3 sm:px-4">
         {page.isPending && page.data === null ? (
           <div className="text-sm text-muted-foreground">Loading Chronicle…</div>
@@ -355,7 +407,13 @@ export function CivilizationChronicle({
         ) : null}
         <ol className="space-y-2" aria-label="Civilization Chronicle entries">
           {page.data?.entries.map((entry) => (
-            <ChronicleEntry key={entry.entryId} entry={entry} onViewLineage={onViewLineage} />
+            <ChronicleEntry
+              key={entry.entryId}
+              entry={entry}
+              onViewLineage={onViewLineage}
+              onViewNote={onViewNote}
+              onViewCorrespondence={onViewCorrespondence}
+            />
           ))}
         </ol>
         <div className="flex flex-wrap items-center gap-2">

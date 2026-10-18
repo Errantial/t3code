@@ -762,6 +762,7 @@ const EnvironmentCivilizationChronicleQuery = Schema.Struct({
   projectId: ProjectId,
   kind: Schema.optionalKey(CivilizationChronicleKind),
   threadId: Schema.optionalKey(ThreadId),
+  sourceId: Schema.optionalKey(TrimmedNonEmptyString),
   from: Schema.optionalKey(TrimmedNonEmptyString),
   to: Schema.optionalKey(TrimmedNonEmptyString),
   cursor: Schema.optionalKey(CivilizationChronicleCursor),

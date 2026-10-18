@@ -166,6 +166,16 @@ it.effect("binds kind, citizen, and canonical time filters to bounded Chronicle 
       ["child_joined"],
     );
 
+    const exactSource = yield* service.list({
+      projectId,
+      sourceId: "event:chronicle:filters:child",
+      limit: 10,
+    });
+    assert.deepEqual(
+      exactSource.entries.map((entry) => entry.sourceId),
+      ["event:chronicle:filters:child"],
+    );
+
     const parentTimeline = yield* service.list({ projectId, threadId: parentId, limit: 10 });
     assert.deepEqual(
       parentTimeline.entries.map((entry) => entry.kind),

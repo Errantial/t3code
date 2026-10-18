@@ -171,4 +171,24 @@ describe("Civilization Chronicle", () => {
     expect(chronicleCall?.[3]).toEqual({ kind: undefined, threadId: childId });
     expect(chronicleCall?.[5]).toBe(25);
   });
+
+  it("applies an exact linked source without loading body content", async () => {
+    await act(() => {
+      renderer = create(
+        <CivilizationChronicle
+          environmentId={environmentId}
+          projectId={projectId}
+          pageSize={25}
+          initialSourceId="mail:chronicle-linked-source"
+        />,
+      );
+    });
+    const chronicleCall = testState.calls.find((call) => call[0] === "chronicle");
+    expect(chronicleCall?.[3]).toEqual({
+      kind: undefined,
+      sourceId: "mail:chronicle-linked-source",
+    });
+    expect(JSON.stringify(renderer?.toJSON())).toContain("Linked source");
+    expect(JSON.stringify(renderer?.toJSON())).not.toContain("secret-body");
+  });
 });

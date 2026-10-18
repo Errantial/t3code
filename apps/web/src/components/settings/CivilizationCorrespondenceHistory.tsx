@@ -39,6 +39,9 @@ interface CivilizationCorrespondenceHistoryProps {
   readonly pageSize: number;
   readonly allowSensitiveActions: boolean;
   readonly onViewLineage?: ((threadId: ThreadIdType) => void) | undefined;
+  readonly initialParticipantThreadId?: ThreadIdType | undefined;
+  readonly initialMessageId?: CivilizationMessageId | undefined;
+  readonly onViewChronicleSource?: ((sourceId: string) => void) | undefined;
 }
 
 type BooleanFilter = "any" | "yes" | "no";
@@ -109,11 +112,14 @@ export function CivilizationCorrespondenceHistory({
   pageSize,
   allowSensitiveActions,
   onViewLineage,
+  initialParticipantThreadId,
+  initialMessageId,
+  onViewChronicleSource,
 }: CivilizationCorrespondenceHistoryProps) {
   const canWrite = useEnvironmentScope(environmentId, AuthSettingsWriteScope);
   const enabled = allowSensitiveActions && canWrite;
   const readSensitive = useAtomSet(civilizationSensitiveReadAction, { mode: "promise" });
-  const [participantDraft, setParticipantDraft] = useState("");
+  const [participantDraft, setParticipantDraft] = useState(initialParticipantThreadId ?? "");
   const [senderDraft, setSenderDraft] = useState("");
   const [recipientDraft, setRecipientDraft] = useState("");
   const [replyRelation, setReplyRelation] =
@@ -124,13 +130,19 @@ export function CivilizationCorrespondenceHistory({
   const [epochDraft, setEpochDraft] = useState("");
   const [fromDraft, setFromDraft] = useState("");
   const [toDraft, setToDraft] = useState("");
-  const [filters, setFilters] = useState<CivilizationCorrespondenceFilters>({});
+  const [filters, setFilters] = useState<CivilizationCorrespondenceFilters>(
+    initialParticipantThreadId === undefined
+      ? {}
+      : { participantThreadId: initialParticipantThreadId, replyRelation: "any" },
+  );
   const [filterError, setFilterError] = useState<string | null>(null);
   const [cursor, setCursor] = useState<CivilizationCorrespondenceCursor | null>(null);
   const [cursorStack, setCursorStack] = useState<Array<CivilizationCorrespondenceCursor | null>>(
     [],
   );
-  const [selectedMessageId, setSelectedMessageId] = useState<CivilizationMessageId | null>(null);
+  const [selectedMessageId, setSelectedMessageId] = useState<CivilizationMessageId | null>(
+    initialMessageId ?? null,
+  );
   const [body, setBody] = useState<CivilizationAdminMailRecord | null>(null);
   const [bodyLoading, setBodyLoading] = useState(false);
   const [bodyError, setBodyError] = useState<string | null>(null);
@@ -331,6 +343,15 @@ export function CivilizationCorrespondenceHistory({
               >
                 <MessageFacts message={message} onViewLineage={onViewLineage} />
                 <div className="flex gap-2">
+                  {onViewChronicleSource === undefined ? null : (
+                    <Button
+                      size="xs"
+                      variant="outline"
+                      onClick={() => onViewChronicleSource(`mail:${message.messageId}:sent`)}
+                    >
+                      Chronicle
+                    </Button>
+                  )}
                   <Button
                     size="xs"
                     variant="outline"

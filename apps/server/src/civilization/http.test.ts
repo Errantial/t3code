@@ -564,7 +564,7 @@ it.effect("maps bounded Chronicle filters and rejects malformed limits", () =>
         Effect.tryPromise(async () => {
           const response = await server.handler(
             new Request(
-              `http://127.0.0.1/api/civilization/chronicle?projectId=${encodeURIComponent(projectId)}&kind=child_joined&threadId=${encodeURIComponent(threadId)}&from=${encodeURIComponent("2026-10-17T18:00:00.000Z")}&to=${encodeURIComponent("2026-10-17T22:00:00.000Z")}&cursor=chronicle-cursor&limit=7`,
+              `http://127.0.0.1/api/civilization/chronicle?projectId=${encodeURIComponent(projectId)}&kind=child_joined&threadId=${encodeURIComponent(threadId)}&sourceId=${encodeURIComponent("mail:http:source")}&from=${encodeURIComponent("2026-10-17T18:00:00.000Z")}&to=${encodeURIComponent("2026-10-17T22:00:00.000Z")}&cursor=chronicle-cursor&limit=7`,
             ),
             requestContext,
           );
@@ -594,6 +594,7 @@ it.effect("maps bounded Chronicle filters and rejects malformed limits", () =>
             projectId,
             kind: "child_joined",
             threadId,
+            sourceId: "mail:http:source",
             from: "2026-10-17T18:00:00.000Z",
             to: "2026-10-17T22:00:00.000Z",
             cursor: "chronicle-cursor",

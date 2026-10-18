@@ -345,6 +345,76 @@ const readFeatureState = Effect.fn("RecoveryAcceptance.readFeatureState")(functi
         ORDER BY awarded_at ASC, award_id ASC
       `),
     ],
+    contextInspections: [
+      ...(yield* sql<{
+        readonly inspection_id: string;
+        readonly thread_id: string;
+        readonly run_id: string;
+        readonly attempt_id: string;
+        readonly provider_turn_ordinal: number;
+        readonly provider_instance_id: string;
+        readonly outcome: string;
+        readonly suppression_reason: string | null;
+        readonly diagnostics_mode: string;
+        readonly packet_text_state: string;
+        readonly packet_bytes: number;
+        readonly packet_budget_bytes: number;
+        readonly roster_candidates: number;
+        readonly roster_included: number;
+        readonly note_candidates: number;
+        readonly note_included: number;
+        readonly inbox_candidates: number;
+        readonly inbox_included: number;
+        readonly created_at: string;
+        readonly updated_at: string;
+        readonly provider_start_at: string | null;
+      }>`
+        SELECT inspection_id, thread_id, run_id, attempt_id, provider_turn_ordinal,
+               provider_instance_id, outcome, suppression_reason, diagnostics_mode,
+               packet_text_state, packet_bytes, packet_budget_bytes,
+               roster_candidates, roster_included, note_candidates, note_included,
+               inbox_candidates, inbox_included, created_at, updated_at, provider_start_at
+        FROM civilization_context_inspections
+        WHERE project_id = ${projectId}
+        ORDER BY created_at ASC, inspection_id ASC
+      `),
+    ],
+    contextAnalyticsHourly: [
+      ...(yield* sql<{
+        readonly bucket_start: string;
+        readonly provider_instance_id: string;
+        readonly outcome: string;
+        readonly suppression_reason: string;
+        readonly inspection_count: number;
+        readonly packet_zero: number;
+        readonly packet_low: number;
+        readonly packet_medium: number;
+        readonly packet_high: number;
+        readonly packet_over: number;
+        readonly utilization_zero: number;
+        readonly utilization_low: number;
+        readonly utilization_medium: number;
+        readonly utilization_high: number;
+        readonly utilization_over: number;
+        readonly roster_candidates: number;
+        readonly roster_included: number;
+        readonly note_candidates: number;
+        readonly note_included: number;
+        readonly inbox_candidates: number;
+        readonly inbox_included: number;
+      }>`
+        SELECT bucket_start, provider_instance_id, outcome, suppression_reason,
+               inspection_count,
+               packet_zero, packet_low, packet_medium, packet_high, packet_over,
+               utilization_zero, utilization_low, utilization_medium, utilization_high,
+               utilization_over,
+               roster_candidates, roster_included, note_candidates, note_included,
+               inbox_candidates, inbox_included
+        FROM civilization_context_analytics_hourly
+        WHERE project_id = ${projectId}
+        ORDER BY bucket_start ASC, provider_instance_id ASC, outcome ASC, suppression_reason ASC
+      `),
+    ],
     projectState: [
       ...(yield* sql<{
         readonly census_revision: number;
@@ -577,7 +647,7 @@ it.effect(
       const migrated = yield* runMigrations();
       assert.deepEqual(
         migrated.map(([id]) => id),
-        [65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75],
+        [65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77],
       );
       assert.deepEqual(
         (yield* sql<{
@@ -785,10 +855,29 @@ it.effect("VACUUM INTO snapshot restore preserves config, notes, mail and epochs
           ${fixedTime}, '{}'
         )
       `;
+      yield* sql`
+        INSERT INTO civilization_context_inspections (
+          inspection_id, project_id, thread_id, run_id, attempt_id, provider_turn_ordinal,
+          provider_instance_id, provider_driver, outcome, diagnostics_mode, packet_text_state,
+          packet_bytes, packet_budget_bytes,
+          roster_candidates, roster_included, note_candidates, note_included,
+          inbox_candidates, inbox_included, created_at, updated_at
+        ) VALUES (
+          'inspection:recovery:snapshot', ${projectId}, ${threadId},
+          'run:recovery:snapshot', 'attempt:recovery:snapshot', 1,
+          'codex', 'codex', 'built', 'off', 'diagnostics_off',
+          2048, 4096,
+          3, 2, 2, 1, 1, 1,
+          ${fixedTime}, ${fixedTime}
+        )
+      `;
       yield* assertRetainedStateCoherent(projectId);
       snapshotted = yield* readFeatureState(projectId);
       assert.isAbove(snapshotted.achievements.length, 0);
       assert.isAbove(snapshotted.chronicle.length, 0);
+      assert.lengthOf(snapshotted.contextInspections, 1);
+      assert.lengthOf(snapshotted.contextAnalyticsHourly, 1);
+      assert.equal(snapshotted.contextAnalyticsHourly[0]?.inspection_count, 1);
       assert.isAbove(snapshotted.projectState[0]?.achievement_revision ?? 0, 0);
       assert.isAbove(snapshotted.projectState[0]?.chronicle_revision ?? 0, 0);
       yield* sql`VACUUM INTO ${snapshotPath}`;
@@ -825,6 +914,8 @@ it.effect("VACUUM INTO snapshot restore preserves config, notes, mail and epochs
       assert.equal(restored.notes[0]?.body, "snapshot note body");
       assert.equal(restored.messages[0]?.body, "closed mail body");
       assert.equal(restored.messages[0]?.terminal_reason, "recipient_settled");
+      assert.equal(restored.contextInspections[0]?.inspection_id, "inspection:recovery:snapshot");
+      assert.equal(restored.contextAnalyticsHourly[0]?.inspection_count, 1);
     }).pipe(Effect.provide(makeFileLayer(restoredPath)));
   }).pipe(
     Effect.ensuring(Effect.sync(() => NodeFS.rmSync(tempDir, { recursive: true, force: true }))),

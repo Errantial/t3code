@@ -383,6 +383,7 @@ export const fetchEnvironmentCivilizationChroniclePage = Effect.fn(
     readonly projectId: ProjectId;
     readonly kind?: CivilizationChronicleKind | undefined;
     readonly threadId?: ThreadId | undefined;
+    readonly sourceId?: string | undefined;
     readonly from?: string | undefined;
     readonly to?: string | undefined;
     readonly cursor?: CivilizationChronicleCursor | undefined;
@@ -393,6 +394,7 @@ export const fetchEnvironmentCivilizationChroniclePage = Effect.fn(
     projectId: input.projectId,
     ...(input.kind === undefined ? {} : { kind: input.kind }),
     ...(input.threadId === undefined ? {} : { threadId: input.threadId }),
+    ...(input.sourceId === undefined ? {} : { sourceId: input.sourceId }),
     ...(input.from === undefined ? {} : { from: input.from }),
     ...(input.to === undefined ? {} : { to: input.to }),
     ...(input.cursor === undefined ? {} : { cursor: input.cursor }),
@@ -1004,6 +1006,7 @@ export const fetchCurrentEnvironmentCivilizationChroniclePage = Effect.fn(
   readonly projectId: ProjectId;
   readonly kind?: CivilizationChronicleKind | undefined;
   readonly threadId?: ThreadId | undefined;
+  readonly sourceId?: string | undefined;
   readonly from?: string | undefined;
   readonly to?: string | undefined;
   readonly cursor?: CivilizationChronicleCursor | undefined;

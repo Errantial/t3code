@@ -165,4 +165,35 @@ describe("Civilization Ancestral Hall", () => {
     await act(() => next!.props.onClick());
     expect(testState.calls.at(-1)?.[3]).toBe(nextCursor);
   });
+
+  it("cross-links the focused citizen using metadata-only identifiers", async () => {
+    const onViewChronicle = vi.fn();
+    const onViewCorrespondence = vi.fn();
+    const onViewContext = vi.fn();
+    await act(() => {
+      renderer = create(
+        <CivilizationLineageExplorer
+          environmentId={environmentId}
+          projectId={projectId}
+          initialThreadId={rootId}
+          pageSize={50}
+          onClose={vi.fn()}
+          onViewChronicle={onViewChronicle}
+          onViewCorrespondence={onViewCorrespondence}
+          onViewContext={onViewContext}
+        />,
+      );
+    });
+    for (const [label, callback] of [
+      ["Chronicle", onViewChronicle],
+      ["Correspondence", onViewCorrespondence],
+      ["Context", onViewContext],
+    ] as const) {
+      const button = renderer!.root
+        .findAllByType("button")
+        .find((candidate) => candidate.props.children === label);
+      await act(() => button!.props.onClick());
+      expect(callback).toHaveBeenCalledWith(rootId);
+    }
+  });
 });

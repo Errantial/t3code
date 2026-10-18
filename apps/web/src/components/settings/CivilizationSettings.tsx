@@ -7,6 +7,7 @@ import {
   type CivilizationProviderCapability,
   type EnvironmentId,
   type ProjectId,
+  type ThreadId,
 } from "@t3tools/contracts";
 import { useAtomSet } from "@effect/atom-react";
 import { RefreshCwIcon } from "lucide-react";
@@ -656,11 +657,24 @@ function CivilizationTargetOverview({
   const [inspectionFilters, setInspectionFilters] = useState<CivilizationContextInspectionFilters>(
     () => initialInspectionFilters ?? {},
   );
+  const inspectorRef = useRef<HTMLDivElement>(null);
+  const [requestedLineage, setRequestedLineage] = useState<{
+    readonly threadId: ThreadId;
+    readonly nonce: number;
+  } | null>(null);
   useEffect(() => {
     if (lastInitialInspectionFiltersKey.current === initialInspectionFiltersKey) return;
     lastInitialInspectionFiltersKey.current = initialInspectionFiltersKey;
     setInspectionFilters(initialInspectionFilters ?? {});
   }, [initialInspectionFilters, initialInspectionFiltersKey]);
+  const viewContext = (filters: CivilizationContextInspectionFilters) => {
+    setInspectionFilters(filters);
+    inspectorRef.current?.scrollIntoView({ block: "start" });
+    inspectorRef.current?.querySelector<HTMLElement>("input,button")?.focus();
+  };
+  const viewLineage = (threadId: ThreadId) => {
+    setRequestedLineage((current) => ({ threadId, nonce: (current?.nonce ?? 0) + 1 }));
+  };
   const runConfigAction: CivilizationConfigRunner = useAtomSet(civilizationConfigAction, {
     mode: "promise",
   });
@@ -1870,20 +1884,25 @@ function CivilizationTargetOverview({
             environmentId={target.environmentId}
             projectId={target.projectId}
             targetLabel={target.label}
-            onInspect={setInspectionFilters}
+            onInspect={viewContext}
           />
-          <CivilizationContextInspector
-            environmentId={target.environmentId}
-            projectId={target.projectId}
-            targetLabel={target.label}
-            initialFilters={inspectionFilters}
-          />
+          <div ref={inspectorRef}>
+            <CivilizationContextInspector
+              environmentId={target.environmentId}
+              projectId={target.projectId}
+              targetLabel={target.label}
+              initialFilters={inspectionFilters}
+              onViewLineage={viewLineage}
+            />
+          </div>
           <CivilizationProjectInspection
             environmentId={target.environmentId}
             projectId={target.projectId}
             targetLabel={target.label}
             effective={effective}
             allowSensitiveActions={allowSensitiveProjectActions}
+            onViewContext={(threadId) => viewContext({ threadId })}
+            requestedLineage={requestedLineage}
           />
         </>
       )}

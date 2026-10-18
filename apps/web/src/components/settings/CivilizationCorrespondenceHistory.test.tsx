@@ -121,6 +121,7 @@ import { CivilizationCorrespondenceHistory } from "./CivilizationCorrespondenceH
 
 let renderer: ReactTestRenderer | undefined;
 const onViewLineage = vi.fn();
+const onViewChronicleSource = vi.fn();
 
 const renderedText = (value: unknown): string => {
   if (typeof value === "string" || typeof value === "number") return String(value);
@@ -138,6 +139,7 @@ beforeEach(() => {
   testState.sensitiveReads = [];
   testState.writable = true;
   onViewLineage.mockReset();
+  onViewChronicleSource.mockReset();
 });
 
 afterEach(async () => {
@@ -156,6 +158,7 @@ describe("Civilization correspondence history", () => {
           pageSize={25}
           allowSensitiveActions
           onViewLineage={onViewLineage}
+          onViewChronicleSource={onViewChronicleSource}
         />,
       );
     });
@@ -173,6 +176,12 @@ describe("Civilization correspondence history", () => {
     expect(testState.sensitiveReads).toHaveLength(0);
     expect(testState.threadCalls.at(-1)?.[2]).toBeNull();
 
+    const chronicleButton = renderer!.root
+      .findAllByType("button")
+      .find((button) => button.props.children === "Chronicle");
+    await act(() => chronicleButton!.props.onClick());
+    expect(onViewChronicleSource).toHaveBeenCalledWith(`mail:${messageId}:sent`);
+
     const threadButton = renderer!.root
       .findAllByType("button")
       .find((button) => button.props.children === "Thread");
@@ -186,6 +195,27 @@ describe("Civilization correspondence history", () => {
     expect(testState.sensitiveReads).toEqual([
       { type: "mailBody", environmentId, projectId, messageId },
     ]);
+  });
+
+  it("opens a cross-linked message thread without offering or acknowledging it", async () => {
+    await act(() => {
+      renderer = create(
+        <CivilizationCorrespondenceHistory
+          environmentId={environmentId}
+          projectId={projectId}
+          pageSize={10}
+          allowSensitiveActions
+          initialParticipantThreadId={senderId}
+          initialMessageId={messageId}
+        />,
+      );
+    });
+    expect(testState.pageCalls.at(-1)?.[2]).toMatchObject({
+      participantThreadId: senderId,
+      replyRelation: "any",
+    });
+    expect(testState.threadCalls.at(-1)?.[2]).toBe(messageId);
+    expect(testState.sensitiveReads).toHaveLength(0);
   });
 
   it("applies a participant filter as one bounded correspondence query", async () => {

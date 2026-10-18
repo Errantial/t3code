@@ -366,6 +366,7 @@ const civilizationChroniclePageAtom = Atom.family((serializedKey: string) => {
     rawProjectId,
     rawKind,
     rawThreadId,
+    rawSourceId,
     rawFrom,
     rawTo,
     rawCursor,
@@ -374,6 +375,7 @@ const civilizationChroniclePageAtom = Atom.family((serializedKey: string) => {
     string,
     string,
     CivilizationChronicleKind | null,
+    string | null,
     string | null,
     string | null,
     string | null,
@@ -393,6 +395,7 @@ const civilizationChroniclePageAtom = Atom.family((serializedKey: string) => {
         projectId,
         ...(rawKind === null ? {} : { kind: rawKind }),
         ...(rawThreadId === null ? {} : { threadId: ThreadId.make(rawThreadId) }),
+        ...(rawSourceId === null ? {} : { sourceId: rawSourceId }),
         ...(rawFrom === null ? {} : { from: rawFrom }),
         ...(rawTo === null ? {} : { to: rawTo }),
         ...(rawCursor === null ? {} : { cursor: rawCursor as CivilizationChronicleCursor }),
@@ -408,6 +411,7 @@ export function useCivilizationChroniclePage(
   filters: {
     readonly kind?: CivilizationChronicleKind | undefined;
     readonly threadId?: ThreadId | undefined;
+    readonly sourceId?: string | undefined;
     readonly from?: string | undefined;
     readonly to?: string | undefined;
   },
@@ -423,6 +427,7 @@ export function useCivilizationChroniclePage(
             projectId,
             filters.kind ?? null,
             filters.threadId ?? null,
+            filters.sourceId ?? null,
             filters.from ?? null,
             filters.to ?? null,
             cursor,

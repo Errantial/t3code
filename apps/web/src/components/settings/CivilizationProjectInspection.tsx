@@ -7,6 +7,8 @@ import {
   type CivilizationCitizenReassignmentRequest,
   type CivilizationCitizenSummary,
   type CivilizationEffectiveConfig,
+  CivilizationMessageId,
+  CivilizationNoteId,
   type CivilizationNoteBody,
   type CivilizationNoteSummary,
   type CivilizationNotesCursor,
@@ -51,6 +53,11 @@ interface CivilizationProjectInspectionProps {
   readonly targetLabel: string;
   readonly effective: CivilizationEffectiveConfig;
   readonly allowSensitiveActions: boolean;
+  readonly onViewContext?: ((threadId: ThreadId) => void) | undefined;
+  readonly requestedLineage?:
+    | { readonly threadId: ThreadId; readonly nonce: number }
+    | null
+    | undefined;
 }
 
 const errorMessage = (error: unknown): string => {
@@ -85,6 +92,8 @@ function CitizenCard({
   effective,
   refresh,
   onViewLineage,
+  onViewChronicle,
+  onViewContext,
 }: {
   readonly citizen: CivilizationCitizenSummary;
   readonly canAdminister: boolean;
@@ -92,6 +101,8 @@ function CitizenCard({
   readonly effective: CivilizationEffectiveConfig;
   readonly refresh: () => void;
   readonly onViewLineage: (threadId: ThreadId) => void;
+  readonly onViewChronicle: (threadId: ThreadId) => void;
+  readonly onViewContext?: ((threadId: ThreadId) => void) | undefined;
 }) {
   const runCitizenAction = useAtomSet(civilizationCitizenAction, { mode: "promise" });
   const [reassignOpen, setReassignOpen] = useState(false);
@@ -221,6 +232,14 @@ function CitizenCard({
           <Button size="xs" variant="outline" onClick={() => onViewLineage(citizen.threadId)}>
             View lineage
           </Button>
+          <Button size="xs" variant="outline" onClick={() => onViewChronicle(citizen.threadId)}>
+            Chronicle
+          </Button>
+          {onViewContext === undefined ? null : (
+            <Button size="xs" variant="outline" onClick={() => onViewContext(citizen.threadId)}>
+              Context
+            </Button>
+          )}
           {citizen.observedOnly ? (
             <span className="text-xs text-muted-foreground">Provider-owned · read only</span>
           ) : canAdminister ? (
@@ -316,11 +335,23 @@ export function CivilizationProjectInspection({
   targetLabel,
   effective,
   allowSensitiveActions,
+  onViewContext,
+  requestedLineage,
 }: CivilizationProjectInspectionProps) {
   const canWrite = useEnvironmentScope(environmentId, AuthSettingsWriteScope);
   const censusLimit = effective.config.operations.censusPageSize;
   const [includeResolved, setIncludeResolved] = useState(false);
   const [lineageFocusThreadId, setLineageFocusThreadId] = useState<ThreadId | null>(null);
+  const [dismissedLineageRequestNonce, setDismissedLineageRequestNonce] = useState<number | null>(
+    null,
+  );
+  const [chronicleFocusThreadId, setChronicleFocusThreadId] = useState<ThreadId | null>(null);
+  const [chronicleSourceId, setChronicleSourceId] = useState<string | null>(null);
+  const [correspondenceFocusThreadId, setCorrespondenceFocusThreadId] = useState<ThreadId | null>(
+    null,
+  );
+  const [correspondenceMessageId, setCorrespondenceMessageId] =
+    useState<CivilizationMessageId | null>(null);
   const census = useCivilizationCensusPage(environmentId, projectId, null, censusLimit);
   const notes = useCivilizationNotesPage(
     environmentId,
@@ -343,6 +374,25 @@ export function CivilizationProjectInspection({
   const [noteBody, setNoteBody] = useState<CivilizationNoteBody | null>(null);
   const [bodyLoading, setBodyLoading] = useState(false);
   const sensitiveAllowed = allowSensitiveActions && canWrite;
+  const requestedLineageThreadId =
+    requestedLineage !== undefined &&
+    requestedLineage !== null &&
+    requestedLineage.nonce !== dismissedLineageRequestNonce
+      ? requestedLineage.threadId
+      : null;
+  const visibleLineageFocusThreadId = requestedLineageThreadId ?? lineageFocusThreadId;
+  const viewLineage = (threadId: ThreadId) => {
+    if (requestedLineage !== undefined && requestedLineage !== null) {
+      setDismissedLineageRequestNonce(requestedLineage.nonce);
+    }
+    setLineageFocusThreadId(threadId);
+  };
+  const closeLineage = () => {
+    if (requestedLineage !== undefined && requestedLineage !== null) {
+      setDismissedLineageRequestNonce(requestedLineage.nonce);
+    }
+    setLineageFocusThreadId(null);
+  };
 
   const baseCensus = census.data;
   const censusState =
@@ -454,6 +504,30 @@ export function CivilizationProjectInspection({
       });
   };
 
+  const openChronicleNote = (noteId: string) => {
+    if (!sensitiveAllowed || bodyLoading) return;
+    if (!readEnvironmentScope(environmentId, AuthSettingsWriteScope)) {
+      setNotesMessage("Permission changed before body inspection; settings:write is required.");
+      return;
+    }
+    setBodyLoading(true);
+    setNotesMessage(null);
+    void readSensitive({
+      type: "noteBody",
+      environmentId,
+      projectId,
+      noteId: CivilizationNoteId.make(noteId),
+    })
+      .then((body) => {
+        setBodyLoading(false);
+        setNoteBody(body as CivilizationNoteBody);
+      })
+      .catch((error: unknown) => {
+        setBodyLoading(false);
+        setNotesMessage(errorMessage(error));
+      });
+  };
+
   return (
     <div className="space-y-8">
       <SettingsSection title={`Citizens · ${targetLabel}`} id="civilization-citizens">
@@ -477,7 +551,12 @@ export function CivilizationProjectInspection({
               environmentId={environmentId}
               effective={effective}
               refresh={census.refresh}
-              onViewLineage={setLineageFocusThreadId}
+              onViewLineage={viewLineage}
+              onViewChronicle={(threadId) => {
+                setChronicleSourceId(null);
+                setChronicleFocusThreadId(threadId);
+              }}
+              onViewContext={onViewContext}
             />
           ))}
           {census.isPending && census.data === null ? (
@@ -495,21 +574,46 @@ export function CivilizationProjectInspection({
         </div>
       </SettingsSection>
 
-      {lineageFocusThreadId === null ? null : (
+      {visibleLineageFocusThreadId === null ? null : (
         <CivilizationLineageExplorer
           environmentId={environmentId}
           projectId={projectId}
-          initialThreadId={lineageFocusThreadId}
+          initialThreadId={visibleLineageFocusThreadId}
           pageSize={censusLimit}
-          onClose={() => setLineageFocusThreadId(null)}
+          onClose={closeLineage}
+          onViewChronicle={(threadId) => {
+            setChronicleSourceId(null);
+            setChronicleFocusThreadId(threadId);
+          }}
+          onViewCorrespondence={
+            sensitiveAllowed
+              ? (threadId) => {
+                  setCorrespondenceMessageId(null);
+                  setCorrespondenceFocusThreadId(threadId);
+                }
+              : undefined
+          }
+          onViewContext={onViewContext}
         />
       )}
 
       <CivilizationChronicle
+        key={`chronicle:${chronicleFocusThreadId ?? "all"}:${chronicleSourceId ?? "all"}`}
         environmentId={environmentId}
         projectId={projectId}
         pageSize={censusLimit}
-        onViewLineage={setLineageFocusThreadId}
+        onViewLineage={viewLineage}
+        initialThreadId={chronicleFocusThreadId ?? undefined}
+        initialSourceId={chronicleSourceId ?? undefined}
+        onViewNote={sensitiveAllowed ? openChronicleNote : undefined}
+        onViewCorrespondence={
+          sensitiveAllowed
+            ? (messageId) => {
+                setCorrespondenceFocusThreadId(null);
+                setCorrespondenceMessageId(CivilizationMessageId.make(messageId));
+              }
+            : undefined
+        }
       />
 
       <SettingsSection title={`Notes · ${targetLabel}`} id="civilization-notes">
@@ -576,11 +680,18 @@ export function CivilizationProjectInspection({
       </SettingsSection>
 
       <CivilizationCorrespondenceHistory
+        key={`correspondence:${correspondenceFocusThreadId ?? "all"}:${correspondenceMessageId ?? "all"}`}
         environmentId={environmentId}
         projectId={projectId}
         pageSize={effective.config.operations.inboxPageSize}
         allowSensitiveActions={allowSensitiveActions}
-        onViewLineage={setLineageFocusThreadId}
+        onViewLineage={viewLineage}
+        initialParticipantThreadId={correspondenceFocusThreadId ?? undefined}
+        initialMessageId={correspondenceMessageId ?? undefined}
+        onViewChronicleSource={(sourceId) => {
+          setChronicleFocusThreadId(null);
+          setChronicleSourceId(sourceId);
+        }}
       />
 
       <CivilizationDataRetention

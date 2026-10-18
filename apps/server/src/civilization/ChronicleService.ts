@@ -67,6 +67,7 @@ interface ChronicleCursorPayload {
   readonly revision: number;
   readonly kind: CivilizationChronicleKind | null;
   readonly threadId: string | null;
+  readonly sourceId: string | null;
   readonly from: string | null;
   readonly to: string | null;
   readonly afterOccurredAt: string;
@@ -103,6 +104,7 @@ export interface ChronicleListInput {
   readonly projectId: ProjectId;
   readonly kind?: CivilizationChronicleKind | undefined;
   readonly threadId?: ThreadId | undefined;
+  readonly sourceId?: string | undefined;
   readonly from?: string | undefined;
   readonly to?: string | undefined;
   readonly cursor?: string | undefined;
@@ -204,6 +206,7 @@ function decodeCursor(
     parsed.projectId !== input.projectId ||
     parsed.kind !== (input.kind ?? null) ||
     parsed.threadId !== (input.threadId ?? null) ||
+    parsed.sourceId !== (input.sourceId ?? null) ||
     parsed.from !== (input.from ?? null) ||
     parsed.to !== (input.to ?? null) ||
     !Number.isSafeInteger(parsed.revision) ||
@@ -365,7 +368,37 @@ const make = Effect.gen(function* () {
         const afterEntryId = cursor?.afterEntryId ?? "\uffff";
         const queryLimit = limit + 1;
         let rows: ReadonlyArray<ChronicleRow>;
-        if (input.threadId === undefined) {
+        if (input.sourceId !== undefined) {
+          rows =
+            input.kind === undefined
+              ? yield* sql<ChronicleRow>`
+                  SELECT entry_id, project_id, kind, primary_thread_id, secondary_thread_id,
+                         citizen_epoch, citizen_revision, source_kind, source_id, source_sequence,
+                         occurred_at, metadata_json
+                  FROM civilization_chronicle_entries
+                  WHERE project_id = ${input.projectId}
+                    AND source_id = ${input.sourceId}
+                    ${input.threadId === undefined ? sql`` : sql`AND (primary_thread_id = ${input.threadId} OR secondary_thread_id = ${input.threadId})`}
+                    AND occurred_at >= ${fromBound}
+                    AND (occurred_at, entry_id) < (${afterOccurredAt}, ${afterEntryId})
+                  ORDER BY occurred_at DESC, entry_id DESC
+                  LIMIT ${queryLimit}
+                `
+              : yield* sql<ChronicleRow>`
+                  SELECT entry_id, project_id, kind, primary_thread_id, secondary_thread_id,
+                         citizen_epoch, citizen_revision, source_kind, source_id, source_sequence,
+                         occurred_at, metadata_json
+                  FROM civilization_chronicle_entries
+                  WHERE project_id = ${input.projectId}
+                    AND source_id = ${input.sourceId}
+                    AND kind = ${input.kind}
+                    ${input.threadId === undefined ? sql`` : sql`AND (primary_thread_id = ${input.threadId} OR secondary_thread_id = ${input.threadId})`}
+                    AND occurred_at >= ${fromBound}
+                    AND (occurred_at, entry_id) < (${afterOccurredAt}, ${afterEntryId})
+                  ORDER BY occurred_at DESC, entry_id DESC
+                  LIMIT ${queryLimit}
+                `;
+        } else if (input.threadId === undefined) {
           rows =
             input.kind === undefined
               ? yield* sql<ChronicleRow>`
@@ -458,6 +491,7 @@ const make = Effect.gen(function* () {
             revision: state.chronicle_revision,
             kind: input.kind ?? null,
             threadId: input.threadId ?? null,
+            sourceId: input.sourceId ?? null,
             from: normalizedFrom ?? null,
             to: normalizedTo ?? null,
             afterOccurredAt: row.occurred_at,
@@ -500,6 +534,7 @@ const make = Effect.gen(function* () {
                   revision: state.chronicle_revision,
                   kind: input.kind ?? null,
                   threadId: input.threadId ?? null,
+                  sourceId: input.sourceId ?? null,
                   from: normalizedFrom ?? null,
                   to: normalizedTo ?? null,
                   afterOccurredAt: last.occurred_at,
