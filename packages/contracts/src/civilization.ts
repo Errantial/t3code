@@ -544,6 +544,33 @@ export const CivilizationCensusPage = Schema.Struct({
   partial: Schema.Boolean,
 });
 export type CivilizationCensusPage = typeof CivilizationCensusPage.Type;
+export const CivilizationLineageCursor = TrimmedNonEmptyString.pipe(
+  Schema.brand("CivilizationLineageCursor"),
+);
+export type CivilizationLineageCursor = typeof CivilizationLineageCursor.Type;
+
+export const CivilizationLineageParentAvailability = Schema.Literals([
+  "none",
+  "visible",
+  "unavailable",
+  "cross_project",
+  "cycle",
+  "depth_limit",
+]);
+export type CivilizationLineageParentAvailability =
+  typeof CivilizationLineageParentAvailability.Type;
+
+export const CivilizationLineageNeighborhood = Schema.Struct({
+  projectId: ProjectId,
+  revision: Schema.Number,
+  focus: CivilizationCitizenSummary,
+  parent: Schema.NullOr(CivilizationCitizenSummary),
+  parentAvailability: CivilizationLineageParentAvailability,
+  children: Schema.Array(CivilizationCitizenSummary),
+  nextCursor: Schema.NullOr(CivilizationLineageCursor),
+  partial: Schema.Boolean,
+});
+export type CivilizationLineageNeighborhood = typeof CivilizationLineageNeighborhood.Type;
 
 export const CivilizationNoteId = TrimmedNonEmptyString.pipe(Schema.brand("CivilizationNoteId"));
 export type CivilizationNoteId = typeof CivilizationNoteId.Type;

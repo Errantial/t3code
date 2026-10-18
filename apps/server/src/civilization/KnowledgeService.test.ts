@@ -2,6 +2,7 @@ import { assert, it } from "@effect/vitest";
 import {
   CIVILIZATION_CONFIG_VERSION,
   CivilizationAgentAccessError,
+  CivilizationCitizenNotFoundError,
   CivilizationKnowledgeConflictError,
   CivilizationNoteNotFoundError,
   ProjectId,
@@ -27,6 +28,7 @@ const isInvalid = Schema.is(KnowledgeService.CivilizationKnowledgeInvalidError);
 const isConflict = Schema.is(CivilizationKnowledgeConflictError);
 const isAccess = Schema.is(CivilizationAgentAccessError);
 const isNotFound = Schema.is(CivilizationNoteNotFoundError);
+const isCitizenNotFound = Schema.is(CivilizationCitizenNotFoundError);
 
 const projectId = ProjectId.make("project:civilization:knowledge");
 const callerThreadId = ThreadId.make("thread:civilization:knowledge:caller");
@@ -53,6 +55,11 @@ const seedCitizen = Effect.fn("KnowledgeService.test.seedCitizen")(function* (in
   readonly deleted?: boolean;
   readonly closed?: boolean;
   readonly epoch?: number;
+  readonly parentThreadId?: ThreadId | null;
+  readonly relationshipToParent?: "fork" | "subagent" | null;
+  readonly generation?: number;
+  readonly lineageStatus?: "resolved" | "missing" | "cycle" | "cross_project" | "depth_limit";
+  readonly birthSequence?: number;
 }) {
   const sql = yield* SqlClient.SqlClient;
   const owner = input.projectId ?? projectId;
@@ -69,8 +76,8 @@ const seedCitizen = Effect.fn("KnowledgeService.test.seedCitizen")(function* (in
       pending_title_command_id, pending_managed_title, pending_title_topic,
       epoch, closed, deleted, revision, created_at, updated_at
     ) VALUES (
-      ${input.id}, ${owner}, NULL, NULL, ${input.id}, 0, 'resolved', ${input.observedOnly === true ? 1 : 0},
-      1, 1,
+      ${input.id}, ${owner}, ${input.parentThreadId ?? null}, ${input.relationshipToParent ?? null}, ${input.parentThreadId ?? input.id}, ${input.generation ?? 0}, ${input.lineageStatus ?? "resolved"}, ${input.observedOnly === true ? 1 : 0},
+      ${input.birthSequence ?? 1}, 1,
       ${`name:${input.id}`}, 1, ${input.name}, ${input.name}, ${key}, 'main',
       1, 0,
       'quiet', 'Quiet', '[]', '', 'profiles',
@@ -154,6 +161,158 @@ it.effect("pages the census exactly by normalized name and thread id without dup
     const ids = [...first.citizens, ...second.citizens].map((citizen) => citizen.threadId);
     assert.deepEqual(ids, ["thread:a1", "thread:a2", "thread:z"]);
     assert.equal(new Set(ids).size, ids.length);
+  }).pipe(Effect.provide(Layer.fresh(layer))),
+);
+
+it.effect("pages a bounded lineage neighborhood by direct child birth order", () =>
+  Effect.gen(function* () {
+    const service = yield* KnowledgeService.CivilizationKnowledgeService;
+    yield* insertProject();
+    yield* enableFeature({ censusPageSize: 2, showObservedAgents: false });
+    const root = ThreadId.make("thread:lineage:root");
+    const childA = ThreadId.make("thread:lineage:a");
+    const childB = ThreadId.make("thread:lineage:b");
+    const childC = ThreadId.make("thread:lineage:c");
+    yield* seedCitizen({ id: root, name: "Root", birthSequence: 1 });
+    yield* seedCitizen({
+      id: childB,
+      name: "Bravo",
+      parentThreadId: root,
+      relationshipToParent: "fork",
+      generation: 1,
+      birthSequence: 3,
+    });
+    yield* seedCitizen({
+      id: childA,
+      name: "Alpha",
+      parentThreadId: root,
+      relationshipToParent: "subagent",
+      generation: 1,
+      birthSequence: 2,
+    });
+    yield* seedCitizen({
+      id: childC,
+      name: "Charlie",
+      parentThreadId: root,
+      relationshipToParent: "fork",
+      generation: 1,
+      birthSequence: 4,
+    });
+    yield* seedCitizen({
+      id: ThreadId.make("thread:lineage:hidden-observed"),
+      name: "Observed",
+      parentThreadId: root,
+      relationshipToParent: "subagent",
+      generation: 1,
+      birthSequence: 5,
+      observedOnly: true,
+    });
+    yield* seedCitizen({
+      id: ThreadId.make("thread:lineage:hidden-deleted"),
+      name: "Deleted",
+      parentThreadId: root,
+      relationshipToParent: "fork",
+      generation: 1,
+      birthSequence: 6,
+      deleted: true,
+    });
+
+    const first = yield* service.getLineageNeighborhood({ projectId, threadId: root });
+    assert.equal(first.focus.threadId, root);
+    assert.equal(first.parent, null);
+    assert.equal(first.parentAvailability, "none");
+    assert.deepEqual(
+      first.children.map((child) => child.threadId),
+      [childA, childB],
+    );
+    assert.isTrue(first.partial);
+    assert.isNotNull(first.nextCursor);
+
+    const second = yield* service.getLineageNeighborhood({
+      projectId,
+      threadId: root,
+      cursor: first.nextCursor!,
+    });
+    assert.deepEqual(
+      second.children.map((child) => child.threadId),
+      [childC],
+    );
+    assert.isFalse(second.partial);
+    assert.isNull(second.nextCursor);
+
+    const child = yield* service.getLineageNeighborhood({ projectId, threadId: childA });
+    assert.equal(child.parentAvailability, "visible");
+    assert.equal(child.parent?.threadId, root);
+    assert.equal(child.focus.relationshipToParent, "subagent");
+  }).pipe(Effect.provide(Layer.fresh(layer))),
+);
+
+it.effect("fails lineage closed on stale, mismatched, hidden, and cross-project ancestry", () =>
+  Effect.gen(function* () {
+    const service = yield* KnowledgeService.CivilizationKnowledgeService;
+    yield* insertProject();
+    yield* enableFeature({ censusPageSize: 1, showObservedAgents: false });
+    const root = ThreadId.make("thread:lineage:guard-root");
+    const child = ThreadId.make("thread:lineage:guard-child");
+    const sibling = ThreadId.make("thread:lineage:guard-sibling");
+    yield* seedCitizen({ id: root, name: "Root", birthSequence: 1 });
+    yield* seedCitizen({
+      id: child,
+      name: "Child",
+      parentThreadId: root,
+      relationshipToParent: "fork",
+      generation: 1,
+      birthSequence: 2,
+    });
+    yield* seedCitizen({
+      id: sibling,
+      name: "Sibling",
+      parentThreadId: root,
+      relationshipToParent: "fork",
+      generation: 1,
+      birthSequence: 3,
+    });
+    yield* seedCitizen({
+      id: ThreadId.make("thread:lineage:hidden-focus"),
+      name: "Observed focus",
+      observedOnly: true,
+    });
+    const first = yield* service.getLineageNeighborhood({ projectId, threadId: root });
+    assert.isNotNull(first.nextCursor);
+
+    const wrongFocus = yield* Effect.flip(
+      service.getLineageNeighborhood({ projectId, threadId: child, cursor: first.nextCursor! }),
+    );
+    assert.isTrue(isInvalid(wrongFocus));
+    if (isInvalid(wrongFocus)) assert.equal(wrongFocus.reason, "invalid_cursor");
+
+    const hidden = yield* Effect.flip(
+      service.getLineageNeighborhood({
+        projectId,
+        threadId: ThreadId.make("thread:lineage:hidden-focus"),
+      }),
+    );
+    assert.isTrue(isCitizenNotFound(hidden));
+
+    yield* seedCitizen({ id: ThreadId.make("thread:lineage:new"), name: "Later" });
+    const stale = yield* Effect.flip(
+      service.getLineageNeighborhood({ projectId, threadId: root, cursor: first.nextCursor! }),
+    );
+    assert.isTrue(isConflict(stale));
+
+    const cross = ThreadId.make("thread:lineage:cross");
+    yield* seedCitizen({
+      id: cross,
+      name: "Cross",
+      parentThreadId: ThreadId.make("thread:foreign:parent"),
+      relationshipToParent: "fork",
+      generation: 1,
+      lineageStatus: "cross_project",
+      birthSequence: 10,
+    });
+    const crossPage = yield* service.getLineageNeighborhood({ projectId, threadId: cross });
+    assert.equal(crossPage.parent, null);
+    assert.equal(crossPage.parentAvailability, "cross_project");
   }).pipe(Effect.provide(Layer.fresh(layer))),
 );
 

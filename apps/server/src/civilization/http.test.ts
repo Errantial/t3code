@@ -2,6 +2,7 @@ import {
   AuthSessionId,
   CIVILIZATION_CONFIG_VERSION,
   CivilizationCensusCursor,
+  CivilizationLineageCursor,
   CivilizationInboxCursor,
   CivilizationMessageId,
   CivilizationNoteId,
@@ -52,6 +53,33 @@ const fakeAdministration = AdministrationService.CivilizationAdministrationServi
 const fakeKnowledge = KnowledgeService.CivilizationKnowledgeService.of({
   listCensus: ({ projectId }) =>
     Effect.succeed({ projectId, revision: 0, citizens: [], nextCursor: null, partial: false }),
+  getLineageNeighborhood: ({ projectId, threadId }) =>
+    Effect.succeed({
+      projectId,
+      revision: 0,
+      focus: {
+        threadId,
+        projectId,
+        name: "Lineage focus",
+        profileId: "calm",
+        profileLabel: "Calm",
+        generation: 0,
+        lineageStatus: "resolved",
+        parentThreadId: null,
+        relationshipToParent: null,
+        observedOnly: false,
+        epoch: 0,
+        closed: false,
+        deleted: false,
+        titleManaged: true,
+        revision: 1,
+      },
+      parent: null,
+      parentAvailability: "none",
+      children: [],
+      nextCursor: null,
+      partial: false,
+    }),
   listNotes: ({ projectId }) =>
     Effect.succeed({ projectId, revision: 0, notes: [], nextCursor: null, partial: false }),
   readNoteMetadata: () => Effect.die("unused note metadata read"),
@@ -207,6 +235,19 @@ it.effect(
             );
             expect(capabilityResponse.status).toBe(200);
             expect(await capabilityResponse.json()).toEqual({ providers: [] });
+
+            const lineageResponse = await server.handler(
+              new Request(
+                "http://127.0.0.1/api/civilization/lineage?projectId=project%3Aread-only&threadId=thread%3Aread-only",
+              ),
+              requestContext,
+            );
+            expect(lineageResponse.status).toBe(200);
+            expect(await lineageResponse.json()).toMatchObject({
+              projectId: "project:read-only",
+              focus: { threadId: "thread:read-only" },
+              parentAvailability: "none",
+            });
 
             const inspectionListResponse = await server.handler(
               new Request(
@@ -490,6 +531,8 @@ it.effect("serves bounded census and note inspection through the knowledge servi
   Effect.gen(function* () {
     const adoptionCalls = yield* Ref.make(0);
     const censusInput = yield* Ref.make<KnowledgeService.CivilizationCensusPageInput | null>(null);
+    const lineageInput =
+      yield* Ref.make<KnowledgeService.CivilizationLineageNeighborhoodInput | null>(null);
     const notesInput = yield* Ref.make<KnowledgeService.CivilizationNotesPageInput | null>(null);
     const noteReadInput = yield* Ref.make<{
       readonly projectId: ProjectId;
@@ -497,6 +540,24 @@ it.effect("serves bounded census and note inspection through the knowledge servi
     } | null>(null);
     const projectId = ProjectId.make("project:civilization:http-knowledge");
     const noteId = CivilizationNoteId.make("note:http-knowledge");
+    const lineageThreadId = ThreadId.make("thread:civilization:http-lineage");
+    const lineageFocus = {
+      threadId: lineageThreadId,
+      projectId,
+      name: "Lineage Focus",
+      profileId: "calm",
+      profileLabel: "Calm",
+      generation: 0,
+      lineageStatus: "resolved" as const,
+      parentThreadId: null,
+      relationshipToParent: null,
+      observedOnly: false,
+      epoch: 0,
+      closed: false,
+      deleted: false,
+      titleManaged: true,
+      revision: 1,
+    };
     const knowledge = KnowledgeService.CivilizationKnowledgeService.of({
       ...fakeKnowledge,
       listCensus: (input) =>
@@ -506,6 +567,19 @@ it.effect("serves bounded census and note inspection through the knowledge servi
             revision: 3,
             citizens: [],
             nextCursor: CivilizationCensusCursor.make("census-next"),
+            partial: true,
+          }),
+        ),
+      getLineageNeighborhood: (input) =>
+        Ref.set(lineageInput, input).pipe(
+          Effect.as({
+            projectId,
+            revision: 4,
+            focus: lineageFocus,
+            parent: null,
+            parentAvailability: "none" as const,
+            children: [],
+            nextCursor: CivilizationLineageCursor.make("lineage-next"),
             partial: true,
           }),
         ),
@@ -562,6 +636,19 @@ it.effect("serves bounded census and note inspection through the knowledge servi
           expect(census.status).toBe(200);
           expect(await census.json()).toMatchObject({ revision: 3, nextCursor: "census-next" });
 
+          const lineage = await server.handler(
+            new Request(
+              `http://127.0.0.1/api/civilization/lineage?projectId=${encodeURIComponent(projectId)}&threadId=${encodeURIComponent(lineageThreadId)}&limit=3`,
+            ),
+            requestContext,
+          );
+          expect(lineage.status).toBe(200);
+          expect(await lineage.json()).toMatchObject({
+            revision: 4,
+            focus: { threadId: lineageThreadId },
+            nextCursor: "lineage-next",
+          });
+
           const notes = await server.handler(
             new Request(
               `http://127.0.0.1/api/civilization/notes?projectId=${encodeURIComponent(projectId)}&limit=4&includeResolved=true`,
@@ -585,6 +672,7 @@ it.effect("serves bounded census and note inspection through the knowledge servi
       Effect.andThen(
         Effect.all({
           census: Ref.get(censusInput),
+          lineage: Ref.get(lineageInput),
           notes: Ref.get(notesInput),
           note: Ref.get(noteReadInput),
         }),
@@ -592,6 +680,12 @@ it.effect("serves bounded census and note inspection through the knowledge servi
       Effect.tap((inputs) =>
         Effect.sync(() => {
           expect(inputs.census).toEqual({ projectId, cursor: undefined, limit: 2 });
+          expect(inputs.lineage).toEqual({
+            projectId,
+            threadId: lineageThreadId,
+            cursor: undefined,
+            limit: 3,
+          });
           expect(inputs.notes).toEqual({
             projectId,
             cursor: undefined,

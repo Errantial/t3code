@@ -1,5 +1,6 @@
 import {
   type CivilizationCensusCursor,
+  type CivilizationLineageCursor,
   type CivilizationContextInspectionCursor,
   type CivilizationContextInspectionId,
   type CivilizationContextInspectionOutcome,
@@ -20,6 +21,7 @@ import {
 } from "@t3tools/contracts";
 import {
   fetchCurrentEnvironmentCivilizationCensusPage,
+  fetchCurrentEnvironmentCivilizationLineageNeighborhood,
   fetchCurrentEnvironmentCivilizationContextInspectionDetail,
   fetchCurrentEnvironmentCivilizationContextInspectionPage,
   fetchCurrentEnvironmentCivilizationNoteBody,
@@ -312,6 +314,45 @@ export function useCivilizationCensusPage(
   return useEnvironmentQuery(atom);
 }
 
+const civilizationLineageNeighborhoodAtom = Atom.family((serializedKey: string) => {
+  const [rawEnvironmentId, rawProjectId, rawThreadId, rawCursor, rawLimit] = JSON.parse(
+    serializedKey,
+  ) as [string, string, string, string | null, number];
+  const environmentId = rawEnvironmentId as EnvironmentId;
+  const projectId = ProjectId.make(rawProjectId);
+  const threadId = ThreadId.make(rawThreadId);
+  return connectionAtomRuntime
+    .atom((get) => {
+      const prepared = Option.getOrNull(
+        get(environmentSession.preparedConnectionValueAtom(environmentId)),
+      );
+      if (prepared === null) return Effect.never;
+      return fetchCurrentEnvironmentCivilizationLineageNeighborhood({
+        prepared,
+        projectId,
+        threadId,
+        ...(rawCursor === null ? {} : { cursor: rawCursor as CivilizationLineageCursor }),
+        limit: rawLimit,
+      });
+    })
+    .pipe(Atom.setIdleTTL(60_000), Atom.withLabel(`civilization-lineage:${serializedKey}`));
+});
+
+export function useCivilizationLineageNeighborhood(
+  environmentId: EnvironmentId | null,
+  projectId: ProjectId | null,
+  threadId: ThreadId | null,
+  cursor: CivilizationLineageCursor | null,
+  limit: number,
+) {
+  const atom =
+    environmentId === null || projectId === null || threadId === null
+      ? null
+      : civilizationLineageNeighborhoodAtom(
+          civilizationProjectPageKey([environmentId, projectId, threadId, cursor, limit]),
+        );
+  return useEnvironmentQuery(atom);
+}
 const civilizationNotesPageAtom = Atom.family((serializedKey: string) => {
   const [rawEnvironmentId, rawProjectId, rawCursor, rawLimit, includeResolved] = JSON.parse(
     serializedKey,

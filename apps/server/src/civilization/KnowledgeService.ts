@@ -5,6 +5,9 @@ import {
   CIVILIZATION_MAX_NOTE_BYTES,
   CivilizationAgentAccessError,
   CivilizationCensusCursor,
+  CivilizationCitizenNotFoundError,
+  CivilizationLineageCursor,
+  type CivilizationLineageNeighborhood,
   CivilizationKnowledgeConflictError,
   type CivilizationCitizenSummary,
   type CivilizationLineageStatus,
@@ -74,6 +77,9 @@ type CensusRow = {
   readonly title_managed: number;
   readonly revision: number;
 };
+type LineageRow = CensusRow & {
+  readonly birth_sequence: number;
+};
 
 type NoteRow = {
   readonly note_id: string;
@@ -112,6 +118,18 @@ type CensusCursorPayload = {
   readonly afterNameKey: string;
   readonly afterThreadId: string;
 };
+type LineageCursorPayload = {
+  readonly v: typeof CURSOR_VERSION;
+  readonly kind: "lineage";
+  readonly projectId: string;
+  readonly focusThreadId: string;
+  readonly revision: number;
+  readonly environmentRevision: number;
+  readonly projectRevision: number;
+  readonly includeObserved: boolean;
+  readonly afterBirthSequence: number;
+  readonly afterThreadId: string;
+};
 
 type NotesCursorPayload = {
   readonly v: typeof CURSOR_VERSION;
@@ -124,7 +142,7 @@ type NotesCursorPayload = {
   readonly afterNoteId: string;
 };
 
-type CursorPayload = CensusCursorPayload | NotesCursorPayload;
+type CursorPayload = CensusCursorPayload | LineageCursorPayload | NotesCursorPayload;
 
 export interface CivilizationCensusPageInput {
   readonly projectId: ProjectId;
@@ -139,6 +157,14 @@ export interface CivilizationCensusServicePage {
   readonly nextCursor: typeof CivilizationCensusCursor.Type | null;
   readonly partial: boolean;
 }
+export interface CivilizationLineageNeighborhoodInput {
+  readonly projectId: ProjectId;
+  readonly threadId: ThreadId;
+  readonly cursor?: string | undefined;
+  readonly limit?: number | undefined;
+}
+
+export type CivilizationLineageNeighborhoodServiceResult = CivilizationLineageNeighborhood;
 
 export interface CivilizationNotesPageInput {
   readonly projectId: ProjectId;
@@ -226,6 +252,9 @@ function encodeCursor(payload: CursorPayload): string {
 export const encodeCivilizationCensusCursor = (input: Omit<CensusCursorPayload, "v" | "kind">) =>
   CivilizationCensusCursor.make(encodeCursor({ v: CURSOR_VERSION, kind: "census", ...input }));
 
+export const encodeCivilizationLineageCursor = (input: Omit<LineageCursorPayload, "v" | "kind">) =>
+  CivilizationLineageCursor.make(encodeCursor({ v: CURSOR_VERSION, kind: "lineage", ...input }));
+
 export const encodeCivilizationNotesCursor = (input: Omit<NotesCursorPayload, "v" | "kind">) =>
   CivilizationNotesCursor.make(encodeCursor({ v: CURSOR_VERSION, kind: "notes", ...input }));
 
@@ -236,7 +265,10 @@ function decodeCursor(cursor: string): CursorPayload {
       throw new Error("non-canonical cursor");
     }
     const parsed = JSON.parse(bytes.toString("utf8")) as Record<string, unknown>;
-    if (parsed.v !== CURSOR_VERSION || (parsed.kind !== "census" && parsed.kind !== "notes")) {
+    if (
+      parsed.v !== CURSOR_VERSION ||
+      (parsed.kind !== "census" && parsed.kind !== "lineage" && parsed.kind !== "notes")
+    ) {
       throw new Error("unsupported cursor");
     }
     return parsed as unknown as CursorPayload;
@@ -266,6 +298,31 @@ function decodeCensusCursor(
   return parsed;
 }
 
+function decodeLineageCursor(
+  cursor: string | undefined,
+  projectId: ProjectId,
+  focusThreadId: ThreadId,
+): LineageCursorPayload | undefined {
+  if (cursor === undefined) return undefined;
+  const parsed = decodeCursor(cursor);
+  if (
+    parsed.kind !== "lineage" ||
+    parsed.projectId !== projectId ||
+    parsed.focusThreadId !== focusThreadId ||
+    !Number.isSafeInteger(parsed.revision) ||
+    !Number.isSafeInteger(parsed.environmentRevision) ||
+    !Number.isSafeInteger(parsed.projectRevision) ||
+    typeof parsed.includeObserved !== "boolean" ||
+    !Number.isSafeInteger(parsed.afterBirthSequence) ||
+    typeof parsed.afterThreadId !== "string"
+  ) {
+    throw invalid(
+      "invalid_cursor",
+      "The Civilization lineage cursor does not match this project or focus citizen.",
+    );
+  }
+  return parsed;
+}
 function decodeNotesCursor(
   cursor: string | undefined,
   projectId: ProjectId,
@@ -590,6 +647,176 @@ const make = Effect.gen(function* () {
     } satisfies CivilizationCensusServicePage;
   });
 
+  const getLineageNeighborhood = Effect.fn("CivilizationKnowledge.getLineageNeighborhood")(
+    function* (input: CivilizationLineageNeighborhoodInput) {
+      const effective = yield* getEffectiveCivilizationConfig(input.projectId).pipe(
+        Effect.provideService(SqlClient.SqlClient, sql),
+      );
+      const state = yield* getProjectRevisions(input.projectId);
+      const includeObserved = effective.config.participation.showObservedAgents;
+      const cursor = yield* knowledgeSync(() =>
+        decodeLineageCursor(input.cursor, input.projectId, input.threadId),
+      );
+      if (cursor !== undefined) {
+        if (cursor.revision !== state.census_revision) {
+          return yield* new CivilizationKnowledgeConflictError({
+            code: "civilization_knowledge_conflict",
+            entity: "census",
+            expectedRevision: cursor.revision,
+            currentRevision: state.census_revision,
+          });
+        }
+        if (
+          cursor.environmentRevision !== effective.environmentRevision ||
+          cursor.projectRevision !== effective.projectRevision ||
+          cursor.includeObserved !== includeObserved
+        ) {
+          return yield* invalid(
+            "invalid_cursor",
+            "Civilization lineage visibility changed after this cursor was issued.",
+          );
+        }
+      }
+
+      const focus = (yield* sql<LineageRow>`
+        SELECT thread_id, project_id, name_display, name_key, profile_entry_id, profile_label,
+               generation, lineage_status, parent_thread_id, relationship_to_parent,
+               observed_only, epoch, closed, deleted, title_managed, revision, birth_sequence
+        FROM civilization_citizens
+        WHERE project_id = ${input.projectId}
+          AND thread_id = ${input.threadId}
+          AND deleted = 0
+          AND (${includeObserved ? 1 : 0} = 1 OR observed_only = 0)
+        LIMIT 1
+      `)[0];
+      if (focus === undefined) {
+        return yield* new CivilizationCitizenNotFoundError({
+          code: "civilization_citizen_not_found",
+          threadId: input.threadId,
+        });
+      }
+
+      let parent: CivilizationCitizenSummary | null = null;
+      let parentAvailability: CivilizationLineageNeighborhood["parentAvailability"] = "none";
+      if (focus.parent_thread_id !== null) {
+        if (focus.lineage_status === "cross_project") parentAvailability = "cross_project";
+        else if (focus.lineage_status === "cycle") parentAvailability = "cycle";
+        else if (focus.lineage_status === "depth_limit") parentAvailability = "depth_limit";
+        else {
+          const parentRow = (yield* sql<CensusRow>`
+            SELECT thread_id, project_id, name_display, name_key, profile_entry_id, profile_label,
+                   generation, lineage_status, parent_thread_id, relationship_to_parent,
+                   observed_only, epoch, closed, deleted, title_managed, revision
+            FROM civilization_citizens
+            WHERE project_id = ${input.projectId}
+              AND thread_id = ${focus.parent_thread_id}
+              AND deleted = 0
+              AND (${includeObserved ? 1 : 0} = 1 OR observed_only = 0)
+            LIMIT 1
+          `)[0];
+          if (parentRow === undefined) parentAvailability = "unavailable";
+          else {
+            parent = censusSummary(parentRow);
+            parentAvailability = "visible";
+          }
+        }
+      }
+
+      const limit = yield* knowledgeSync(() =>
+        pageSize(input.limit, effective.config.operations.censusPageSize),
+      );
+      const rows =
+        cursor === undefined
+          ? yield* sql<LineageRow>`
+            SELECT thread_id, project_id, name_display, name_key, profile_entry_id, profile_label,
+                   generation, lineage_status, parent_thread_id, relationship_to_parent,
+                   observed_only, epoch, closed, deleted, title_managed, revision, birth_sequence
+            FROM civilization_citizens
+            WHERE project_id = ${input.projectId}
+              AND parent_thread_id = ${input.threadId}
+              AND deleted = 0
+              AND (${includeObserved ? 1 : 0} = 1 OR observed_only = 0)
+            ORDER BY birth_sequence ASC, thread_id ASC
+            LIMIT ${limit + 1}
+          `
+          : yield* sql<LineageRow>`
+            SELECT thread_id, project_id, name_display, name_key, profile_entry_id, profile_label,
+                   generation, lineage_status, parent_thread_id, relationship_to_parent,
+                   observed_only, epoch, closed, deleted, title_managed, revision, birth_sequence
+            FROM civilization_citizens
+            WHERE project_id = ${input.projectId}
+              AND parent_thread_id = ${input.threadId}
+              AND deleted = 0
+              AND (${includeObserved ? 1 : 0} = 1 OR observed_only = 0)
+              AND (birth_sequence > ${cursor.afterBirthSequence}
+                OR (birth_sequence = ${cursor.afterBirthSequence} AND thread_id > ${cursor.afterThreadId}))
+            ORDER BY birth_sequence ASC, thread_id ASC
+            LIMIT ${limit + 1}
+          `;
+
+      const children: Array<CivilizationCitizenSummary> = [];
+      let byteLimited = false;
+      for (const row of rows.slice(0, limit)) {
+        const candidate = censusSummary(row);
+        const candidateCursor = encodeCivilizationLineageCursor({
+          projectId: input.projectId,
+          focusThreadId: input.threadId,
+          revision: state.census_revision,
+          environmentRevision: effective.environmentRevision,
+          projectRevision: effective.projectRevision,
+          includeObserved,
+          afterBirthSequence: row.birth_sequence,
+          afterThreadId: row.thread_id,
+        });
+        const candidatePage = {
+          projectId: input.projectId,
+          revision: state.census_revision,
+          focus: censusSummary(focus),
+          parent,
+          parentAvailability,
+          children: [...children, candidate],
+          nextCursor: candidateCursor,
+          partial: true,
+        } satisfies CivilizationLineageNeighborhood;
+        if (responseBytes(candidatePage) > effective.config.operations.responseBodyBytes) {
+          byteLimited = true;
+          break;
+        }
+        children.push(candidate);
+      }
+      if (rows.length > 0 && children.length === 0) {
+        return yield* invalid(
+          "response_too_large",
+          "The configured Civilization response-body limit cannot fit one lineage entry.",
+        );
+      }
+      const hasMore = byteLimited || rows.length > children.length;
+      const last = children.length === 0 ? undefined : rows[children.length - 1];
+      const nextCursor =
+        !hasMore || last === undefined
+          ? null
+          : encodeCivilizationLineageCursor({
+              projectId: input.projectId,
+              focusThreadId: input.threadId,
+              revision: state.census_revision,
+              environmentRevision: effective.environmentRevision,
+              projectRevision: effective.projectRevision,
+              includeObserved,
+              afterBirthSequence: last.birth_sequence,
+              afterThreadId: last.thread_id,
+            });
+      return {
+        projectId: input.projectId,
+        revision: state.census_revision,
+        focus: censusSummary(focus),
+        parent,
+        parentAvailability,
+        children,
+        nextCursor,
+        partial: hasMore,
+      } satisfies CivilizationLineageNeighborhoodServiceResult;
+    },
+  );
   const listNotes = Effect.fn("CivilizationKnowledge.listNotes")(function* (
     input: CivilizationNotesPageInput,
   ) {
@@ -1111,6 +1338,7 @@ const make = Effect.gen(function* () {
 
   return {
     listCensus,
+    getLineageNeighborhood,
     listNotes,
     readNoteMetadata,
     readNoteBody,
@@ -1130,6 +1358,7 @@ const unavailableKnowledge = () =>
 
 const unavailableKnowledgeService = {
   listCensus: () => unavailableKnowledge(),
+  getLineageNeighborhood: () => unavailableKnowledge(),
   listNotes: () => unavailableKnowledge(),
   readNoteMetadata: () => unavailableKnowledge(),
   readNoteBody: () => unavailableKnowledge(),

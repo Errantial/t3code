@@ -36,6 +36,7 @@ import {
   exportEnvironmentCivilizationProjectData,
   exportEnvironmentCivilizationConfig,
   fetchEnvironmentCivilizationCensusPage,
+  fetchEnvironmentCivilizationLineageNeighborhood,
   fetchEnvironmentCivilizationCapabilities,
   fetchEnvironmentCivilizationConfig,
   fetchEnvironmentCivilizationConfigDescription,
@@ -597,6 +598,17 @@ describe("Civilization project inspection and citizen administration", () => {
                 nextCursor: null,
                 partial: false,
               });
+            case "/api/civilization/lineage":
+              return Response.json({
+                projectId: PROJECT_ID,
+                revision: 11,
+                focus: citizen,
+                parent: null,
+                parentAvailability: "none",
+                children: [],
+                nextCursor: null,
+                partial: false,
+              });
             case "/api/civilization/notes":
               return Response.json({
                 projectId: PROJECT_ID,
@@ -657,6 +669,14 @@ describe("Civilization project inspection and citizen administration", () => {
           fetchEnvironmentCivilizationCensusPage({ ...auth, projectId: PROJECT_ID, limit: 25 }),
         );
         yield* provide(
+          fetchEnvironmentCivilizationLineageNeighborhood({
+            ...auth,
+            projectId: PROJECT_ID,
+            threadId,
+            limit: 5,
+          }),
+        );
+        yield* provide(
           fetchEnvironmentCivilizationNotesPage({
             ...auth,
             projectId: PROJECT_ID,
@@ -674,6 +694,7 @@ describe("Civilization project inspection and citizen administration", () => {
 
         expect(calls.map((call) => new URL(call.url).pathname)).toEqual([
           "/api/civilization/census",
+          "/api/civilization/lineage",
           "/api/civilization/notes",
           "/api/civilization/inbox",
         ]);
@@ -712,6 +733,7 @@ describe("Civilization project inspection and citizen administration", () => {
 
         expect(calls.map((call) => new URL(call.url).pathname)).toEqual([
           "/api/civilization/census",
+          "/api/civilization/lineage",
           "/api/civilization/notes",
           "/api/civilization/inbox",
           `/api/civilization/notes/${encodeURIComponent(noteId)}`,
@@ -721,11 +743,13 @@ describe("Civilization project inspection and citizen administration", () => {
           "/api/civilization/citizens/title/restore",
           "/api/civilization/citizens/title/reclaim",
         ]);
-        expect(calls.slice(0, 5).every((call) => call.init.method === "GET")).toBe(true);
-        expect(calls.slice(5).every((call) => call.init.method === "POST")).toBe(true);
+        expect(calls.slice(0, 6).every((call) => call.init.method === "GET")).toBe(true);
+        expect(calls.slice(6).every((call) => call.init.method === "POST")).toBe(true);
         expect(calls.every((call) => call.init.credentials === "include")).toBe(true);
         expect(new URL(calls[0]!.url).searchParams.get("limit")).toBe("25");
-        expect(new URL(calls[1]!.url).searchParams.get("includeResolved")).toBe("true");
+        expect(new URL(calls[1]!.url).searchParams.get("threadId")).toBe(threadId);
+        expect(new URL(calls[1]!.url).searchParams.get("limit")).toBe("5");
+        expect(new URL(calls[2]!.url).searchParams.get("includeResolved")).toBe("true");
       }),
   );
 });

@@ -1034,6 +1034,12 @@ export const SETTINGS_SEARCH_ITEMS = [
     ],
   },
   {
+    id: "civilization-lineage",
+    title: "Civilization Ancestral Hall",
+    to: "/settings/civilization",
+    searchTerms: ["ancestral hall lineage ancestry descendants parent children generation family"],
+  },
+  {
     id: "civilization-notes",
     title: "Civilization notes",
     to: "/settings/civilization",

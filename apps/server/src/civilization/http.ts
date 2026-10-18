@@ -2,6 +2,7 @@ import {
   AuthOrchestrationReadScope,
   AuthSettingsWriteScope,
   CivilizationCensusCursor,
+  CivilizationLineageCursor,
   CivilizationInboxCursor,
   CivilizationNotesCursor,
   EnvironmentHttpApi,
@@ -249,6 +250,37 @@ export const layer = HttpApiBuilder.group(
                 ...page,
                 nextCursor:
                   page.nextCursor === null ? null : CivilizationCensusCursor.make(page.nextCursor),
+              })),
+              Effect.catchTags({
+                SqlError: (cause) => failEnvironmentInternal("internal_error", cause),
+                CivilizationKnowledgeInvalidError: (cause) =>
+                  Effect.fail(new EnvironmentHttpBadRequestError({ message: cause.message })),
+              }),
+            );
+        }),
+      )
+      .handle(
+        "lineage",
+        Effect.fn("environment.civilization.lineage")(function* (args) {
+          yield* authorizeRead(args.endpoint.name);
+          const limitResult = parseOptionalPositiveInteger(args.query.limit);
+          if (!limitResult.ok) {
+            return yield* new EnvironmentHttpBadRequestError({
+              message: "limit must be a positive integer.",
+            });
+          }
+          return yield* knowledge
+            .getLineageNeighborhood({
+              projectId: args.query.projectId,
+              threadId: args.query.threadId,
+              ...(args.query.cursor === undefined ? {} : { cursor: args.query.cursor }),
+              ...(limitResult.value === undefined ? {} : { limit: limitResult.value }),
+            })
+            .pipe(
+              Effect.map((page) => ({
+                ...page,
+                nextCursor:
+                  page.nextCursor === null ? null : CivilizationLineageCursor.make(page.nextCursor),
               })),
               Effect.catchTags({
                 SqlError: (cause) => failEnvironmentInternal("internal_error", cause),

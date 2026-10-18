@@ -1,6 +1,7 @@
 import {
   CivilizationAgentAccessError,
   type CivilizationCensusCursor,
+  type CivilizationLineageCursor,
   type CivilizationContextInspectionCursor,
   type CivilizationContextInspectionId,
   type CivilizationContextInspectionOutcome,
@@ -337,6 +338,35 @@ export const fetchEnvironmentCivilizationCensusPage = Effect.fn(
 });
 
 /** Read one revision-consistent note metadata page without fetching note bodies. */
+/** Read one bounded lineage neighborhood. */
+export const fetchEnvironmentCivilizationLineageNeighborhood = Effect.fn(
+  "clientRuntime.state.fetchEnvironmentCivilizationLineageNeighborhood",
+)(function* (
+  input: CivilizationEnvironmentRequestInput & {
+    readonly projectId: ProjectId;
+    readonly threadId: ThreadId;
+    readonly cursor?: CivilizationLineageCursor | undefined;
+    readonly limit?: number | undefined;
+  },
+) {
+  const query = {
+    projectId: input.projectId,
+    threadId: input.threadId,
+    ...(input.cursor === undefined ? {} : { cursor: input.cursor }),
+    ...(input.limit === undefined ? {} : { limit: String(input.limit) }),
+  };
+  const endpoint = { query };
+  return yield* preserveCivilizationConfigErrors(
+    executeAuthenticatedEnvironmentHttpRequest({
+      ...input,
+      group: "civilization",
+      method: "GET",
+      url: (urls) => urls.lineage(endpoint),
+      timeoutMs: input.timeoutMs ?? DEFAULT_CIVILIZATION_READ_TIMEOUT_MS,
+      request: ({ client, headers }) => client.lineage({ ...endpoint, headers }),
+    }),
+  );
+});
 export const fetchEnvironmentCivilizationNotesPage = Effect.fn(
   "clientRuntime.state.fetchEnvironmentCivilizationNotesPage",
 )(function* (
@@ -742,6 +772,18 @@ export const fetchCurrentEnvironmentCivilizationCensusPage = Effect.fn(
   return yield* fetchEnvironmentCivilizationCensusPage({ ...input, ...auth });
 });
 
+export const fetchCurrentEnvironmentCivilizationLineageNeighborhood = Effect.fn(
+  "clientRuntime.state.fetchCurrentEnvironmentCivilizationLineageNeighborhood",
+)(function* (input: {
+  readonly prepared: PreparedConnection;
+  readonly projectId: ProjectId;
+  readonly threadId: ThreadId;
+  readonly cursor?: CivilizationLineageCursor | undefined;
+  readonly limit?: number | undefined;
+}) {
+  const auth = yield* currentCivilizationAuth;
+  return yield* fetchEnvironmentCivilizationLineageNeighborhood({ ...input, ...auth });
+});
 export const fetchCurrentEnvironmentCivilizationNotesPage = Effect.fn(
   "clientRuntime.state.fetchCurrentEnvironmentCivilizationNotesPage",
 )(function* (input: {

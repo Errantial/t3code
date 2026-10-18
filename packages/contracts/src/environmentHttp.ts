@@ -85,6 +85,8 @@ import {
   CivilizationAdminMailRecord,
   CivilizationCensusCursor,
   CivilizationCensusPage,
+  CivilizationLineageCursor,
+  CivilizationLineageNeighborhood,
   CivilizationCapabilitiesResult,
   CivilizationCitizenNotFoundError,
   CivilizationCitizenReassignmentPreview,
@@ -737,6 +739,12 @@ const EnvironmentCivilizationCensusQuery = Schema.Struct({
   cursor: Schema.optionalKey(CivilizationCensusCursor),
   limit: Schema.optionalKey(TrimmedNonEmptyString),
 });
+const EnvironmentCivilizationLineageQuery = Schema.Struct({
+  projectId: ProjectId,
+  threadId: ThreadId,
+  cursor: Schema.optionalKey(CivilizationLineageCursor),
+  limit: Schema.optionalKey(TrimmedNonEmptyString),
+});
 
 const EnvironmentCivilizationNotesQuery = Schema.Struct({
   projectId: ProjectId,
@@ -963,6 +971,14 @@ class EnvironmentCivilizationHttpApi extends HttpApiGroup.make("civilization")
       headers: OptionalBearerHeaders,
       query: EnvironmentCivilizationCensusQuery,
       success: CivilizationCensusPage,
+      error: EnvironmentCivilizationKnowledgeReadErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.get("lineage", "/api/civilization/lineage", {
+      headers: OptionalBearerHeaders,
+      query: EnvironmentCivilizationLineageQuery,
+      success: CivilizationLineageNeighborhood,
       error: EnvironmentCivilizationKnowledgeReadErrors,
     }).middleware(EnvironmentAuthenticatedAuth),
   )

@@ -17,6 +17,7 @@ import {
   type CivilizationNotesPage,
   type EnvironmentId,
   type ProjectId,
+  type ThreadId,
 } from "@t3tools/contracts";
 import { useState } from "react";
 
@@ -45,6 +46,7 @@ import { Input } from "../ui/input";
 import { Switch } from "../ui/switch";
 import { SettingsRow, SettingsSection } from "./settingsLayout";
 import { CivilizationDataRetention } from "./CivilizationDataRetention";
+import { CivilizationLineageExplorer } from "./CivilizationLineageExplorer";
 
 interface CivilizationProjectInspectionProps {
   readonly environmentId: EnvironmentId;
@@ -85,12 +87,14 @@ function CitizenCard({
   environmentId,
   effective,
   refresh,
+  onViewLineage,
 }: {
   readonly citizen: CivilizationCitizenSummary;
   readonly canAdminister: boolean;
   readonly environmentId: EnvironmentId;
   readonly effective: CivilizationEffectiveConfig;
   readonly refresh: () => void;
+  readonly onViewLineage: (threadId: ThreadId) => void;
 }) {
   const runCitizenAction = useAtomSet(civilizationCitizenAction, { mode: "promise" });
   const [reassignOpen, setReassignOpen] = useState(false);
@@ -216,31 +220,36 @@ function CitizenCard({
               : `${citizen.relationshipToParent ?? "child"} of ${citizen.parentThreadId}`}
           </div>
         </div>
-        {citizen.observedOnly ? (
-          <span className="text-xs text-muted-foreground">Provider-owned · read only</span>
-        ) : canAdminister ? (
-          <div className="flex flex-wrap gap-2">
-            <Button size="xs" variant="outline" onClick={() => setReassignOpen(true)}>
-              Reassign identity
-            </Button>
-            <Button
-              size="xs"
-              variant="outline"
-              disabled={working}
-              onClick={() => titleAction("titleRestore")}
-            >
-              Restore title
-            </Button>
-            <Button
-              size="xs"
-              variant="outline"
-              disabled={working}
-              onClick={() => titleAction("titleReclaim")}
-            >
-              Reclaim title
-            </Button>
-          </div>
-        ) : null}
+        <div className="flex flex-wrap items-center gap-2">
+          <Button size="xs" variant="outline" onClick={() => onViewLineage(citizen.threadId)}>
+            View lineage
+          </Button>
+          {citizen.observedOnly ? (
+            <span className="text-xs text-muted-foreground">Provider-owned ? read only</span>
+          ) : canAdminister ? (
+            <>
+              <Button size="xs" variant="outline" onClick={() => setReassignOpen(true)}>
+                Reassign identity
+              </Button>
+              <Button
+                size="xs"
+                variant="outline"
+                disabled={working}
+                onClick={() => titleAction("titleRestore")}
+              >
+                Restore title
+              </Button>
+              <Button
+                size="xs"
+                variant="outline"
+                disabled={working}
+                onClick={() => titleAction("titleReclaim")}
+              >
+                Reclaim title
+              </Button>
+            </>
+          ) : null}
+        </div>
       </div>
       {message === null ? null : <div className="text-xs text-destructive">{message}</div>}
 
@@ -315,6 +324,7 @@ export function CivilizationProjectInspection({
   const censusLimit = effective.config.operations.censusPageSize;
   const inboxLimit = effective.config.operations.inboxPageSize;
   const [includeResolved, setIncludeResolved] = useState(false);
+  const [lineageFocusThreadId, setLineageFocusThreadId] = useState<ThreadId | null>(null);
   const census = useCivilizationCensusPage(environmentId, projectId, null, censusLimit);
   const notes = useCivilizationNotesPage(
     environmentId,
@@ -544,6 +554,7 @@ export function CivilizationProjectInspection({
               environmentId={environmentId}
               effective={effective}
               refresh={census.refresh}
+              onViewLineage={setLineageFocusThreadId}
             />
           ))}
           {census.isPending && census.data === null ? (
@@ -560,6 +571,16 @@ export function CivilizationProjectInspection({
           )}
         </div>
       </SettingsSection>
+
+      {lineageFocusThreadId === null ? null : (
+        <CivilizationLineageExplorer
+          environmentId={environmentId}
+          projectId={projectId}
+          initialThreadId={lineageFocusThreadId}
+          pageSize={censusLimit}
+          onClose={() => setLineageFocusThreadId(null)}
+        />
+      )}
 
       <SettingsSection title={`Notes · ${targetLabel}`} id="civilization-notes">
         <SettingsRow

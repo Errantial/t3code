@@ -74,6 +74,7 @@ import Migration0068 from "./Migrations/068_CivilizationContextInspection.ts";
 import Migration0069 from "./Migrations/069_CivilizationPersonalityV2.ts";
 import Migration0070 from "./Migrations/070_CivilizationContextInspectionReferenceSync.ts";
 import Migration0071 from "./Migrations/071_CivilizationContextInspectionProviderReasons.ts";
+import Migration0072 from "./Migrations/072_CivilizationLineageIndex.ts";
 
 export const migrationEntries = [
   [1, "OrchestrationEvents", Migration0001],
@@ -148,6 +149,7 @@ export const migrationEntries = [
   [69, "CivilizationPersonalityV2", Migration0069],
   [70, "CivilizationContextInspectionReferenceSync", Migration0070],
   [71, "CivilizationContextInspectionProviderReasons", Migration0071],
+  [72, "CivilizationLineageIndex", Migration0072],
 ] as const;
 
 export const migrationManifest = migrationEntries.map(([id, name]) => [id, name] as const);
