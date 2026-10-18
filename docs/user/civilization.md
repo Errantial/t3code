@@ -10,7 +10,7 @@ On web or desktop, open **Settings → Civilization**. Use the normal Settings s
 
 The page is organized into five tasks:
 
-- **Overview** shows participation, effective status, identity/presentation policy, population counts, and provider support. It is the only Civilization view designed to summarize more than one selected target.
+- **Overview** shows participation, effective status, population counts, and provider support. It is the only Civilization view designed to summarize more than one selected target.
 - **Citizens** contains the census, citizen details, and lineage. Select one exact project/checkout before using the rich citizen views.
 - **Activity** contains the Chronicle, correspondence history, and notes.
 - **Context** contains context analytics and the historical Inspector. Drill-downs carry exact metadata filters into the Inspector instead of broadening the query.

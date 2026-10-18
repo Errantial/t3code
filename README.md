@@ -31,7 +31,7 @@ The current public Civilization release is **v1.4 — UI overhaul**.
 
 v1.4 reorganizes Civilization around five user tasks in **Settings → Civilization**:
 
-1. **Overview** — status, participation, identity, population, and provider-support summary.
+1. **Overview** — status, participation, population, and provider-support summary.
 2. **Citizens** — census, citizen details, and lineage.
 3. **Activity** — Chronicle, correspondence, and notes.
 4. **Context** — analytics and historical context inspection.
