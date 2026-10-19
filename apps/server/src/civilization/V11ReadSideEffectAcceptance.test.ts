@@ -24,6 +24,7 @@ import * as ConfigService from "./ConfigService.ts";
 import * as ContextService from "./ContextService.ts";
 import * as KnowledgeService from "./KnowledgeService.ts";
 import * as MailService from "./MailService.ts";
+import * as ProjectBriefService from "./ProjectBriefService.ts";
 
 const PROJECT_ID = ProjectId.make("project:v11-5:no-side-effects");
 const PROVIDER_ID = ProviderInstanceId.make("codex-main");
@@ -70,8 +71,9 @@ const makeLayer = (calls: ProviderCalls) => {
   const mail = MailService.layer.pipe(
     Layer.provide(Layer.mergeAll(database, config, providerLayer)),
   );
+  const projectBrief = ProjectBriefService.layer.pipe(Layer.provide(database));
   const context = ContextService.layer.pipe(
-    Layer.provide(Layer.mergeAll(database, config, providerLayer, mail)),
+    Layer.provide(Layer.mergeAll(database, config, providerLayer, mail, projectBrief)),
   );
   return Layer.mergeAll(
     database,
@@ -82,6 +84,7 @@ const makeLayer = (calls: ProviderCalls) => {
     citizens,
     chronicle,
     mail,
+    projectBrief,
     context,
   );
 };

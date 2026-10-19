@@ -60,10 +60,26 @@ const seedCitizen = Effect.fn("KnowledgeService.test.seedCitizen")(function* (in
   readonly generation?: number;
   readonly lineageStatus?: "resolved" | "missing" | "cycle" | "cross_project" | "depth_limit";
   readonly birthSequence?: number;
+  readonly threadTitle?: string;
+  readonly archived?: boolean;
+  readonly projectionDeleted?: boolean;
 }) {
   const sql = yield* SqlClient.SqlClient;
   const owner = input.projectId ?? projectId;
   const key = ConfigService.normalizeCivilizationName(input.name);
+  yield* sql`
+    INSERT INTO orchestration_v2_projection_threads (
+      thread_id, project_id, title, default_provider, provider_instance_id,
+      runtime_mode, interaction_mode, active_provider_thread_id,
+      created_at, updated_at, archived_at, deleted_at, payload_json
+    ) VALUES (
+      ${input.id}, ${owner}, ${input.threadTitle ?? input.name}, 'codex', 'codex-main',
+      'full-access', 'default', NULL,
+      '2026-10-16T00:00:00.000Z', '2026-10-16T00:00:00.000Z',
+      ${input.archived === true ? "2026-10-16T01:00:00.000Z" : null},
+      ${input.projectionDeleted === true ? "2026-10-16T01:00:00.000Z" : null}, '{}'
+    )
+  `;
   yield* sql`
     INSERT INTO civilization_citizens (
       thread_id, project_id, parent_thread_id, relationship_to_parent, root_thread_id, generation, lineage_status, observed_only,
@@ -138,6 +154,189 @@ const setupCaller = Effect.fn("KnowledgeService.test.setupCaller")(function* (
   yield* enableFeature(config);
   yield* seedCitizen({ id: callerThreadId, name: "Caller" });
 });
+
+it.effect("searches normalized names and host titles with lifecycle metadata", () =>
+  Effect.gen(function* () {
+    const service = yield* KnowledgeService.CivilizationKnowledgeService;
+    yield* insertProject();
+    yield* enableFeature({ showObservedAgents: false });
+    const openId = ThreadId.make("thread:search:open");
+    const settledId = ThreadId.make("thread:search:settled");
+    const archivedId = ThreadId.make("thread:search:archived");
+    const unicodeId = ThreadId.make("thread:search:unicode");
+    yield* seedCitizen({
+      id: openId,
+      name: "Ada Open",
+      threadTitle: "Backend Planner",
+      generation: 1,
+    });
+    yield* seedCitizen({ id: settledId, name: "Adam Settled", closed: true, generation: 2 });
+    yield* seedCitizen({ id: archivedId, name: "Adrian Archived", archived: true, generation: 3 });
+    yield* seedCitizen({ id: unicodeId, name: "Café Builder", threadTitle: "Unicode host" });
+
+    const names = yield* service.searchCitizens({ projectId, query: "  AD  " });
+    assert.deepEqual(
+      names.map((result) => [result.threadId, result.lifecycleState, result.generation]),
+      [
+        [openId, "open", 1],
+        [settledId, "settled", 2],
+        [archivedId, "archived", 3],
+      ],
+    );
+    assert.equal(names[0]?.threadTitle, "Backend Planner");
+    assert.equal(names[0]?.profileLabel, "Quiet");
+
+    const unicode = yield* service.searchCitizens({ projectId, query: "  CAFE\u0301  " });
+    assert.deepEqual(
+      unicode.map((result) => result.threadId),
+      [unicodeId],
+    );
+
+    const title = yield* service.searchCitizens({ projectId, query: "backend" });
+    assert.deepEqual(
+      title.map((result) => result.threadId),
+      [openId],
+    );
+  }).pipe(Effect.provide(Layer.fresh(layer))),
+);
+
+it.effect("search visibility excludes deleted citizens and follows observed-agent policy", () =>
+  Effect.gen(function* () {
+    const service = yield* KnowledgeService.CivilizationKnowledgeService;
+    yield* insertProject();
+    yield* enableFeature({ showObservedAgents: false });
+    const visibleId = ThreadId.make("thread:search:visible");
+    yield* seedCitizen({ id: visibleId, name: "Visible Citizen" });
+    yield* seedCitizen({
+      id: ThreadId.make("thread:search:observed"),
+      name: "Visible Observed",
+      observedOnly: true,
+    });
+    yield* seedCitizen({
+      id: ThreadId.make("thread:search:deleted"),
+      name: "Visible Deleted",
+      deleted: true,
+    });
+    yield* seedCitizen({
+      id: ThreadId.make("thread:search:projection-deleted"),
+      name: "Visible Projection Deleted",
+      projectionDeleted: true,
+    });
+    const otherProjectId = ProjectId.make("project:civilization:knowledge:search-other");
+    yield* insertProject(otherProjectId);
+    yield* seedCitizen({
+      id: ThreadId.make("thread:search:foreign"),
+      name: "Visible Foreign",
+      projectId: otherProjectId,
+    });
+
+    const results = yield* service.searchCitizens({ projectId, query: "visible" });
+    assert.deepEqual(
+      results.map((result) => result.threadId),
+      [visibleId],
+    );
+  }).pipe(Effect.provide(Layer.fresh(layer))),
+);
+
+it.effect("search includes observed citizens when the effective policy permits them", () =>
+  Effect.gen(function* () {
+    const service = yield* KnowledgeService.CivilizationKnowledgeService;
+    yield* insertProject();
+    yield* enableFeature({ showObservedAgents: true });
+    const observedId = ThreadId.make("thread:search:observed-visible");
+    yield* seedCitizen({ id: observedId, name: "Observed Visible", observedOnly: true });
+
+    const results = yield* service.searchCitizens({ projectId, query: "observed" });
+    assert.deepEqual(
+      results.map((result) => [result.threadId, result.observedOnly]),
+      [[observedId, true]],
+    );
+  }).pipe(Effect.provide(Layer.fresh(layer))),
+);
+
+it.effect("search recognizes exact thread IDs and enforces default and maximum caps", () =>
+  Effect.gen(function* () {
+    const service = yield* KnowledgeService.CivilizationKnowledgeService;
+    yield* insertProject();
+    yield* enableFeature();
+    const exactId = ThreadId.make("thread:search:exact-target");
+    yield* seedCitizen({ id: exactId, name: "Unrelated Exact Citizen", threadTitle: "No match" });
+    for (let index = 0; index < 25; index += 1) {
+      yield* seedCitizen({
+        id: ThreadId.make(`thread:search:cap:${String(index).padStart(2, "0")}`),
+        name: `Cap Citizen ${String(index).padStart(2, "0")}`,
+      });
+    }
+
+    const exact = yield* service.searchCitizens({ projectId, query: exactId });
+    assert.deepEqual(
+      exact.map((result) => result.threadId),
+      [exactId],
+    );
+    assert.lengthOf(yield* service.searchCitizens({ projectId, query: "cap" }), 10);
+    assert.lengthOf(yield* service.searchCitizens({ projectId, query: "cap", limit: 100 }), 20);
+  }).pipe(Effect.provide(Layer.fresh(layer))),
+);
+
+it.effect(
+  "search rejects invalid query bounds without depending on note, mail, or profile bodies",
+  () =>
+    Effect.gen(function* () {
+      const service = yield* KnowledgeService.CivilizationKnowledgeService;
+      const sql = yield* SqlClient.SqlClient;
+      yield* insertProject();
+      yield* enableFeature();
+      const senderId = ThreadId.make("thread:search:body-sender");
+      const recipientId = ThreadId.make("thread:search:body-recipient");
+      yield* seedCitizen({ id: senderId, name: "Body Sender" });
+      yield* seedCitizen({ id: recipientId, name: "Body Recipient" });
+      yield* sql`
+      UPDATE civilization_citizens
+      SET profile_label = 'Needle profile', profile_style_text = 'needle profile body'
+      WHERE thread_id = ${senderId}
+    `;
+      yield* sql`
+      INSERT INTO civilization_notes (
+        note_id, project_id, category, body, body_bytes, author_thread_id, author_epoch,
+        accepted_runtime_mode, accepted_interaction_mode, source_refs_json, revision,
+        created_at, updated_at, resolved_at
+      ) VALUES (
+        'note:search-body', ${projectId}, 'fact', 'needle note body', 16, ${senderId}, 0,
+        'full-access', 'default', '[]', 1,
+        '2026-10-16T00:00:00.000Z', '2026-10-16T00:00:00.000Z', NULL
+      )
+    `;
+      yield* sql`
+      INSERT INTO civilization_messages (
+        message_id, project_id, sender_thread_id, sender_name_at_send, sender_citizen_epoch,
+        sender_run_id, recipient_thread_id, recipient_delivery_epoch, reply_to_message_id,
+        body, body_bytes, accepted_runtime_mode, accepted_interaction_mode,
+        accepted_environment_revision, accepted_project_revision, accepted_at, expires_at,
+        terminal_retention_days, first_offered_at, last_offered_at, offer_count,
+        acknowledged_at, terminal_at, terminal_reason
+      ) VALUES (
+        'mail:search-body', ${projectId}, ${senderId}, 'Body Sender', 0,
+        'run:search-body', ${recipientId}, 0, NULL,
+        'needle mail body', 16, 'full-access', 'default',
+        1, 0, '2026-10-16T00:00:00.000Z', '2026-10-17T00:00:00.000Z',
+        30, NULL, NULL, 0, NULL, NULL, NULL
+      )
+    `;
+      assert.deepEqual(yield* service.searchCitizens({ projectId, query: "needle" }), []);
+
+      for (const input of [
+        { query: " a " },
+        { query: "a".repeat(201) },
+        { query: "界".repeat(171) },
+        { query: "valid", limit: 0 },
+        { query: "valid", limit: 1.5 },
+      ] as const) {
+        const error = yield* Effect.flip(service.searchCitizens({ projectId, ...input }));
+        assert.isTrue(isInvalid(error));
+        if (isInvalid(error)) assert.equal(error.reason, "invalid_search");
+      }
+    }).pipe(Effect.provide(Layer.fresh(layer))),
+);
 
 it.effect("pages the census exactly by normalized name and thread id without duplicates", () =>
   Effect.gen(function* () {

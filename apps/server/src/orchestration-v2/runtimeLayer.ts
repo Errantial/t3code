@@ -63,6 +63,7 @@ import * as CivilizationKnowledge from "../civilization/KnowledgeService.ts";
 import * as CivilizationMailCleanup from "../civilization/MailCleanupService.ts";
 import * as CivilizationMail from "../civilization/MailService.ts";
 import * as CivilizationOperations from "../civilization/OperationsService.ts";
+import * as CivilizationProjectBrief from "../civilization/ProjectBriefService.ts";
 import * as CivilizationTitleOwnership from "../civilization/TitleOwnership.ts";
 
 export const layerEventInfrastructure = Layer.mergeAll(
@@ -110,6 +111,7 @@ const layerCivilizationCitizensProvided = CivilizationCitizens.layer.pipe(
 );
 const layerCivilizationKnowledgeProvided = CivilizationKnowledge.layer;
 const layerCivilizationChronicleProvided = CivilizationChronicle.layer;
+const layerCivilizationProjectBriefProvided = CivilizationProjectBrief.layer;
 const layerLegacyV1ThreadImporterProvided = LegacyV1ThreadImporter.layer.pipe(
   Layer.provide(layerEventSinkProvided),
 );
@@ -166,6 +168,7 @@ const layerCivilizationContextProvided = CivilizationContext.layer.pipe(
   Layer.provide(
     Layer.mergeAll(
       layerCivilizationConfigProvided,
+      layerCivilizationProjectBriefProvided,
       layerProviderAdapterRegistryProvided,
       layerCivilizationMailProvided,
     ),
@@ -416,6 +419,7 @@ export const layer = Layer.mergeAll(
   layerCivilizationCitizensProvided,
   layerCivilizationKnowledgeProvided,
   layerCivilizationChronicleProvided,
+  layerCivilizationProjectBriefProvided,
   layerCivilizationMailProvided,
   layerCivilizationContextProvided,
   layerCivilizationAdministrationProvided,

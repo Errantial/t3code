@@ -16,6 +16,7 @@ import {
   civilizationContextInspectionQueryKey,
   civilizationConfigTargetsKey,
   civilizationOverviewQueryKey,
+  civilizationProjectBriefQueryKey,
   mergeCivilizationRevisionPage,
   prepareCivilizationImportPreview,
 } from "./civilization";
@@ -64,6 +65,20 @@ describe("civilization overview query identity", () => {
         { environmentId: environmentB, projectId: projectA },
       ]),
     );
+  });
+});
+
+describe("civilization Project Brief query identity", () => {
+  it("binds metadata reads to one exact physical environment/project pair", () => {
+    const environmentA = EnvironmentId.make("environment-a");
+    const environmentB = EnvironmentId.make("environment-b");
+    const projectA = ProjectId.make("project-a");
+    const projectB = ProjectId.make("project-b");
+
+    const key = civilizationProjectBriefQueryKey(environmentA, projectA);
+    expect(key).toBe(civilizationProjectBriefQueryKey(environmentA, projectA));
+    expect(key).not.toBe(civilizationProjectBriefQueryKey(environmentB, projectA));
+    expect(key).not.toBe(civilizationProjectBriefQueryKey(environmentA, projectB));
   });
 });
 

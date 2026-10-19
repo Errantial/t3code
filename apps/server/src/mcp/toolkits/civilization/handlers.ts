@@ -57,6 +57,22 @@ const resolveReadProject = Effect.fn("CivilizationMcp.resolveReadProject")(funct
   return { caller, projectId: yield* resolveProjectId(caller, projectId) } as const;
 });
 
+const resolveCitizenSearchProject = Effect.fn("CivilizationMcp.resolveCitizenSearchProject")(
+  function* (projectId: ProjectId | undefined) {
+    const caller = yield* readCaller();
+    if (caller.caller !== undefined) {
+      if (projectId !== undefined && projectId !== caller.caller.projectId) {
+        return yield* new OrchestratorMcpFailure({
+          code: "invalid_request",
+          message: "Civilization citizen search is restricted to the calling thread's own project.",
+        });
+      }
+      return caller.caller.projectId;
+    }
+    return yield* resolveProjectId(caller, projectId);
+  },
+);
+
 const authoritativeCitizenCaller = Effect.fn("CivilizationMcp.authoritativeCitizenCaller")(
   function* () {
     const caller = yield* readCaller();
@@ -174,6 +190,18 @@ const handlers = {
       return yield* knowledge.listCensus({
         projectId,
         ...(input.cursor === undefined ? {} : { cursor: input.cursor }),
+        ...(input.limit === undefined ? {} : { limit: input.limit }),
+      });
+    }).pipe(Effect.mapError(mcpFailure)),
+  ),
+
+  civilization_citizen_search: McpToolAccess.reads((input) =>
+    Effect.gen(function* () {
+      const projectId = yield* resolveCitizenSearchProject(input.projectId);
+      const knowledge = yield* Knowledge.CivilizationKnowledgeService;
+      return yield* knowledge.searchCitizens({
+        projectId,
+        query: input.query,
         ...(input.limit === undefined ? {} : { limit: input.limit }),
       });
     }).pipe(Effect.mapError(mcpFailure)),

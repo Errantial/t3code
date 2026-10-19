@@ -22,6 +22,13 @@ import * as OperationsService from "./OperationsService.ts";
 const database = SqlitePersistence.layerMemory;
 const projectA = ProjectId.make("project:civilization:cleanup:a");
 const projectB = ProjectId.make("project:civilization:cleanup:b");
+const cleanupBriefJson = JSON.stringify({
+  version: 1,
+  summary: "Cleanup brief",
+  objectives: ["Preserve until explicit purge"],
+  constraints: [],
+  references: [],
+});
 
 const seedProject = Effect.fn("MailCleanupService.test.seedProject")(function* (
   projectId: ProjectId,
@@ -160,6 +167,11 @@ const seedDeletedFeatureData = Effect.fn("MailCleanupService.test.seedDeletedFea
         12, 'cleanup-packet', 4096, '2026-10-16T00:00:00.000Z', '2026-10-16T00:00:00.000Z'
       )
     `;
+    yield* sql`
+      INSERT INTO civilization_project_brief (project_id, revision, content_json, body_bytes, updated_at)
+      VALUES (${projectId}, 1, ${cleanupBriefJson}, ${Buffer.byteLength(cleanupBriefJson, "utf8")},
+        '2026-10-16T00:00:00.000Z')
+    `;
   },
 );
 
@@ -292,6 +304,7 @@ it.effect(
           "civilization_context_inspections",
           "civilization_context_references",
           "civilization_messages",
+          "civilization_project_brief",
           "civilization_project_config",
           "civilization_project_state",
         ]) {
@@ -310,6 +323,48 @@ it.effect(
         const repeated = yield* cleanup.runDue();
         assert.equal(repeated.deletedProjectScanned, 0);
         assert.equal(repeated.deletedProjectCleanups, 0);
+      }).pipe(Effect.provide(fixture.layer));
+    }),
+);
+
+it.effect(
+  "discovers and drains a deleted project whose only remaining Civilization row is its brief",
+  () =>
+    Effect.gen(function* () {
+      const fixture = yield* testLayer;
+      yield* Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient;
+        const cleanup = yield* MailCleanupService.CivilizationMailCleanupService;
+        yield* seedProject(projectA);
+        yield* sql`
+        INSERT INTO civilization_project_brief (project_id, revision, content_json, body_bytes, updated_at)
+        VALUES (${projectA}, 2, ${cleanupBriefJson}, ${Buffer.byteLength(cleanupBriefJson, "utf8")},
+          '2026-10-16T00:00:00.000Z')
+      `;
+        yield* sql`
+        UPDATE projection_projects
+        SET deleted_at = '2026-10-16T01:00:00.000Z'
+        WHERE project_id = ${projectA}
+      `;
+        yield* sql`DELETE FROM civilization_project_config WHERE project_id = ${projectA}`;
+        yield* sql`DELETE FROM civilization_project_state WHERE project_id = ${projectA}`;
+
+        const result = yield* cleanup.runDue();
+        assert.equal(result.deletedProjectScanned, 1);
+        assert.equal(result.deletedProjectCleanups, 1);
+        assert.equal(
+          (yield* sql<{ readonly count: number }>`
+          SELECT COUNT(*) AS count FROM civilization_project_brief WHERE project_id = ${projectA}
+        `)[0]?.count,
+          0,
+        );
+        assert.equal(
+          (yield* sql<{ readonly progress_state: string }>`
+          SELECT progress_state FROM civilization_purge_tombstones
+          WHERE project_id = ${projectA} AND thread_id = '__project__'
+        `)[0]?.progress_state,
+          "complete",
+        );
       }).pipe(Effect.provide(fixture.layer));
     }),
 );
@@ -467,6 +522,11 @@ it.effect(
             NULL, 30, 'complete', '2026-10-01T12:00:00.000Z'
           )
         `;
+        yield* sql`
+          INSERT INTO civilization_project_brief (project_id, revision, content_json, body_bytes, updated_at)
+          VALUES (${projectA}, 4, ${cleanupBriefJson}, ${Buffer.byteLength(cleanupBriefJson, "utf8")},
+            '2026-10-01T12:00:00.000Z')
+        `;
 
         const beforeApproval = yield* cleanup.runDue();
         assert.equal(beforeApproval.deletedTombstones, 0);
@@ -508,6 +568,13 @@ it.effect(
           `)[0]?.count,
           1,
           "retention cleanup never deletes citizen identity",
+        );
+        assert.equal(
+          (yield* sql<{ readonly count: number }>`
+            SELECT COUNT(*) AS count FROM civilization_project_brief WHERE project_id = ${projectA}
+          `)[0]?.count,
+          1,
+          "retention cleanup never deletes the active Project Brief",
         );
       }).pipe(Effect.provide(fixture.layer));
     }),

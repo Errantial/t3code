@@ -878,6 +878,7 @@ const validateCandidate = Effect.fn("CivilizationConfig.validateCandidate")(func
 const setOverride = Effect.fn("CivilizationConfig.setOverride")(function* (input: {
   readonly projectId?: ProjectId | undefined;
   readonly expectedRevision: number;
+  readonly expectedEnvironmentRevision?: number | undefined;
   readonly override: CivilizationConfigOverride;
 }) {
   const sql = yield* SqlClient.SqlClient;
@@ -915,6 +916,26 @@ const setOverride = Effect.fn("CivilizationConfig.setOverride")(function* (input
             scope: "project",
             expectedRevision: input.expectedRevision,
             currentRevision: current.revision,
+          }),
+        );
+      }
+      const currentEnvironmentRevision =
+        (yield* sql<{ readonly revision: number }>`
+          SELECT revision
+          FROM civilization_environment_config
+          WHERE singleton = 1
+          LIMIT 1
+        `)[0]?.revision ?? 0;
+      if (
+        input.expectedEnvironmentRevision !== undefined &&
+        currentEnvironmentRevision !== input.expectedEnvironmentRevision
+      ) {
+        return yield* Effect.fail(
+          new CivilizationConfigConflictError({
+            code: "civilization_conflict",
+            scope: "environment",
+            expectedRevision: input.expectedEnvironmentRevision,
+            currentRevision: currentEnvironmentRevision,
           }),
         );
       }

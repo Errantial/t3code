@@ -25,8 +25,11 @@ import {
   type CivilizationMessageId,
   type CivilizationNoteId,
   type CivilizationNotesCursor,
+  type CivilizationProjectBriefClearRequest,
+  type CivilizationProjectBriefSetRequest,
 } from "@t3tools/contracts";
 import {
+  clearEnvironmentCivilizationProjectBrief,
   fetchCurrentEnvironmentCivilizationAchievementPage,
   fetchCurrentEnvironmentCivilizationCitizenDetail,
   fetchCurrentEnvironmentCivilizationCensusPage,
@@ -42,10 +45,14 @@ import {
   fetchEnvironmentCivilizationOverview,
   fetchCurrentEnvironmentCivilizationRetainedMailBody,
   fetchCurrentEnvironmentCivilizationRetainedMailPage,
+  fetchEnvironmentCivilizationProjectBriefDetail,
+  fetchEnvironmentCivilizationProjectBriefMetadata,
   runEnvironmentCivilizationConfigAction,
   runEnvironmentCivilizationCitizenAction,
   runEnvironmentCivilizationDataAction,
+  setEnvironmentCivilizationProjectBrief,
 } from "@t3tools/client-runtime/state/civilization";
+import { ManagedRelay } from "@t3tools/client-runtime/relay";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
@@ -188,6 +195,107 @@ export function refreshCivilizationOverview(
     civilizationOverviewAtom(civilizationOverviewQueryKey(environmentId, projectId)),
   );
 }
+
+export function civilizationProjectBriefQueryKey(
+  environmentId: EnvironmentId,
+  projectId: ProjectId,
+): string {
+  return JSON.stringify([environmentId, projectId]);
+}
+
+const civilizationProjectBriefMetadataAtom = Atom.family((serializedKey: string) => {
+  const [rawEnvironmentId, rawProjectId] = JSON.parse(serializedKey) as [string, string];
+  const environmentId = rawEnvironmentId as EnvironmentId;
+  const projectId = ProjectId.make(rawProjectId);
+  return connectionAtomRuntime
+    .atom((get) => {
+      const prepared = Option.getOrNull(
+        get(environmentSession.preparedConnectionValueAtom(environmentId)),
+      );
+      if (prepared === null) return Effect.never;
+      return Effect.gen(function* () {
+        const signer = yield* Effect.serviceOption(ManagedRelay.ManagedRelayDpopSigner);
+        return yield* fetchEnvironmentCivilizationProjectBriefMetadata({
+          prepared,
+          signer,
+          projectId,
+        });
+      });
+    })
+    .pipe(
+      Atom.setIdleTTL(60_000),
+      Atom.withLabel(`civilization-project-brief-metadata:${serializedKey}`),
+    );
+});
+
+export function useCivilizationProjectBriefMetadata(
+  environmentId: EnvironmentId | null,
+  projectId: ProjectId | null,
+) {
+  const atom =
+    environmentId === null || projectId === null
+      ? null
+      : civilizationProjectBriefMetadataAtom(
+          civilizationProjectBriefQueryKey(environmentId, projectId),
+        );
+  return useEnvironmentQuery(atom);
+}
+
+export function refreshCivilizationProjectBriefMetadata(
+  environmentId: EnvironmentId,
+  projectId: ProjectId,
+): void {
+  appAtomRegistry.refresh(
+    civilizationProjectBriefMetadataAtom(
+      civilizationProjectBriefQueryKey(environmentId, projectId),
+    ),
+  );
+}
+
+export type CivilizationProjectBriefActionInput = {
+  readonly environmentId: EnvironmentId;
+} & (
+  | { readonly type: "detail"; readonly projectId: ProjectId }
+  | { readonly type: "set"; readonly request: CivilizationProjectBriefSetRequest }
+  | { readonly type: "clear"; readonly request: CivilizationProjectBriefClearRequest }
+);
+
+export const civilizationProjectBriefAction =
+  connectionAtomRuntime.fn<CivilizationProjectBriefActionInput>()(
+    (input, get) =>
+      Effect.gen(function* () {
+        const prepared = Option.getOrNull(
+          get(environmentSession.preparedConnectionValueAtom(input.environmentId)),
+        );
+        if (prepared === null) {
+          return yield* new CivilizationEnvironmentDisconnectedError({
+            environmentId: input.environmentId,
+          });
+        }
+        const signer = yield* Effect.serviceOption(ManagedRelay.ManagedRelayDpopSigner);
+        switch (input.type) {
+          case "detail":
+            return yield* fetchEnvironmentCivilizationProjectBriefDetail({
+              prepared,
+              signer,
+              projectId: input.projectId,
+            });
+          case "set":
+            return yield* setEnvironmentCivilizationProjectBrief({
+              prepared,
+              signer,
+              request: input.request,
+            });
+          case "clear":
+            return yield* clearEnvironmentCivilizationProjectBrief({
+              prepared,
+              signer,
+              request: input.request,
+            });
+        }
+      }),
+    { concurrent: false },
+  );
 
 export function civilizationConfigTargetsKey(
   targets: ReadonlyArray<CivilizationConfigTarget>,

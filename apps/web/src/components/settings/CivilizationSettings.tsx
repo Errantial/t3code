@@ -57,6 +57,7 @@ import {
 } from "./CivilizationPoolEditorDialogs";
 import { CivilizationContextAnalytics } from "./CivilizationContextAnalytics";
 import { CivilizationContextInspector } from "./CivilizationContextInspector";
+import { CivilizationProjectBrief } from "./CivilizationProjectBrief";
 import { CivilizationProjectInspection } from "./CivilizationProjectInspection";
 import {
   SettingsPageContainer,
@@ -1561,6 +1562,14 @@ function CivilizationTargetOverview({
           target={target}
         />
       </SettingsSection>
+
+      <CivilizationProjectBrief
+        environmentId={target.environmentId}
+        projectId={target.projectId}
+        targetLabel={target.label}
+        canRead={canRead}
+        canWrite={canWrite}
+      />
 
       <SettingsSection title="Identity and personality" id="civilization-names">
         <SettingsRow

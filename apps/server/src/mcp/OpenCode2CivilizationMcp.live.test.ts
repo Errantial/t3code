@@ -25,6 +25,7 @@ import * as ConfigService from "../civilization/ConfigService.ts";
 import * as ContextService from "../civilization/ContextService.ts";
 import * as KnowledgeService from "../civilization/KnowledgeService.ts";
 import * as MailService from "../civilization/MailService.ts";
+import * as ProjectBriefService from "../civilization/ProjectBriefService.ts";
 import * as ProviderAdapterRegistry from "../orchestration-v2/ProviderAdapterRegistry.ts";
 import * as ThreadManagement from "../orchestration-v2/ThreadManagementService.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
@@ -79,8 +80,9 @@ const providers = Layer.succeed(
 const config = ConfigService.layer.pipe(Layer.provide(database));
 const mail = MailService.layer.pipe(Layer.provide(Layer.mergeAll(database, providers)));
 const knowledge = KnowledgeService.layer.pipe(Layer.provide(database));
+const projectBrief = ProjectBriefService.layer.pipe(Layer.provide(database));
 const context = ContextService.layer.pipe(
-  Layer.provide(Layer.mergeAll(database, config, providers, mail)),
+  Layer.provide(Layer.mergeAll(database, config, providers, mail, projectBrief)),
 );
 
 const senderShell = {
@@ -109,7 +111,16 @@ const sessions = Layer.mock(McpSessionRegistry.McpSessionRegistry)({
   resolve: (presented) => Effect.succeed(presented === token ? scope : undefined),
 });
 
-const dependencies = Layer.mergeAll(database, config, providers, mail, knowledge, context, threads);
+const dependencies = Layer.mergeAll(
+  database,
+  config,
+  providers,
+  mail,
+  knowledge,
+  projectBrief,
+  context,
+  threads,
+);
 const mcpLayer = McpHttpServer.layerCivilizationToolkit.pipe(
   Layer.provide(dependencies),
   Layer.provideMerge(McpHttpServer.layerMcpTransport.pipe(Layer.provide(sessions))),

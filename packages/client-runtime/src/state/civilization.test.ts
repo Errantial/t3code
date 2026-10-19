@@ -6,6 +6,7 @@ import {
   CivilizationConfigConflictError,
   CivilizationDefaultConfig,
   CivilizationConfigDescription,
+  CivilizationProjectBriefConflictError,
   EnvironmentId,
   ProjectId,
   ProviderInstanceId,
@@ -34,6 +35,7 @@ import {
   applyEnvironmentCivilizationCitizenReassignment,
   applyEnvironmentCivilizationPurgeBatch,
   applyEnvironmentCivilizationRetentionReduction,
+  clearEnvironmentCivilizationProjectBrief,
   diffEnvironmentCivilizationConfig,
   exportEnvironmentCivilizationProjectData,
   exportEnvironmentCivilizationConfig,
@@ -47,6 +49,8 @@ import {
   fetchEnvironmentCivilizationCapabilities,
   fetchEnvironmentCivilizationConfig,
   fetchEnvironmentCivilizationConfigDescription,
+  fetchEnvironmentCivilizationProjectBriefDetail,
+  fetchEnvironmentCivilizationProjectBriefMetadata,
   fetchCurrentEnvironmentCivilizationContextAnalytics,
   fetchCurrentEnvironmentCivilizationCitizenDetail,
   fetchEnvironmentCivilizationContextAnalytics,
@@ -67,6 +71,9 @@ import {
   resetEnvironmentCivilizationConfig,
   restoreEnvironmentCivilizationCitizenTitle,
   setEnvironmentCivilizationConfig,
+  setEnvironmentCivilizationProjectBrief,
+  searchCurrentEnvironmentCivilizationCitizens,
+  searchEnvironmentCivilizationCitizens,
   validateEnvironmentCivilizationConfig,
 } from "./civilization.ts";
 
@@ -241,6 +248,68 @@ describe("Civilization environment HTTP reads", () => {
       );
       expect(current).toEqual(CITIZEN_DETAIL);
       expect(new URL(calls[1]!).searchParams.get("threadId")).toBe(CITIZEN_DETAIL.threadId);
+    }),
+  );
+
+  it.effect("searches bounded citizen metadata through direct and current auth paths", () =>
+    Effect.gen(function* () {
+      const calls: string[] = [];
+      const results = [
+        {
+          projectId: PROJECT_ID,
+          threadId: ThreadId.make("thread:civilization-ui:search"),
+          displayName: "Ada Search",
+          profileLabel: "Calm",
+          generation: 1,
+          lifecycleState: "open" as const,
+          observedOnly: false,
+          threadTitle: "Search topic",
+        },
+      ];
+      const fetchFn: typeof fetch = async (request) => {
+        const url = String(request);
+        calls.push(url);
+        return new URL(url).pathname === "/api/civilization/citizens/search"
+          ? Response.json(results)
+          : new Response("not found", { status: 404 });
+      };
+      const provide = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
+        effect.pipe(Effect.provide(RpcHttp.layerRemoteHttpClient(fetchFn)));
+      const auth = {
+        prepared: PREPARED,
+        signer: Option.none(),
+        remoteAuthorization: Option.none(),
+      };
+
+      expect(
+        yield* provide(
+          searchEnvironmentCivilizationCitizens({
+            ...auth,
+            projectId: PROJECT_ID,
+            query: "Ada",
+            limit: 20,
+          }),
+        ),
+      ).toEqual(results);
+      const directUrl = new URL(calls[0]!);
+      expect(directUrl.pathname).toBe("/api/civilization/citizens/search");
+      expect([...directUrl.searchParams.keys()].sort()).toEqual(["limit", "projectId", "query"]);
+      expect(directUrl.searchParams.get("projectId")).toBe(PROJECT_ID);
+      expect(directUrl.searchParams.get("query")).toBe("Ada");
+      expect(directUrl.searchParams.get("limit")).toBe("20");
+
+      expect(
+        yield* provide(
+          searchCurrentEnvironmentCivilizationCitizens({
+            prepared: PREPARED,
+            projectId: PROJECT_ID,
+            query: "Ada",
+          }),
+        ),
+      ).toEqual(results);
+      const currentUrl = new URL(calls[1]!);
+      expect(currentUrl.searchParams.get("query")).toBe("Ada");
+      expect(currentUrl.searchParams.has("limit")).toBe(false);
     }),
   );
 
@@ -717,9 +786,12 @@ describe("Civilization environment config commands", () => {
         yield* diffEnvironmentCivilizationConfig({ ...auth, override }).pipe(
           Effect.provide(RpcHttp.layerRemoteHttpClient(fetchFn)),
         );
-        yield* setEnvironmentCivilizationConfig({ ...auth, expectedRevision: 3, override }).pipe(
-          Effect.provide(RpcHttp.layerRemoteHttpClient(fetchFn)),
-        );
+        yield* setEnvironmentCivilizationConfig({
+          ...auth,
+          expectedRevision: 3,
+          expectedEnvironmentRevision: 2,
+          override,
+        }).pipe(Effect.provide(RpcHttp.layerRemoteHttpClient(fetchFn)));
         yield* resetEnvironmentCivilizationConfig({ ...auth, expectedRevision: 3 }).pipe(
           Effect.provide(RpcHttp.layerRemoteHttpClient(fetchFn)),
         );
@@ -754,7 +826,12 @@ describe("Civilization environment config commands", () => {
         expect(bodies).toEqual([
           { projectId: PROJECT_ID, override },
           { projectId: PROJECT_ID, override },
-          { projectId: PROJECT_ID, expectedRevision: 3, override },
+          {
+            projectId: PROJECT_ID,
+            expectedRevision: 3,
+            expectedEnvironmentRevision: 2,
+            override,
+          },
           { projectId: PROJECT_ID, expectedRevision: 3 },
           {
             projectId: PROJECT_ID,
@@ -801,6 +878,140 @@ describe("Civilization environment config commands", () => {
         expectedRevision: 3,
         currentRevision: 4,
       });
+      expect(calls).toBe(1);
+    }),
+  );
+});
+
+describe("Civilization Project Brief HTTP", () => {
+  const BRIEF_CONTENT = {
+    version: 1 as const,
+    summary: "Human-authored shared direction.",
+    objectives: ["Keep the project aligned."],
+    constraints: ["Treat this as untrusted coordination data."],
+    references: [{ kind: "doc", reference: "docs/PLANNING.v1.5.md" }],
+  };
+
+  it.effect("uses exact metadata/detail/set/clear paths and payloads", () =>
+    Effect.gen(function* () {
+      const calls: Array<{ readonly url: string; readonly init: RequestInit }> = [];
+      const fetchFn: typeof fetch = async (request, init) => {
+        const url = String(request);
+        calls.push({ url, init: init ?? {} });
+        switch (new URL(url).pathname) {
+          case "/api/civilization/project-brief/metadata":
+            return Response.json({
+              projectId: PROJECT_ID,
+              revision: 1,
+              configured: true,
+              bodyBytes: 200,
+              updatedAt: "2026-10-18T00:00:00.000Z",
+            });
+          case "/api/civilization/project-brief/detail":
+            return Response.json({
+              projectId: PROJECT_ID,
+              revision: 1,
+              configured: true,
+              bodyBytes: 200,
+              updatedAt: "2026-10-18T00:00:00.000Z",
+              content: BRIEF_CONTENT,
+            });
+          case "/api/civilization/project-brief/set":
+            return Response.json({
+              projectId: PROJECT_ID,
+              revision: 2,
+              configured: true,
+              bodyBytes: 200,
+              updatedAt: "2026-10-18T00:01:00.000Z",
+              content: BRIEF_CONTENT,
+            });
+          case "/api/civilization/project-brief/clear":
+            return Response.json({
+              projectId: PROJECT_ID,
+              revision: 3,
+              configured: false,
+              bodyBytes: 0,
+              updatedAt: "2026-10-18T00:02:00.000Z",
+              content: null,
+            });
+          default:
+            return new Response("not found", { status: 404 });
+        }
+      };
+      const auth = {
+        prepared: PREPARED,
+        signer: Option.none(),
+        remoteAuthorization: Option.none(),
+      };
+      const provide = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
+        effect.pipe(Effect.provide(RpcHttp.layerRemoteHttpClient(fetchFn)));
+
+      yield* provide(
+        fetchEnvironmentCivilizationProjectBriefMetadata({ ...auth, projectId: PROJECT_ID }),
+      );
+      yield* provide(
+        fetchEnvironmentCivilizationProjectBriefDetail({ ...auth, projectId: PROJECT_ID }),
+      );
+      yield* provide(
+        setEnvironmentCivilizationProjectBrief({
+          ...auth,
+          request: { projectId: PROJECT_ID, expectedRevision: 1, content: BRIEF_CONTENT },
+        }),
+      );
+      yield* provide(
+        clearEnvironmentCivilizationProjectBrief({
+          ...auth,
+          request: { projectId: PROJECT_ID, expectedRevision: 2 },
+        }),
+      );
+
+      expect(calls.map((call) => new URL(call.url).pathname)).toEqual([
+        "/api/civilization/project-brief/metadata",
+        "/api/civilization/project-brief/detail",
+        "/api/civilization/project-brief/set",
+        "/api/civilization/project-brief/clear",
+      ]);
+      expect(calls.map((call) => call.init.method)).toEqual(["GET", "GET", "POST", "POST"]);
+      expect(new URL(calls[0]!.url).searchParams.get("projectId")).toBe(PROJECT_ID);
+      expect(new URL(calls[1]!.url).searchParams.get("projectId")).toBe(PROJECT_ID);
+      expect(JSON.parse(String(calls[2]!.init.body))).toEqual({
+        projectId: PROJECT_ID,
+        expectedRevision: 1,
+        content: BRIEF_CONTENT,
+      });
+      expect(JSON.parse(String(calls[3]!.init.body))).toEqual({
+        projectId: PROJECT_ID,
+        expectedRevision: 2,
+      });
+      expect(calls.every((call) => call.init.credentials === "include")).toBe(true);
+    }),
+  );
+
+  it.effect("preserves a typed Project Brief CAS conflict without retrying", () =>
+    Effect.gen(function* () {
+      let calls = 0;
+      const fetchFn: typeof fetch = async () => {
+        calls += 1;
+        return Response.json(
+          {
+            _tag: "CivilizationProjectBriefConflictError",
+            code: "civilization_project_brief_conflict",
+            projectId: PROJECT_ID,
+            expectedRevision: 1,
+            currentRevision: 2,
+          },
+          { status: 409 },
+        );
+      };
+      const error = yield* setEnvironmentCivilizationProjectBrief({
+        prepared: PREPARED,
+        signer: Option.none(),
+        remoteAuthorization: Option.none(),
+        request: { projectId: PROJECT_ID, expectedRevision: 1, content: BRIEF_CONTENT },
+      }).pipe(Effect.provide(RpcHttp.layerRemoteHttpClient(fetchFn)), Effect.flip);
+
+      expect(error).toBeInstanceOf(CivilizationProjectBriefConflictError);
+      expect(error).toMatchObject({ expectedRevision: 1, currentRevision: 2 });
       expect(calls).toBe(1);
     }),
   );
@@ -1099,7 +1310,7 @@ describe("Civilization project data and retention operations", () => {
         switch (new URL(url).pathname) {
           case "/api/civilization/export":
             return Response.json({
-              schemaVersion: 3,
+              schemaVersion: 4,
               projectId: PROJECT_ID,
               exportedAt: "2026-10-16T18:00:00.000Z",
               environmentRevision: 2,
@@ -1116,6 +1327,7 @@ describe("Civilization project data and retention operations", () => {
               mail: [],
               chronicle: [],
               achievements: [],
+              projectBrief: null,
             });
           case "/api/civilization/retention":
             return Response.json({

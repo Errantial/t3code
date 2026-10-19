@@ -76,6 +76,7 @@ const make = Effect.gen(function* () {
           OR EXISTS (SELECT 1 FROM civilization_mail_quota_windows q WHERE q.project_id = p.project_id)
           OR EXISTS (SELECT 1 FROM civilization_project_config pc WHERE pc.project_id = p.project_id)
           OR EXISTS (SELECT 1 FROM civilization_project_state ps WHERE ps.project_id = p.project_id)
+          OR EXISTS (SELECT 1 FROM civilization_project_brief b WHERE b.project_id = p.project_id)
           OR EXISTS (
             SELECT 1 FROM civilization_purge_tombstones t
             WHERE t.project_id = p.project_id AND t.progress_state <> 'complete'

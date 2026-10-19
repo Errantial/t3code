@@ -23,6 +23,39 @@ export const CIVILIZATION_MAX_PACKET_BYTES = 16 * 1024;
 export const CIVILIZATION_MAX_MESSAGE_BYTES = 16 * 1024;
 export const CIVILIZATION_MAX_NOTE_BYTES = 8 * 1024;
 export const CIVILIZATION_MAX_RETAINED_BODY_BYTES = 128 * 1024 * 1024;
+export const CIVILIZATION_MAX_PROJECT_BRIEF_BYTES = 4 * 1024;
+export const CIVILIZATION_MAX_PROJECT_BRIEF_SUMMARY_BYTES = 2 * 1024;
+export const CIVILIZATION_MAX_PROJECT_BRIEF_ITEMS = 12;
+export const CIVILIZATION_MAX_PROJECT_BRIEF_ITEM_BYTES = 512;
+export const CIVILIZATION_MAX_PROJECT_BRIEF_REFERENCES = 16;
+export const CIVILIZATION_MAX_PROJECT_BRIEF_REFERENCE_KIND_BYTES = 128;
+export const CIVILIZATION_MAX_PROJECT_BRIEF_REFERENCE_BYTES = 1024;
+export const CIVILIZATION_CITIZEN_SEARCH_DEFAULT_LIMIT = 10;
+export const CIVILIZATION_CITIZEN_SEARCH_MAX_LIMIT = 20;
+export const CIVILIZATION_CITIZEN_SEARCH_MIN_QUERY_CHARACTERS = 2;
+export const CIVILIZATION_CITIZEN_SEARCH_MAX_QUERY_CHARACTERS = 200;
+export const CIVILIZATION_CITIZEN_SEARCH_MAX_QUERY_BYTES = 512;
+
+const projectBriefUnsafeText = (value: string) =>
+  [...value].some((character) => {
+    const codePoint = character.codePointAt(0)!;
+    return (
+      codePoint === 0 ||
+      codePoint === 0x7f ||
+      (codePoint >= 0x202a && codePoint <= 0x202e) ||
+      (codePoint >= 0x2066 && codePoint <= 0x2069)
+    );
+  });
+const projectBriefText = (maxBytes: number, expected: string) =>
+  Schema.String.check(
+    Schema.makeFilter(
+      (value: string) =>
+        value.trim().length > 0 &&
+        !projectBriefUnsafeText(value) &&
+        new TextEncoder().encode(value).byteLength <= maxBytes,
+      { expected },
+    ),
+  );
 
 export const CivilizationWeightedNameEntry = Schema.Struct({
   id: Schema.String,
@@ -464,6 +497,7 @@ export const CivilizationConfigValidationResult = Schema.Struct({
 export const CivilizationConfigSetRequest = Schema.Struct({
   projectId: Schema.optional(ProjectId),
   expectedRevision: Schema.Number,
+  expectedEnvironmentRevision: Schema.optional(Schema.Number),
   override: CivilizationConfigOverride,
 });
 
@@ -498,6 +532,70 @@ export const CivilizationConfigDiffResult = Schema.Struct({
   effective: CivilizationEffectiveConfig,
 });
 
+export const CivilizationProjectBriefReference = Schema.Struct({
+  kind: projectBriefText(
+    CIVILIZATION_MAX_PROJECT_BRIEF_REFERENCE_KIND_BYTES,
+    "a safe non-blank Project Brief reference kind within the byte limit",
+  ),
+  reference: projectBriefText(
+    CIVILIZATION_MAX_PROJECT_BRIEF_REFERENCE_BYTES,
+    "a safe non-blank Project Brief reference within the byte limit",
+  ),
+}).annotate({ parseOptions: { onExcessProperty: "error" } });
+export type CivilizationProjectBriefReference = typeof CivilizationProjectBriefReference.Type;
+
+export const CivilizationProjectBriefContentV1 = Schema.Struct({
+  version: Schema.Literal(1),
+  summary: projectBriefText(
+    CIVILIZATION_MAX_PROJECT_BRIEF_SUMMARY_BYTES,
+    "a safe non-blank Project Brief summary within the byte limit",
+  ),
+  objectives: Schema.Array(
+    projectBriefText(
+      CIVILIZATION_MAX_PROJECT_BRIEF_ITEM_BYTES,
+      "a safe non-blank Project Brief objective within the byte limit",
+    ),
+  ).pipe(Schema.check(Schema.isMaxLength(CIVILIZATION_MAX_PROJECT_BRIEF_ITEMS))),
+  constraints: Schema.Array(
+    projectBriefText(
+      CIVILIZATION_MAX_PROJECT_BRIEF_ITEM_BYTES,
+      "a safe non-blank Project Brief constraint within the byte limit",
+    ),
+  ).pipe(Schema.check(Schema.isMaxLength(CIVILIZATION_MAX_PROJECT_BRIEF_ITEMS))),
+  references: Schema.Array(CivilizationProjectBriefReference).pipe(
+    Schema.check(Schema.isMaxLength(CIVILIZATION_MAX_PROJECT_BRIEF_REFERENCES)),
+  ),
+}).annotate({ parseOptions: { onExcessProperty: "error" } });
+export type CivilizationProjectBriefContentV1 = typeof CivilizationProjectBriefContentV1.Type;
+
+export const CivilizationProjectBriefMetadata = Schema.Struct({
+  projectId: ProjectId,
+  revision: Schema.Number,
+  configured: Schema.Boolean,
+  bodyBytes: Schema.Number,
+  updatedAt: Schema.NullOr(IsoDateTime),
+});
+export type CivilizationProjectBriefMetadata = typeof CivilizationProjectBriefMetadata.Type;
+
+export const CivilizationProjectBriefDetail = Schema.Struct({
+  ...CivilizationProjectBriefMetadata.fields,
+  content: Schema.NullOr(CivilizationProjectBriefContentV1),
+});
+export type CivilizationProjectBriefDetail = typeof CivilizationProjectBriefDetail.Type;
+
+export const CivilizationProjectBriefSetRequest = Schema.Struct({
+  projectId: ProjectId,
+  expectedRevision: Schema.Number,
+  content: CivilizationProjectBriefContentV1,
+}).annotate({ parseOptions: { onExcessProperty: "error" } });
+export type CivilizationProjectBriefSetRequest = typeof CivilizationProjectBriefSetRequest.Type;
+
+export const CivilizationProjectBriefClearRequest = Schema.Struct({
+  projectId: ProjectId,
+  expectedRevision: Schema.Number,
+}).annotate({ parseOptions: { onExcessProperty: "error" } });
+export type CivilizationProjectBriefClearRequest = typeof CivilizationProjectBriefClearRequest.Type;
+
 export const CivilizationLineageStatus = Schema.Literals([
   "resolved",
   "missing",
@@ -530,6 +628,48 @@ export const CivilizationCitizenSummary = Schema.Struct({
   revision: Schema.Number,
 });
 export type CivilizationCitizenSummary = typeof CivilizationCitizenSummary.Type;
+
+export const CivilizationCitizenSearchQuery = Schema.String.check(
+  Schema.makeFilter(
+    (value: string) => {
+      const trimmed = value.trim();
+      const characters = [...trimmed].length;
+      return (
+        characters >= CIVILIZATION_CITIZEN_SEARCH_MIN_QUERY_CHARACTERS &&
+        characters <= CIVILIZATION_CITIZEN_SEARCH_MAX_QUERY_CHARACTERS &&
+        new TextEncoder().encode(trimmed).byteLength <= CIVILIZATION_CITIZEN_SEARCH_MAX_QUERY_BYTES
+      );
+    },
+    {
+      expected: `a trimmed ${CIVILIZATION_CITIZEN_SEARCH_MIN_QUERY_CHARACTERS}-${CIVILIZATION_CITIZEN_SEARCH_MAX_QUERY_CHARACTERS} character citizen query within ${CIVILIZATION_CITIZEN_SEARCH_MAX_QUERY_BYTES} UTF-8 bytes`,
+    },
+  ),
+);
+export type CivilizationCitizenSearchQuery = typeof CivilizationCitizenSearchQuery.Type;
+
+export const CivilizationCitizenSearchLimit = Schema.Int.check(
+  Schema.isBetween({ minimum: 1, maximum: CIVILIZATION_CITIZEN_SEARCH_MAX_LIMIT }),
+);
+export type CivilizationCitizenSearchLimit = typeof CivilizationCitizenSearchLimit.Type;
+
+export const CivilizationCitizenSearchRequest = Schema.Struct({
+  projectId: ProjectId,
+  query: CivilizationCitizenSearchQuery,
+  limit: Schema.optionalKey(CivilizationCitizenSearchLimit),
+}).annotate({ parseOptions: { onExcessProperty: "error" } });
+export type CivilizationCitizenSearchRequest = typeof CivilizationCitizenSearchRequest.Type;
+
+export const CivilizationCitizenSearchResult = Schema.Struct({
+  projectId: ProjectId,
+  threadId: ThreadId,
+  displayName: Schema.String,
+  profileLabel: Schema.String,
+  generation: Schema.Number,
+  lifecycleState: Schema.Literals(["open", "settled", "archived"]),
+  observedOnly: Schema.Boolean,
+  threadTitle: Schema.String,
+});
+export type CivilizationCitizenSearchResult = typeof CivilizationCitizenSearchResult.Type;
 
 export const CivilizationCitizenDetail = Schema.Struct({
   threadId: ThreadId,
@@ -1110,6 +1250,7 @@ export type CivilizationContextCompositionSection =
   typeof CivilizationContextCompositionSection.Type;
 
 export const CivilizationContextComposition = Schema.Struct({
+  brief: CivilizationContextCompositionSection,
   roster: CivilizationContextCompositionSection,
   notes: CivilizationContextCompositionSection,
   inbox: CivilizationContextCompositionSection,
@@ -1120,6 +1261,7 @@ export const CivilizationContextBudget = Schema.Struct({
   limitBytes: Schema.Number,
   packetBytes: Schema.Number,
   requiredBytes: Schema.Number,
+  briefBytes: Schema.Number,
   rosterBytes: Schema.Number,
   noteBytes: Schema.Number,
   inboxBytes: Schema.Number,
@@ -1153,6 +1295,9 @@ export const CivilizationContextInspectionSummary = Schema.Struct({
   censusRevision: Schema.NullOr(Schema.Number),
   notesRevision: Schema.NullOr(Schema.Number),
   inboxRevision: Schema.NullOr(Schema.Number),
+  briefRevision: Schema.NullOr(Schema.Number),
+  briefBodyBytes: Schema.Number,
+  briefIncluded: Schema.Boolean,
   createdAt: IsoDateTime,
   updatedAt: IsoDateTime,
   providerStartAt: Schema.NullOr(IsoDateTime),
@@ -1253,6 +1398,9 @@ export const CivilizationContextReference = Schema.Struct({
   censusRevision: Schema.Number,
   notesRevision: Schema.Number,
   inboxRevision: Schema.Number,
+  briefRevision: Schema.NullOr(Schema.Number),
+  briefBodyBytes: Schema.Number,
+  briefIncluded: Schema.Boolean,
   packetHash: TrimmedNonEmptyString,
   packetBytes: Schema.Number,
   selectedCitizenIds: Schema.Array(ThreadId),
@@ -1274,6 +1422,121 @@ export const CivilizationContextResponse = Schema.Struct({
   ),
 });
 export type CivilizationContextResponse = typeof CivilizationContextResponse.Type;
+
+export const CivilizationOnboardingPresetId = Schema.Literals([
+  "minimal",
+  "standard",
+  "rich",
+  "custom",
+]);
+export type CivilizationOnboardingPresetId = typeof CivilizationOnboardingPresetId.Type;
+
+export const CivilizationOnboardingPresetDefinition = Schema.Struct({
+  id: CivilizationOnboardingPresetId,
+  label: TrimmedNonEmptyString,
+  description: TrimmedNonEmptyString,
+  candidateOverride: CivilizationConfigOverride,
+  changes: Schema.Array(CivilizationConfigDiffEntry),
+}).annotate({ parseOptions: { onExcessProperty: "error" } });
+export type CivilizationOnboardingPresetDefinition =
+  typeof CivilizationOnboardingPresetDefinition.Type;
+
+export const CivilizationOnboardingPresetsResult = Schema.Struct({
+  projectId: ProjectId,
+  environmentRevision: Schema.Number,
+  projectRevision: Schema.Number,
+  presets: Schema.Array(CivilizationOnboardingPresetDefinition),
+});
+export type CivilizationOnboardingPresetsResult = typeof CivilizationOnboardingPresetsResult.Type;
+
+const CivilizationOnboardingConfigurationOnlyPreviewRequest = Schema.Struct({
+  previewKind: Schema.Literal("configuration_only"),
+  projectId: ProjectId,
+  candidateOverride: Schema.optional(CivilizationConfigOverride),
+  providerInstanceId: Schema.optional(ProviderInstanceId),
+}).annotate({ parseOptions: { onExcessProperty: "error" } });
+
+const CivilizationOnboardingExactExistingCitizenPreviewRequest = Schema.Struct({
+  previewKind: Schema.Literal("exact_existing_citizen"),
+  projectId: ProjectId,
+  threadId: ThreadId,
+  candidateOverride: Schema.optional(CivilizationConfigOverride),
+}).annotate({ parseOptions: { onExcessProperty: "error" } });
+
+export const CivilizationOnboardingPreviewRequest = Schema.Union([
+  CivilizationOnboardingConfigurationOnlyPreviewRequest,
+  CivilizationOnboardingExactExistingCitizenPreviewRequest,
+]);
+export type CivilizationOnboardingPreviewRequest = typeof CivilizationOnboardingPreviewRequest.Type;
+
+export const CivilizationOnboardingPreviewEligibility = Schema.Struct({
+  brief: Schema.Boolean,
+  roster: Schema.Boolean,
+  notes: Schema.Boolean,
+  inbox: Schema.Boolean,
+  exactContent: Schema.Boolean,
+});
+export type CivilizationOnboardingPreviewEligibility =
+  typeof CivilizationOnboardingPreviewEligibility.Type;
+
+export const CivilizationOnboardingPreviewResult = Schema.Struct({
+  projectId: ProjectId,
+  previewKind: Schema.Literals(["configuration_only", "exact_existing_citizen"]),
+  effectiveConfig: CivilizationEffectiveConfig,
+  environmentRevision: Schema.Number,
+  projectRevision: Schema.Number,
+  changes: Schema.Array(CivilizationConfigDiffEntry),
+  capabilities: Schema.Array(CivilizationProviderCapability),
+  selectedCapability: Schema.NullOr(CivilizationProviderCapability),
+  budget: CivilizationContextBudget,
+  composition: CivilizationContextComposition,
+  eligibility: CivilizationOnboardingPreviewEligibility,
+  warnings: Schema.Array(Schema.String),
+});
+export type CivilizationOnboardingPreviewResult = typeof CivilizationOnboardingPreviewResult.Type;
+
+export const CivilizationOnboardingContentPreviewRequest = Schema.Struct({
+  projectId: ProjectId,
+  threadId: ThreadId,
+  candidateOverride: Schema.optional(CivilizationConfigOverride),
+}).annotate({ parseOptions: { onExcessProperty: "error" } });
+export type CivilizationOnboardingContentPreviewRequest =
+  typeof CivilizationOnboardingContentPreviewRequest.Type;
+
+export const CivilizationOnboardingPreviewAuthority = Schema.Struct({
+  runId: RunId,
+  providerInstanceId: ProviderInstanceId,
+  runtimeMode: RuntimeMode,
+  interactionMode: ProviderInteractionMode,
+});
+export type CivilizationOnboardingPreviewAuthority =
+  typeof CivilizationOnboardingPreviewAuthority.Type;
+
+export const CivilizationOnboardingContentPreviewResult = Schema.Struct({
+  projectId: ProjectId,
+  threadId: ThreadId,
+  effectiveConfig: CivilizationEffectiveConfig,
+  environmentRevision: Schema.Number,
+  projectRevision: Schema.Number,
+  capability: CivilizationProviderCapability,
+  authority: CivilizationOnboardingPreviewAuthority,
+  budget: CivilizationContextBudget,
+  composition: CivilizationContextComposition,
+  packet: Schema.NullOr(
+    Schema.Struct({
+      revisionKind: Schema.Literal("preview_only"),
+      previewRevision: TrimmedNonEmptyString,
+      text: Schema.String,
+      bytes: Schema.Number,
+      selectedCitizenIds: Schema.Array(ThreadId),
+      selectedNoteIds: Schema.Array(CivilizationNoteId),
+      selectedInboxIds: Schema.Array(CivilizationMessageId),
+    }),
+  ),
+  warnings: Schema.Array(Schema.String),
+});
+export type CivilizationOnboardingContentPreviewResult =
+  typeof CivilizationOnboardingContentPreviewResult.Type;
 
 export const CivilizationCitizenIdentityState = Schema.Struct({
   nameEntryId: Schema.String,
@@ -1321,7 +1584,7 @@ export const CivilizationCitizenTitleResult = Schema.Struct({
 });
 export type CivilizationCitizenTitleResult = typeof CivilizationCitizenTitleResult.Type;
 
-export const CIVILIZATION_EXPORT_SCHEMA_VERSION = 3 as const;
+export const CIVILIZATION_EXPORT_SCHEMA_VERSION = 4 as const;
 
 export const CivilizationExportLimitations = Schema.Struct({
   mode: Schema.Literal("inspection_backup_only"),
@@ -1344,6 +1607,7 @@ export const CivilizationProjectDataExport = Schema.Struct({
   mail: Schema.Array(Schema.Unknown),
   chronicle: Schema.Array(Schema.Unknown),
   achievements: Schema.Array(Schema.Unknown),
+  projectBrief: Schema.NullOr(CivilizationProjectBriefDetail),
 });
 export type CivilizationProjectDataExport = typeof CivilizationProjectDataExport.Type;
 
@@ -1603,6 +1867,56 @@ export class CivilizationConfigConflictError extends Schema.TaggedError<Civiliza
   { httpApiStatus: 409 },
 ) {}
 
+export const CivilizationOnboardingPreviewUnavailableReason = Schema.Literals([
+  "citizen_not_found",
+  "citizen_not_live",
+  "project_mismatch",
+  "authority_unavailable",
+  "provider_unavailable",
+]);
+export type CivilizationOnboardingPreviewUnavailableReason =
+  typeof CivilizationOnboardingPreviewUnavailableReason.Type;
+
+export class CivilizationOnboardingPreviewUnavailableError extends Schema.TaggedError<CivilizationOnboardingPreviewUnavailableError>()(
+  "CivilizationOnboardingPreviewUnavailableError",
+  {
+    code: Schema.Literal("civilization_onboarding_preview_unavailable"),
+    reason: CivilizationOnboardingPreviewUnavailableReason,
+    message: Schema.String,
+  },
+  { httpApiStatus: 409 },
+) {}
+
+export const CivilizationProjectBriefInvalidReason = Schema.Literals([
+  "invalid_content",
+  "content_too_large",
+  "project_unavailable",
+  "not_configured",
+]);
+export type CivilizationProjectBriefInvalidReason =
+  typeof CivilizationProjectBriefInvalidReason.Type;
+
+export class CivilizationProjectBriefInvalidError extends Schema.TaggedError<CivilizationProjectBriefInvalidError>()(
+  "CivilizationProjectBriefInvalidError",
+  {
+    code: Schema.Literal("civilization_project_brief_invalid"),
+    reason: CivilizationProjectBriefInvalidReason,
+    message: Schema.String,
+  },
+  { httpApiStatus: 400 },
+) {}
+
+export class CivilizationProjectBriefConflictError extends Schema.TaggedError<CivilizationProjectBriefConflictError>()(
+  "CivilizationProjectBriefConflictError",
+  {
+    code: Schema.Literal("civilization_project_brief_conflict"),
+    projectId: ProjectId,
+    expectedRevision: Schema.Number,
+    currentRevision: Schema.Number,
+  },
+  { httpApiStatus: 409 },
+) {}
+
 export class CivilizationUnavailableError extends Schema.TaggedError<CivilizationUnavailableError>()(
   "CivilizationUnavailableError",
   {
@@ -1616,6 +1930,9 @@ export class CivilizationUnavailableError extends Schema.TaggedError<Civilizatio
 export const CivilizationHttpErrors = [
   CivilizationConfigInvalidError,
   CivilizationConfigConflictError,
+  CivilizationOnboardingPreviewUnavailableError,
+  CivilizationProjectBriefInvalidError,
+  CivilizationProjectBriefConflictError,
   CivilizationUnavailableError,
   CivilizationOperationInvalidError,
   CivilizationCitizenNotFoundError,

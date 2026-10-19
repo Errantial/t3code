@@ -29,6 +29,10 @@ import {
   CivilizationNoteNotFoundError,
   type CivilizationNotesCursor,
   CivilizationOperationInvalidError,
+  CivilizationProjectBriefConflictError,
+  type CivilizationProjectBriefClearRequest,
+  CivilizationProjectBriefInvalidError,
+  type CivilizationProjectBriefSetRequest,
   CivilizationPurgeConflictError,
   type CivilizationPurgeApplyRequest,
   CivilizationUnavailableError,
@@ -53,6 +57,8 @@ const isConfigConflict = Schema.is(CivilizationConfigConflictError);
 const isConfigInvalid = Schema.is(CivilizationConfigInvalidError);
 const isCivilizationUnavailable = Schema.is(CivilizationUnavailableError);
 const isOperationInvalid = Schema.is(CivilizationOperationInvalidError);
+const isProjectBriefInvalid = Schema.is(CivilizationProjectBriefInvalidError);
+const isProjectBriefConflict = Schema.is(CivilizationProjectBriefConflictError);
 const isCitizenNotFound = Schema.is(CivilizationCitizenNotFoundError);
 const isKnowledgeConflict = Schema.is(CivilizationKnowledgeConflictError);
 const isNoteNotFound = Schema.is(CivilizationNoteNotFoundError);
@@ -76,6 +82,8 @@ const unwrapCivilizationConfigError = <E>(error: E) => {
       isConfigInvalid(cause) ||
       isCivilizationUnavailable(cause) ||
       isOperationInvalid(cause) ||
+      isProjectBriefInvalid(cause) ||
+      isProjectBriefConflict(cause) ||
       isCitizenNotFound(cause) ||
       isKnowledgeConflict(cause) ||
       isNoteNotFound(cause) ||
@@ -230,12 +238,16 @@ export const setEnvironmentCivilizationConfig = Effect.fn(
 )(function* (
   input: CivilizationScopedEnvironmentRequestInput & {
     readonly expectedRevision: number;
+    readonly expectedEnvironmentRevision?: number | undefined;
     readonly override: CivilizationConfigOverride;
   },
 ) {
   const payload = {
     ...scopeQuery(input.projectId),
     expectedRevision: input.expectedRevision,
+    ...(input.expectedEnvironmentRevision === undefined
+      ? {}
+      : { expectedEnvironmentRevision: input.expectedEnvironmentRevision }),
     override: input.override,
   };
   return yield* preserveCivilizationConfigErrors(
@@ -317,6 +329,89 @@ export const exportEnvironmentCivilizationConfig = Effect.fn(
   );
 });
 
+/** Read Project Brief metadata without exposing the operator-authored body. */
+export const fetchEnvironmentCivilizationProjectBriefMetadata = Effect.fn(
+  "clientRuntime.state.fetchEnvironmentCivilizationProjectBriefMetadata",
+)(function* (
+  input: CivilizationEnvironmentRequestInput & {
+    readonly projectId: ProjectId;
+  },
+) {
+  const endpoint = { query: { projectId: input.projectId } };
+  return yield* preserveCivilizationConfigErrors(
+    executeAuthenticatedEnvironmentHttpRequest({
+      ...input,
+      group: "civilization",
+      method: "GET",
+      url: (urls) => urls.projectBriefMetadata(endpoint),
+      timeoutMs: input.timeoutMs ?? DEFAULT_CIVILIZATION_READ_TIMEOUT_MS,
+      request: ({ client, headers }) => client.projectBriefMetadata({ ...endpoint, headers }),
+    }),
+  );
+});
+
+/** Read the exact operator-authored Project Brief body behind settings-write authorization. */
+export const fetchEnvironmentCivilizationProjectBriefDetail = Effect.fn(
+  "clientRuntime.state.fetchEnvironmentCivilizationProjectBriefDetail",
+)(function* (
+  input: CivilizationEnvironmentRequestInput & {
+    readonly projectId: ProjectId;
+  },
+) {
+  const endpoint = { query: { projectId: input.projectId } };
+  return yield* preserveCivilizationConfigErrors(
+    executeAuthenticatedEnvironmentHttpRequest({
+      ...input,
+      group: "civilization",
+      method: "GET",
+      url: (urls) => urls.projectBriefDetail(endpoint),
+      timeoutMs: input.timeoutMs ?? DEFAULT_CIVILIZATION_READ_TIMEOUT_MS,
+      request: ({ client, headers }) => client.projectBriefDetail({ ...endpoint, headers }),
+    }),
+  );
+});
+
+/** Commit one exact Project Brief revision without automatic conflict retry. */
+export const setEnvironmentCivilizationProjectBrief = Effect.fn(
+  "clientRuntime.state.setEnvironmentCivilizationProjectBrief",
+)(function* (
+  input: CivilizationEnvironmentRequestInput & {
+    readonly request: CivilizationProjectBriefSetRequest;
+  },
+) {
+  return yield* preserveCivilizationConfigErrors(
+    executeAuthenticatedEnvironmentHttpRequest({
+      ...input,
+      group: "civilization",
+      method: "POST",
+      url: (urls) => urls.projectBriefSet(),
+      timeoutMs: input.timeoutMs ?? DEFAULT_CIVILIZATION_WRITE_TIMEOUT_MS,
+      request: ({ client, headers }) => client.projectBriefSet({ payload: input.request, headers }),
+    }),
+  );
+});
+
+/** Clear Project Brief content while advancing its durable project-local revision. */
+export const clearEnvironmentCivilizationProjectBrief = Effect.fn(
+  "clientRuntime.state.clearEnvironmentCivilizationProjectBrief",
+)(function* (
+  input: CivilizationEnvironmentRequestInput & {
+    readonly request: CivilizationProjectBriefClearRequest;
+  },
+) {
+  return yield* preserveCivilizationConfigErrors(
+    executeAuthenticatedEnvironmentHttpRequest({
+      ...input,
+      group: "civilization",
+      method: "POST",
+      url: (urls) => urls.projectBriefClear(),
+      timeoutMs: input.timeoutMs ?? DEFAULT_CIVILIZATION_WRITE_TIMEOUT_MS,
+      request: ({ client, headers }) =>
+        client.projectBriefClear({ payload: input.request, headers }),
+    }),
+  );
+});
+
 /** Read one revision-consistent census page. */
 export const fetchEnvironmentCivilizationCensusPage = Effect.fn(
   "clientRuntime.state.fetchEnvironmentCivilizationCensusPage",
@@ -363,6 +458,34 @@ export const fetchEnvironmentCivilizationCitizenDetail = Effect.fn(
       url: (urls) => urls.citizenDetail(endpoint),
       timeoutMs: input.timeoutMs ?? DEFAULT_CIVILIZATION_READ_TIMEOUT_MS,
       request: ({ client, headers }) => client.citizenDetail({ ...endpoint, headers }),
+    }),
+  );
+});
+
+/** Search bounded project-local citizen identity and host-thread metadata. */
+export const searchEnvironmentCivilizationCitizens = Effect.fn(
+  "clientRuntime.state.searchEnvironmentCivilizationCitizens",
+)(function* (
+  input: CivilizationEnvironmentRequestInput & {
+    readonly projectId: ProjectId;
+    readonly query: string;
+    readonly limit?: number | undefined;
+  },
+) {
+  const query = {
+    projectId: input.projectId,
+    query: input.query,
+    ...(input.limit === undefined ? {} : { limit: String(input.limit) }),
+  };
+  const endpoint = { query };
+  return yield* preserveCivilizationConfigErrors(
+    executeAuthenticatedEnvironmentHttpRequest({
+      ...input,
+      group: "civilization",
+      method: "GET",
+      url: (urls) => urls.citizenSearch(endpoint),
+      timeoutMs: input.timeoutMs ?? DEFAULT_CIVILIZATION_READ_TIMEOUT_MS,
+      request: ({ client, headers }) => client.citizenSearch({ ...endpoint, headers }),
     }),
   );
 });
@@ -1024,6 +1147,18 @@ export const fetchCurrentEnvironmentCivilizationCitizenDetail = Effect.fn(
   return yield* fetchEnvironmentCivilizationCitizenDetail({ ...input, ...auth });
 });
 
+export const searchCurrentEnvironmentCivilizationCitizens = Effect.fn(
+  "clientRuntime.state.searchCurrentEnvironmentCivilizationCitizens",
+)(function* (input: {
+  readonly prepared: PreparedConnection;
+  readonly projectId: ProjectId;
+  readonly query: string;
+  readonly limit?: number | undefined;
+}) {
+  const auth = yield* currentCivilizationAuth;
+  return yield* searchEnvironmentCivilizationCitizens({ ...input, ...auth });
+});
+
 export const fetchCurrentEnvironmentCivilizationLineageNeighborhood = Effect.fn(
   "clientRuntime.state.fetchCurrentEnvironmentCivilizationLineageNeighborhood",
 )(function* (input: {
@@ -1308,6 +1443,7 @@ export type EnvironmentCivilizationConfigAction =
   | {
       readonly type: "set";
       readonly expectedRevision: number;
+      readonly expectedEnvironmentRevision?: number | undefined;
       readonly override: CivilizationConfigOverride;
     }
   | { readonly type: "reset"; readonly expectedRevision: number }
@@ -1346,6 +1482,9 @@ export const runEnvironmentCivilizationConfigAction = Effect.fn(
       return yield* setEnvironmentCivilizationConfig({
         ...auth,
         expectedRevision: input.action.expectedRevision,
+        ...(input.action.expectedEnvironmentRevision === undefined
+          ? {}
+          : { expectedEnvironmentRevision: input.action.expectedEnvironmentRevision }),
         override: input.action.override,
       });
     case "reset":

@@ -30,18 +30,24 @@ import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
 
 import { exceededDispatchModeLimit } from "../orchestration-v2/DispatchModeLimit.ts";
-import { getEffectiveCivilizationConfig } from "./ConfigService.ts";
+import { getEffectiveCivilizationConfig, normalizeCivilizationName } from "./ConfigService.ts";
 
 const CURSOR_VERSION = 1 as const;
 const MAX_SOURCE_REFERENCES = 16;
 const MAX_SOURCE_KIND_BYTES = 128;
 const MAX_SOURCE_REFERENCE_BYTES = 2 * 1024;
+const CITIZEN_SEARCH_DEFAULT_LIMIT = 10;
+const CITIZEN_SEARCH_MAX_LIMIT = 20;
+const CITIZEN_SEARCH_MIN_QUERY_CHARACTERS = 2;
+const CITIZEN_SEARCH_MAX_QUERY_CHARACTERS = 200;
+const CITIZEN_SEARCH_MAX_QUERY_BYTES = 512;
 
 export class CivilizationKnowledgeInvalidError extends Schema.TaggedError<CivilizationKnowledgeInvalidError>()(
   "CivilizationKnowledgeInvalidError",
   {
     reason: Schema.Literals([
       "invalid_cursor",
+      "invalid_search",
       "response_too_large",
       "invalid_note",
       "invalid_category",
@@ -79,6 +85,20 @@ type CensusRow = {
 };
 type LineageRow = CensusRow & {
   readonly birth_sequence: number;
+};
+
+type CitizenSearchRow = {
+  readonly thread_id: ThreadId;
+  readonly project_id: ProjectId;
+  readonly name_display: string;
+  readonly name_key: string;
+  readonly profile_label: string;
+  readonly generation: number;
+  readonly observed_only: number;
+  readonly closed: number;
+  readonly thread_title: string;
+  readonly archived_at: string | null;
+  readonly match_rank: number;
 };
 
 type NoteRow = {
@@ -156,6 +176,23 @@ export interface CivilizationCensusServicePage {
   readonly citizens: ReadonlyArray<CivilizationCitizenSummary>;
   readonly nextCursor: typeof CivilizationCensusCursor.Type | null;
   readonly partial: boolean;
+}
+
+export interface CivilizationCitizenSearchInput {
+  readonly projectId: ProjectId;
+  readonly query: string;
+  readonly limit?: number | undefined;
+}
+
+export interface CivilizationCitizenSearchResult {
+  readonly projectId: ProjectId;
+  readonly threadId: ThreadId;
+  readonly displayName: string;
+  readonly profileLabel: string;
+  readonly generation: number;
+  readonly lifecycleState: "open" | "settled" | "archived";
+  readonly observedOnly: boolean;
+  readonly threadTitle: string;
 }
 export interface CivilizationLineageNeighborhoodInput {
   readonly projectId: ProjectId;
@@ -518,6 +555,51 @@ const pageSize = (requested: number | undefined, configured: number) => {
 
 const responseBytes = (value: unknown) => utf8Length(JSON.stringify(value));
 
+const escapeLikePattern = (value: string) =>
+  value.replaceAll("!", "!!").replaceAll("%", "!%").replaceAll("_", "!_");
+
+const nextTextPrefix = (value: string) => {
+  const characters = [...value];
+  for (let index = characters.length - 1; index >= 0; index -= 1) {
+    const codePoint = characters[index]!.codePointAt(0)!;
+    if (codePoint < 0x10ffff) {
+      characters[index] = String.fromCodePoint(codePoint + 1);
+      return characters.slice(0, index + 1).join("");
+    }
+  }
+  return null;
+};
+
+const citizenSearchParameters = (input: CivilizationCitizenSearchInput) => {
+  const query = input.query.trim();
+  const queryCharacters = [...query].length;
+  if (
+    queryCharacters < CITIZEN_SEARCH_MIN_QUERY_CHARACTERS ||
+    queryCharacters > CITIZEN_SEARCH_MAX_QUERY_CHARACTERS ||
+    utf8Length(query) > CITIZEN_SEARCH_MAX_QUERY_BYTES ||
+    unsafeText(query)
+  ) {
+    throw invalid(
+      "invalid_search",
+      `Civilization citizen search requires ${CITIZEN_SEARCH_MIN_QUERY_CHARACTERS}-${CITIZEN_SEARCH_MAX_QUERY_CHARACTERS} Unicode characters and at most ${CITIZEN_SEARCH_MAX_QUERY_BYTES} UTF-8 bytes.`,
+    );
+  }
+  if (input.limit !== undefined && (!Number.isSafeInteger(input.limit) || input.limit < 1)) {
+    throw invalid(
+      "invalid_search",
+      "Civilization citizen search limit must be a positive integer.",
+    );
+  }
+  const normalizedQuery = normalizeCivilizationName(query);
+  return {
+    query,
+    normalizedQuery,
+    normalizedPrefixEnd: nextTextPrefix(normalizedQuery),
+    titlePattern: `${escapeLikePattern(query)}%`,
+    limit: Math.min(input.limit ?? CITIZEN_SEARCH_DEFAULT_LIMIT, CITIZEN_SEARCH_MAX_LIMIT),
+  } as const;
+};
+
 const make = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
 
@@ -531,6 +613,93 @@ const make = Effect.gen(function* () {
         LIMIT 1
       `)[0];
     return row ?? { census_revision: 0, notes_revision: 0 };
+  });
+
+  const searchCitizens = Effect.fn("CivilizationKnowledge.searchCitizens")(function* (
+    input: CivilizationCitizenSearchInput,
+  ) {
+    const effective = yield* getEffectiveCivilizationConfig(input.projectId).pipe(
+      Effect.provideService(SqlClient.SqlClient, sql),
+    );
+    const parameters = yield* knowledgeSync(() => citizenSearchParameters(input));
+    const includeObserved = effective.config.participation.showObservedAgents;
+    const rows = yield* sql<CitizenSearchRow>`
+      WITH name_matches AS (
+        SELECT c.thread_id, c.project_id, c.name_display, c.name_key, c.profile_label,
+               c.generation, c.observed_only, c.closed,
+               t.title AS thread_title, t.archived_at,
+               CASE WHEN c.name_key = ${parameters.normalizedQuery} THEN 0 ELSE 1 END AS match_rank
+        FROM civilization_citizens AS c
+        INNER JOIN orchestration_v2_projection_threads AS t
+          ON t.thread_id = c.thread_id AND t.project_id = c.project_id
+        WHERE c.project_id = ${input.projectId}
+          AND c.deleted = 0
+          AND t.deleted_at IS NULL
+          AND (${includeObserved ? 1 : 0} = 1 OR c.observed_only = 0)
+          AND c.name_key >= ${parameters.normalizedQuery}
+          AND (${parameters.normalizedPrefixEnd} IS NULL OR c.name_key < ${parameters.normalizedPrefixEnd})
+        ORDER BY c.name_key ASC, c.thread_id ASC
+        LIMIT ${parameters.limit}
+      ),
+      exact_thread_match AS (
+        SELECT c.thread_id, c.project_id, c.name_display, c.name_key, c.profile_label,
+               c.generation, c.observed_only, c.closed,
+               t.title AS thread_title, t.archived_at, 0 AS match_rank
+        FROM civilization_citizens AS c
+        INNER JOIN orchestration_v2_projection_threads AS t
+          ON t.thread_id = c.thread_id AND t.project_id = c.project_id
+        WHERE c.project_id = ${input.projectId}
+          AND c.thread_id = ${parameters.query}
+          AND c.deleted = 0
+          AND t.deleted_at IS NULL
+          AND (${includeObserved ? 1 : 0} = 1 OR c.observed_only = 0)
+        LIMIT 1
+      ),
+      title_matches AS (
+        SELECT c.thread_id, c.project_id, c.name_display, c.name_key, c.profile_label,
+               c.generation, c.observed_only, c.closed,
+               t.title AS thread_title, t.archived_at, 2 AS match_rank
+        FROM orchestration_v2_projection_threads AS t
+        INNER JOIN civilization_citizens AS c
+          ON c.thread_id = t.thread_id AND c.project_id = t.project_id
+        WHERE t.project_id = ${input.projectId}
+          AND t.deleted_at IS NULL
+          AND c.deleted = 0
+          AND (${includeObserved ? 1 : 0} = 1 OR c.observed_only = 0)
+          AND t.title COLLATE NOCASE LIKE ${parameters.titlePattern} ESCAPE '!'
+        ORDER BY t.updated_at DESC, t.thread_id ASC
+        LIMIT ${parameters.limit}
+      ),
+      candidates AS (
+        SELECT * FROM exact_thread_match
+        UNION ALL
+        SELECT * FROM name_matches
+        UNION ALL
+        SELECT * FROM title_matches
+      ),
+      deduped AS (
+        SELECT thread_id, project_id, name_display, name_key, profile_label, generation,
+               observed_only, closed, thread_title, archived_at, MIN(match_rank) AS match_rank
+        FROM candidates
+        GROUP BY thread_id, project_id, name_display, name_key, profile_label, generation,
+                 observed_only, closed, thread_title, archived_at
+      )
+      SELECT thread_id, project_id, name_display, name_key, profile_label, generation,
+             observed_only, closed, thread_title, archived_at, match_rank
+      FROM deduped
+      ORDER BY match_rank ASC, name_key ASC, thread_id ASC
+      LIMIT ${parameters.limit}
+    `;
+    return rows.map((row): CivilizationCitizenSearchResult => ({
+      projectId: row.project_id,
+      threadId: row.thread_id,
+      displayName: row.name_display,
+      profileLabel: row.profile_label,
+      generation: row.generation,
+      lifecycleState: row.archived_at !== null ? "archived" : row.closed === 1 ? "settled" : "open",
+      observedOnly: row.observed_only === 1,
+      threadTitle: row.thread_title,
+    }));
   });
 
   const listCensus = Effect.fn("CivilizationKnowledge.listCensus")(function* (
@@ -1337,6 +1506,7 @@ const make = Effect.gen(function* () {
   );
 
   return {
+    searchCitizens,
     listCensus,
     getLineageNeighborhood,
     listNotes,
@@ -1357,6 +1527,7 @@ const unavailableKnowledge = () =>
   Effect.die("Civilization knowledge is not installed in this runtime layer.");
 
 const unavailableKnowledgeService = {
+  searchCitizens: () => unavailableKnowledge(),
   listCensus: () => unavailableKnowledge(),
   getLineageNeighborhood: () => unavailableKnowledge(),
   listNotes: () => unavailableKnowledge(),

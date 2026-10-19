@@ -16,6 +16,7 @@ import {
   type CivilizationContextResponse,
   type CivilizationContextSuppressionReason,
   type CivilizationCitizenNameReference,
+  type CivilizationEffectiveConfig,
   type CivilizationMailBody,
   type CivilizationNoteId,
   type ProjectId,
@@ -45,6 +46,7 @@ import {
   encodeCivilizationNotesCursor,
 } from "./KnowledgeService.ts";
 import * as MailService from "./MailService.ts";
+import * as ProjectBriefService from "./ProjectBriefService.ts";
 import {
   civilizationProviderCapability,
   resolveCivilizationProviderCapability,
@@ -166,6 +168,15 @@ export type CivilizationContextExplicitReadInput = Omit<
   "message" | "source"
 >;
 
+export interface CivilizationContextExistingCitizenPreviewInput extends CivilizationContextExplicitReadInput {
+  readonly effective: CivilizationEffectiveConfig;
+}
+
+export interface CivilizationContextExistingCitizenPreviewResult extends CivilizationContextResponse {
+  readonly budget: CivilizationContextBudget;
+  readonly composition: CivilizationContextComposition;
+}
+
 export interface CivilizationContextInspectionListInput {
   readonly projectId: ProjectId;
   readonly threadId?: ThreadId | undefined;
@@ -197,6 +208,12 @@ export interface CivilizationContextInspectionTurnKey {
   readonly attemptId: RunAttemptId;
   readonly providerTurnOrdinal: number;
 }
+
+type CivilizationContextExecutionPolicy = {
+  readonly inbox: "offer" | "simulate" | "omit";
+  readonly persistence: "runtime" | "reference" | "none";
+  readonly suppressNonActionableTurn: boolean;
+};
 
 export class CivilizationContextInspectionInvalidError extends Schema.TaggedError<CivilizationContextInspectionInvalidError>()(
   "CivilizationContextInspectionInvalidError",
@@ -332,6 +349,9 @@ type InspectionRow = {
   readonly census_revision: number | null;
   readonly notes_revision: number | null;
   readonly inbox_revision: number | null;
+  readonly brief_revision: number | null;
+  readonly brief_body_bytes: number;
+  readonly brief_included: number;
   readonly created_at: string;
   readonly updated_at: string;
   readonly provider_start_at: string | null;
@@ -377,6 +397,7 @@ const decodeInspectionCursor = (cursor: typeof CivilizationContextInspectionCurs
   );
 
 const emptyComposition = (): CivilizationContextComposition => ({
+  brief: { candidates: 0, included: 0, omitted: 0 },
   roster: { candidates: 0, included: 0, omitted: 0 },
   notes: { candidates: 0, included: 0, omitted: 0 },
   inbox: { candidates: 0, included: 0, omitted: 0 },
@@ -386,6 +407,7 @@ const emptyBudget = (limitBytes: number): CivilizationContextBudget => ({
   limitBytes: Math.max(0, limitBytes),
   packetBytes: 0,
   requiredBytes: 0,
+  briefBytes: 0,
   rosterBytes: 0,
   noteBytes: 0,
   inboxBytes: 0,
@@ -419,6 +441,11 @@ const inspectionSummary = (row: InspectionSummaryRow): CivilizationContextInspec
   packetHash: row.packet_hash,
   packetBytes: row.packet_bytes,
   composition: {
+    brief: {
+      candidates: row.brief_body_bytes > 0 ? 1 : 0,
+      included: row.brief_included,
+      omitted: row.brief_body_bytes > 0 ? Math.max(0, 1 - row.brief_included) : 0,
+    },
     roster: {
       candidates: row.roster_candidates,
       included: row.roster_included,
@@ -439,6 +466,10 @@ const inspectionSummary = (row: InspectionSummaryRow): CivilizationContextInspec
     limitBytes: row.packet_budget_bytes,
     packetBytes: row.packet_bytes,
     requiredBytes: row.required_bytes,
+    briefBytes: Math.max(
+      0,
+      row.packet_bytes - row.required_bytes - row.roster_bytes - row.note_bytes - row.inbox_bytes,
+    ),
     rosterBytes: row.roster_bytes,
     noteBytes: row.note_bytes,
     inboxBytes: row.inbox_bytes,
@@ -451,6 +482,9 @@ const inspectionSummary = (row: InspectionSummaryRow): CivilizationContextInspec
   censusRevision: row.census_revision,
   notesRevision: row.notes_revision,
   inboxRevision: row.inbox_revision,
+  briefRevision: row.brief_revision,
+  briefBodyBytes: row.brief_body_bytes,
+  briefIncluded: row.brief_included === 1,
   createdAt: row.created_at,
   updatedAt: row.updated_at,
   providerStartAt: row.provider_start_at,
@@ -471,6 +505,7 @@ const make = Effect.gen(function* () {
   const config = yield* ConfigService.CivilizationConfigService;
   const adapters = yield* ProviderAdapterRegistry.ProviderAdapterRegistryV2;
   const mail = yield* MailService.CivilizationMailService;
+  const projectBrief = yield* ProjectBriefService.CivilizationProjectBriefService;
 
   const loadCitizenReferences = Effect.fn("CivilizationContextService.loadCitizenReferences")(
     function* (projectId: ProjectId, threadIds: ReadonlyArray<ThreadId>) {
@@ -515,6 +550,9 @@ const make = Effect.gen(function* () {
       readonly censusRevision: number | null;
       readonly notesRevision: number | null;
       readonly inboxRevision: number | null;
+      readonly briefRevision: number | null;
+      readonly briefBodyBytes: number;
+      readonly briefIncluded: boolean;
       readonly createdAt?: string | undefined;
     }) {
       const now = input.createdAt ?? DateTime.formatIso(yield* DateTime.now);
@@ -529,7 +567,8 @@ const make = Effect.gen(function* () {
         roster_candidates, roster_included, note_candidates, note_included,
         inbox_candidates, inbox_included, selected_citizen_ids_json, selected_note_ids_json,
         selected_inbox_ids_json, environment_revision, project_revision, citizen_revision,
-        census_revision, notes_revision, inbox_revision, created_at, updated_at
+        census_revision, notes_revision, inbox_revision,
+        brief_revision, brief_body_bytes, brief_included, created_at, updated_at
       ) VALUES (
         ${inspectionId}, ${input.contextReferenceId}, ${input.turn.projectId}, ${input.turn.threadId},
         ${input.turn.runId}, ${input.turn.attemptId}, ${input.turn.providerTurnOrdinal},
@@ -546,6 +585,7 @@ const make = Effect.gen(function* () {
         ${JSON.stringify(input.selectedCitizenIds)}, ${JSON.stringify(input.selectedNoteIds)},
         ${JSON.stringify(input.selectedInboxIds)}, ${input.environmentRevision}, ${input.projectRevision},
         ${input.citizenRevision}, ${input.censusRevision}, ${input.notesRevision}, ${input.inboxRevision},
+        ${input.briefRevision}, ${input.briefBodyBytes}, ${input.briefIncluded ? 1 : 0},
         ${now}, ${now}
       )
       ON CONFLICT(run_id, attempt_id, provider_turn_ordinal) DO UPDATE SET
@@ -584,6 +624,9 @@ const make = Effect.gen(function* () {
         census_revision = excluded.census_revision,
         notes_revision = excluded.notes_revision,
         inbox_revision = excluded.inbox_revision,
+        brief_revision = excluded.brief_revision,
+        brief_body_bytes = excluded.brief_body_bytes,
+        brief_included = excluded.brief_included,
         updated_at = excluded.updated_at
     `;
       return inspectionId;
@@ -622,6 +665,7 @@ const make = Effect.gen(function* () {
         roster_bytes, note_bytes, inbox_bytes, unused_bytes, roster_candidates, roster_included,
         note_candidates, note_included, inbox_candidates, inbox_included, environment_revision,
         project_revision, citizen_revision, census_revision, notes_revision, inbox_revision,
+        brief_revision, brief_body_bytes, brief_included,
         created_at, updated_at, provider_start_at
       FROM civilization_context_inspections
       WHERE ${sql.and([
@@ -1084,10 +1128,12 @@ const make = Effect.gen(function* () {
     );
   });
 
-  const forTurn = Effect.fn("CivilizationContextService.forTurn")(function* (
+  const composeContext = Effect.fn("CivilizationContextService.composeContext")(function* (
     input: CivilizationContextForTurnInput,
+    policy: CivilizationContextExecutionPolicy,
+    candidateEffective?: CivilizationEffectiveConfig,
   ) {
-    const effective = yield* config.getRuntime(input.projectId);
+    const effective = candidateEffective ?? (yield* config.getRuntime(input.projectId));
     const citizen = (yield* sql<CitizenRow>`
         SELECT thread_id, project_id, parent_thread_id, relationship_to_parent,
                generation, lineage_status, observed_only, name_display, name_key,
@@ -1106,12 +1152,11 @@ const make = Effect.gen(function* () {
       observedOnly: citizen?.observed_only === 1,
     });
     const capability = resolvedCapability.capability;
-    const explicitRead = input.source === "explicit";
     const diagnosticsMode = effective.config.operations.diagnostics;
     const packetBudget = effective.config.context.packetBytes;
     const transport = resolvedCapability.transport;
     const persistForTurn = (inspection: Parameters<typeof persistInspection>[0]) =>
-      explicitRead ? Effect.void : persistInspectionFailSoft(inspection);
+      policy.persistence === "runtime" ? persistInspectionFailSoft(inspection) : Effect.void;
     const skipReason: CivilizationContextSuppressionReason | null = !effective.config.participation
       .enabled
       ? "participation_disabled"
@@ -1127,12 +1172,12 @@ const make = Effect.gen(function* () {
                 ? "observed_agent_read_only"
                 : capability.support !== "full"
                   ? "provider_unsupported"
-                  : !explicitRead &&
+                  : policy.suppressNonActionableTurn &&
                       input.message?.createdBy === "agent" &&
                       input.message.creationSource === "provider" &&
                       !capability.providerContinuationRefresh
                     ? "provider_continuation"
-                    : !explicitRead &&
+                    : policy.suppressNonActionableTurn &&
                         input.message !== undefined &&
                         /^\/[^\s/]+(?:\s|$)/u.test(input.message.text.trim()) &&
                         !resolvedCapability.providerCommandRefresh
@@ -1167,14 +1212,27 @@ const make = Effect.gen(function* () {
         censusRevision: null,
         notesRevision: null,
         inboxRevision: null,
+        briefRevision: null,
+        briefBodyBytes: 0,
+        briefIncluded: false,
       });
-      return { capability, packet: null } satisfies CivilizationContextResponse;
+      return {
+        capability,
+        packet: null,
+        budget,
+        composition: emptyComposition(),
+      } satisfies CivilizationContextExistingCitizenPreviewResult;
     }
     // `skipReason === null` implies an adopted citizen, but keep the runtime
     // check explicit so TypeScript does not have to infer that relation through
     // the stable suppression-reason decision tree above.
     if (citizen === undefined) {
-      return { capability, packet: null } satisfies CivilizationContextResponse;
+      return {
+        capability,
+        packet: null,
+        budget: emptyBudget(packetBudget),
+        composition: emptyComposition(),
+      } satisfies CivilizationContextExistingCitizenPreviewResult;
     }
 
     const rosterLimit = effective.config.context.rosterCount;
@@ -1282,23 +1340,39 @@ const make = Effect.gen(function* () {
           ) === undefined,
       )
       .slice(0, noteLimit + 1);
+    const brief = yield* projectBrief.readDetail(input.projectId);
 
     const inboxLimit = effective.config.context.inboxExcerptCount;
     // Mail excerpts inherit the configured message byte ceiling; the packet's
     // total byte budget remains the stricter allocator across every section.
     const inboxExcerptBytes = effective.config.messaging.messageBytes;
     const mailCaller =
-      !explicitRead && capability.messaging && effective.config.messaging.enabled && inboxLimit > 0
-        ? yield* mail
-            .authoritativeCaller({
-              threadId: input.threadId,
-              projectId: input.projectId,
-              runId: input.runId,
-              providerInstanceId: input.providerInstanceId,
-              runtimeMode: input.runtimeMode,
-              interactionMode: input.interactionMode,
-            })
-            .pipe(Effect.option)
+      policy.inbox !== "omit" &&
+      capability.messaging &&
+      effective.config.messaging.enabled &&
+      inboxLimit > 0
+        ? yield* (
+            candidateEffective === undefined
+              ? mail.authoritativeCaller({
+                  threadId: input.threadId,
+                  projectId: input.projectId,
+                  runId: input.runId,
+                  providerInstanceId: input.providerInstanceId,
+                  runtimeMode: input.runtimeMode,
+                  interactionMode: input.interactionMode,
+                })
+              : mail.authoritativeCallerAgainstEffective(
+                  {
+                    threadId: input.threadId,
+                    projectId: input.projectId,
+                    runId: input.runId,
+                    providerInstanceId: input.providerInstanceId,
+                    runtimeMode: input.runtimeMode,
+                    interactionMode: input.interactionMode,
+                  },
+                  candidateEffective,
+                )
+          ).pipe(Effect.option)
         : undefined;
     const inboxCandidates =
       mailCaller !== undefined && mailCaller._tag === "Some"
@@ -1316,6 +1390,7 @@ const make = Effect.gen(function* () {
     const selectedRoster: Array<CitizenRow> = [];
     const selectedNotes: Array<NoteRow> = [];
     let selectedInbox: Array<CivilizationMailBody> = [];
+    let briefIncluded = false;
     let inboxRevision = state.mail_revision;
     const observedAt = DateTime.formatIso(yield* DateTime.now);
     const placeholderRevision = `sha256:${"0".repeat(64)}`;
@@ -1324,10 +1399,16 @@ const make = Effect.gen(function* () {
     const makePayload = (
       revision: string,
       selection: {
+        readonly includeBrief: boolean;
         readonly roster: ReadonlyArray<CitizenRow>;
         readonly notes: ReadonlyArray<NoteRow>;
         readonly inbox: ReadonlyArray<CivilizationMailBody>;
-      } = { roster: selectedRoster, notes: selectedNotes, inbox: selectedInbox },
+      } = {
+        includeBrief: briefIncluded,
+        roster: selectedRoster,
+        notes: selectedNotes,
+        inbox: selectedInbox,
+      },
     ) => ({
       version: PACKET_VERSION,
       key: PACKET_KEY,
@@ -1379,6 +1460,14 @@ const make = Effect.gen(function* () {
               },
             }
           : {}),
+      ...(selection.includeBrief && brief.content !== null
+        ? {
+            brief: {
+              revision: brief.revision,
+              content: brief.content,
+            },
+          }
+        : {}),
       census: {
         revision: state.census_revision,
         total: counts.total,
@@ -1480,14 +1569,21 @@ const make = Effect.gen(function* () {
     const packetSize = (
       revision: string,
       selection: {
+        readonly includeBrief: boolean;
         readonly roster: ReadonlyArray<CitizenRow>;
         readonly notes: ReadonlyArray<NoteRow>;
         readonly inbox: ReadonlyArray<CivilizationMailBody>;
-      } = { roster: selectedRoster, notes: selectedNotes, inbox: selectedInbox },
+      } = {
+        includeBrief: briefIncluded,
+        roster: selectedRoster,
+        notes: selectedNotes,
+        inbox: selectedInbox,
+      },
     ) => {
       const key = [
         revision.length,
         inboxRevision,
+        selection.includeBrief ? brief.revision : 0,
         selection.roster.length,
         selection.notes.length,
         selection.inbox.length,
@@ -1527,8 +1623,31 @@ const make = Effect.gen(function* () {
       if (best > 0) target.push(...candidates.slice(0, best));
     };
 
-    const minimalBytes = packetSize(placeholderRevision, { roster: [], notes: [], inbox: [] });
+    const minimalSelection = { includeBrief: false, roster: [], notes: [], inbox: [] } as const;
+    const minimalBytes = packetSize(placeholderRevision, minimalSelection);
     if (minimalBytes > packetBudget) {
+      const budget = {
+        ...emptyBudget(packetBudget),
+        requiredBytes: minimalBytes,
+      };
+      const composition = {
+        brief: {
+          candidates: brief.content === null ? 0 : 1,
+          included: 0,
+          omitted: brief.content === null ? 0 : 1,
+        },
+        roster: {
+          candidates: rosterCandidates.length,
+          included: 0,
+          omitted: rosterCandidates.length,
+        },
+        notes: { candidates: noteCandidates.length, included: 0, omitted: noteCandidates.length },
+        inbox: {
+          candidates: inboxCandidates.length,
+          included: 0,
+          omitted: inboxCandidates.length,
+        },
+      } satisfies CivilizationContextComposition;
       yield* persistForTurn({
         turn: input,
         providerDriver: adapter.driver,
@@ -1542,23 +1661,8 @@ const make = Effect.gen(function* () {
         packetHash: null,
         packetBytes: 0,
         packetBudgetBytes: packetBudget,
-        budget: {
-          ...emptyBudget(packetBudget),
-          requiredBytes: minimalBytes,
-        },
-        composition: {
-          roster: {
-            candidates: rosterCandidates.length,
-            included: 0,
-            omitted: rosterCandidates.length,
-          },
-          notes: { candidates: noteCandidates.length, included: 0, omitted: noteCandidates.length },
-          inbox: {
-            candidates: inboxCandidates.length,
-            included: 0,
-            omitted: inboxCandidates.length,
-          },
-        },
+        budget,
+        composition,
         contextReferenceId: null,
         selectedCitizenIds: [],
         selectedNoteIds: [],
@@ -1569,6 +1673,9 @@ const make = Effect.gen(function* () {
         censusRevision: state.census_revision,
         notesRevision: state.notes_revision,
         inboxRevision,
+        briefRevision: brief.revision === 0 ? null : brief.revision,
+        briefBodyBytes: brief.bodyBytes,
+        briefIncluded: false,
         createdAt: observedAt,
       });
       return {
@@ -1577,9 +1684,20 @@ const make = Effect.gen(function* () {
           detail: `Configured packet budget (${packetBudget} bytes) is too small for the required identity/status envelope.`,
         },
         packet: null,
-      } satisfies CivilizationContextResponse;
+        budget,
+        composition,
+      } satisfies CivilizationContextExistingCitizenPreviewResult;
     }
 
+    if (brief.content !== null) {
+      briefIncluded =
+        packetSize(placeholderRevision, {
+          includeBrief: true,
+          roster: [],
+          notes: [],
+          inbox: [],
+        }) <= packetBudget;
+    }
     appendFittingPrefix(selectedRoster, rosterCandidates.slice(0, rosterLimit));
     appendFittingPrefix(selectedNotes, noteCandidates.slice(0, noteLimit));
     const actualInboxRevision = inboxRevision;
@@ -1594,18 +1712,21 @@ const make = Effect.gen(function* () {
     );
     inboxRevision = actualInboxRevision;
 
-    if (
-      !explicitRead &&
-      mailCaller !== undefined &&
-      mailCaller._tag === "Some" &&
-      selectedInbox.length > 0
-    ) {
-      const offered = yield* mail
-        .offerInboxForContext({
-          caller: mailCaller.value,
-          messageIds: selectedInbox.map((message) => message.messageId),
-        })
-        .pipe(Effect.option);
+    if (mailCaller !== undefined && mailCaller._tag === "Some" && selectedInbox.length > 0) {
+      const offerInput = {
+        caller: mailCaller.value,
+        messageIds: selectedInbox.map((message) => message.messageId),
+      } as const;
+      const offered = yield* (
+        policy.inbox === "offer"
+          ? mail.offerInboxForContext(offerInput)
+          : candidateEffective === undefined
+            ? mail.wouldOfferInboxForContext(offerInput)
+            : mail.wouldOfferInboxForContextAgainstEffective({
+                ...offerInput,
+                effective: candidateEffective,
+              })
+      ).pipe(Effect.option);
       if (offered._tag === "None") {
         selectedInbox = [];
       } else {
@@ -1620,6 +1741,9 @@ const make = Effect.gen(function* () {
       projectRevision: effective.projectRevision,
       citizenRevision: citizen.revision,
       citizenEpoch: citizen.epoch,
+      briefRevision: brief.revision,
+      briefBodyBytes: brief.bodyBytes,
+      briefIncluded,
       censusRevision: state.census_revision,
       notesRevision: state.notes_revision,
       inboxRevision,
@@ -1649,6 +1773,29 @@ const make = Effect.gen(function* () {
       // The placeholder and final revision have identical byte length. Keep an
       // explicit guard anyway so no future revision-format change can violate
       // the configured or hard packet ceiling.
+      const oversizeBudget = { ...emptyBudget(packetBudget), requiredBytes: minimalBytes };
+      const oversizeComposition = {
+        brief: {
+          candidates: brief.content === null ? 0 : 1,
+          included: briefIncluded ? 1 : 0,
+          omitted: brief.content !== null && !briefIncluded ? 1 : 0,
+        },
+        roster: {
+          candidates: rosterCandidates.length,
+          included: selectedRoster.length,
+          omitted: Math.max(0, rosterCandidates.length - selectedRoster.length),
+        },
+        notes: {
+          candidates: noteCandidates.length,
+          included: selectedNotes.length,
+          omitted: Math.max(0, noteCandidates.length - selectedNotes.length),
+        },
+        inbox: {
+          candidates: inboxCandidates.length,
+          included: selectedInbox.length,
+          omitted: Math.max(0, inboxCandidates.length - selectedInbox.length),
+        },
+      } satisfies CivilizationContextComposition;
       yield* persistForTurn({
         turn: input,
         providerDriver: adapter.driver,
@@ -1662,24 +1809,8 @@ const make = Effect.gen(function* () {
         packetHash: null,
         packetBytes: 0,
         packetBudgetBytes: packetBudget,
-        budget: { ...emptyBudget(packetBudget), requiredBytes: minimalBytes },
-        composition: {
-          roster: {
-            candidates: rosterCandidates.length,
-            included: selectedRoster.length,
-            omitted: Math.max(0, rosterCandidates.length - selectedRoster.length),
-          },
-          notes: {
-            candidates: noteCandidates.length,
-            included: selectedNotes.length,
-            omitted: Math.max(0, noteCandidates.length - selectedNotes.length),
-          },
-          inbox: {
-            candidates: inboxCandidates.length,
-            included: selectedInbox.length,
-            omitted: Math.max(0, inboxCandidates.length - selectedInbox.length),
-          },
-        },
+        budget: oversizeBudget,
+        composition: oversizeComposition,
         contextReferenceId: null,
         selectedCitizenIds: selectedRoster.map((row) => row.thread_id),
         selectedNoteIds: selectedNotes.map((row) => row.note_id),
@@ -1690,24 +1821,41 @@ const make = Effect.gen(function* () {
         censusRevision: state.census_revision,
         notesRevision: state.notes_revision,
         inboxRevision,
+        briefRevision: brief.revision === 0 ? null : brief.revision,
+        briefBodyBytes: brief.bodyBytes,
+        briefIncluded,
         createdAt: observedAt,
       });
-      return { capability, packet: null } satisfies CivilizationContextResponse;
+      return {
+        capability,
+        packet: null,
+        budget: oversizeBudget,
+        composition: oversizeComposition,
+      } satisfies CivilizationContextExistingCitizenPreviewResult;
     }
     const noRoster: ReadonlyArray<CitizenRow> = [];
     const noNotes: ReadonlyArray<NoteRow> = [];
     const noInbox: ReadonlyArray<CivilizationMailBody> = [];
     const requiredBytes = packetSize(revision, {
+      includeBrief: false,
+      roster: noRoster,
+      notes: noNotes,
+      inbox: noInbox,
+    });
+    const briefStageBytes = packetSize(revision, {
+      includeBrief: briefIncluded,
       roster: noRoster,
       notes: noNotes,
       inbox: noInbox,
     });
     const rosterStageBytes = packetSize(revision, {
+      includeBrief: briefIncluded,
       roster: selectedRoster,
       notes: noNotes,
       inbox: noInbox,
     });
     const noteStageBytes = packetSize(revision, {
+      includeBrief: briefIncluded,
       roster: selectedRoster,
       notes: selectedNotes,
       inbox: noInbox,
@@ -1716,12 +1864,18 @@ const make = Effect.gen(function* () {
       limitBytes: packetBudget,
       packetBytes: bytes,
       requiredBytes,
-      rosterBytes: Math.max(0, rosterStageBytes - requiredBytes),
+      briefBytes: Math.max(0, briefStageBytes - requiredBytes),
+      rosterBytes: Math.max(0, rosterStageBytes - briefStageBytes),
       noteBytes: Math.max(0, noteStageBytes - rosterStageBytes),
       inboxBytes: Math.max(0, bytes - noteStageBytes),
       unusedBytes: Math.max(0, packetBudget - bytes),
     };
     const composition: CivilizationContextComposition = {
+      brief: {
+        candidates: brief.content === null ? 0 : 1,
+        included: briefIncluded ? 1 : 0,
+        omitted: brief.content !== null && !briefIncluded ? 1 : 0,
+      },
       roster: {
         candidates: rosterCandidates.length,
         included: selectedRoster.length,
@@ -1740,9 +1894,10 @@ const make = Effect.gen(function* () {
     };
     const createdAt = observedAt;
     const packetHash = `sha256:${sha256(text)}`;
-    const referenceId = explicitRead
-      ? `civilization:explicit:${input.runId}:${input.attemptId}:${input.providerTurnOrdinal}:${packetHash}`
-      : `civilization:${input.runId}:${input.attemptId}:${input.providerTurnOrdinal}`;
+    const referenceId =
+      policy.persistence === "reference"
+        ? `civilization:explicit:${input.runId}:${input.attemptId}:${input.providerTurnOrdinal}:${packetHash}`
+        : `civilization:${input.runId}:${input.attemptId}:${input.providerTurnOrdinal}`;
     const selectedCitizenIds = selectedRoster.map((row) => row.thread_id);
     const selectedNoteIds = selectedNotes.map((row) => row.note_id);
     const selectedInboxIds = selectedInbox.map((message) => message.messageId);
@@ -1761,6 +1916,9 @@ const make = Effect.gen(function* () {
       censusRevision: state.census_revision,
       notesRevision: state.notes_revision,
       inboxRevision,
+      briefRevision: brief.revision === 0 ? null : brief.revision,
+      briefBodyBytes: brief.bodyBytes,
+      briefIncluded,
       packetHash,
       packetBytes: bytes,
       selectedCitizenIds,
@@ -1775,14 +1933,17 @@ const make = Effect.gen(function* () {
         context_reference_id, project_id, thread_id, run_id, attempt_id,
         provider_turn_ordinal, provider_instance_id,
         environment_revision, project_revision, citizen_revision,
-        census_revision, notes_revision, inbox_revision, packet_hash, packet_bytes,
+        census_revision, notes_revision, inbox_revision,
+        brief_revision, brief_body_bytes, brief_included, packet_hash, packet_bytes,
         selected_citizen_ids_json, selected_note_ids_json, selected_inbox_ids_json,
         created_at
       ) VALUES (
         ${referenceId}, ${input.projectId}, ${input.threadId}, ${input.runId}, ${input.attemptId},
         ${input.providerTurnOrdinal}, ${input.providerInstanceId},
         ${effective.environmentRevision}, ${effective.projectRevision}, ${citizen.revision},
-        ${state.census_revision}, ${state.notes_revision}, ${inboxRevision}, ${packetHash}, ${bytes},
+        ${state.census_revision}, ${state.notes_revision}, ${inboxRevision},
+        ${brief.revision === 0 ? null : brief.revision}, ${brief.bodyBytes}, ${briefIncluded ? 1 : 0},
+        ${packetHash}, ${bytes},
         ${JSON.stringify(selectedCitizenIds)}, ${JSON.stringify(selectedNoteIds)}, ${JSON.stringify(selectedInboxIds)},
         ${createdAt}
       )
@@ -1794,6 +1955,9 @@ const make = Effect.gen(function* () {
         census_revision = excluded.census_revision,
         notes_revision = excluded.notes_revision,
         inbox_revision = excluded.inbox_revision,
+        brief_revision = excluded.brief_revision,
+        brief_body_bytes = excluded.brief_body_bytes,
+        brief_included = excluded.brief_included,
         packet_hash = excluded.packet_hash,
         packet_bytes = excluded.packet_bytes,
         selected_citizen_ids_json = excluded.selected_citizen_ids_json,
@@ -1826,11 +1990,14 @@ const make = Effect.gen(function* () {
       censusRevision: state.census_revision,
       notesRevision: state.notes_revision,
       inboxRevision,
+      briefRevision: brief.revision === 0 ? null : brief.revision,
+      briefBodyBytes: brief.bodyBytes,
+      briefIncluded,
       createdAt,
     };
-    if (explicitRead) {
+    if (policy.persistence === "reference") {
       yield* persistReference;
-    } else {
+    } else if (policy.persistence === "runtime") {
       // Migration 069 synchronizes the bounded reference from the successful
       // inspection insert/update in the same SQLite statement. If optional
       // diagnostic persistence fails for any reason, preserve the established
@@ -1840,17 +2007,51 @@ const make = Effect.gen(function* () {
     return {
       capability,
       packet: { revision, text, bytes, reference },
-    } satisfies CivilizationContextResponse;
+      budget,
+      composition,
+    } satisfies CivilizationContextExistingCitizenPreviewResult;
   });
+
+  const runtimeExecutionPolicy = {
+    inbox: "offer",
+    persistence: "runtime",
+    suppressNonActionableTurn: true,
+  } as const satisfies CivilizationContextExecutionPolicy;
+  const explicitReadExecutionPolicy = {
+    inbox: "omit",
+    persistence: "reference",
+    suppressNonActionableTurn: false,
+  } as const satisfies CivilizationContextExecutionPolicy;
+  const previewExecutionPolicy = {
+    inbox: "simulate",
+    persistence: "none",
+    suppressNonActionableTurn: false,
+  } as const satisfies CivilizationContextExecutionPolicy;
+
+  const forTurn = Effect.fn("CivilizationContextService.forTurn")(
+    (input: CivilizationContextForTurnInput) =>
+      composeContext(
+        input,
+        input.source === "explicit" ? explicitReadExecutionPolicy : runtimeExecutionPolicy,
+      ).pipe(Effect.map(({ capability, packet }) => ({ capability, packet }))),
+  );
 
   const forExplicitRead = Effect.fn("CivilizationContextService.forExplicitRead")(
     (input: CivilizationContextExplicitReadInput) => forTurn({ ...input, source: "explicit" }),
   );
 
+  const previewExistingCitizen = Effect.fn("CivilizationContextService.previewExistingCitizen")((
+    input: CivilizationContextExistingCitizenPreviewInput,
+  ) => {
+    const { effective, ...turn } = input;
+    return composeContext(turn, previewExecutionPolicy, effective);
+  });
+
   return {
     listCapabilities,
     forTurn,
     forExplicitRead,
+    previewExistingCitizen,
     analytics,
     listInspections,
     readInspection,
@@ -1891,6 +2092,22 @@ const unavailableContextService = {
       },
       packet: null,
     } satisfies CivilizationContextResponse),
+  previewExistingCitizen: (input: CivilizationContextExistingCitizenPreviewInput) =>
+    Effect.succeed({
+      capability: {
+        providerInstanceId: input.providerInstanceId,
+        support: "unsupported" as const,
+        contextInjection: false,
+        keyedContextReplacement: false,
+        actionablePromptRefresh: false,
+        providerContinuationRefresh: false,
+        messaging: false,
+        detail: "Civilization context is not installed in this runtime layer.",
+      },
+      packet: null,
+      budget: emptyBudget(input.effective.config.context.packetBytes),
+      composition: emptyComposition(),
+    } satisfies CivilizationContextExistingCitizenPreviewResult),
   listInspections: (input: CivilizationContextInspectionListInput) =>
     Effect.succeed({
       projectId: input.projectId,

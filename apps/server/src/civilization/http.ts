@@ -30,6 +30,7 @@ import * as ChronicleService from "./ChronicleService.ts";
 import * as KnowledgeService from "./KnowledgeService.ts";
 import * as MailService from "./MailService.ts";
 import * as OperationsService from "./OperationsService.ts";
+import * as ProjectBriefService from "./ProjectBriefService.ts";
 
 const withCivilizationStorageErrors = <A, R>(
   effect: Effect.Effect<A, ConfigService.CivilizationConfigServiceError, R>,
@@ -110,6 +111,7 @@ export const layer = HttpApiBuilder.group(
     const knowledge = yield* KnowledgeService.CivilizationKnowledgeService;
     const mail = yield* MailService.CivilizationMailService;
     const operations = yield* OperationsService.CivilizationOperationsService;
+    const projectBrief = yield* ProjectBriefService.CivilizationProjectBriefService;
 
     const authorizeRead = (endpoint: string) =>
       Effect.gen(function* () {
@@ -201,6 +203,50 @@ export const layer = HttpApiBuilder.group(
         }),
       )
       .handle(
+        "projectBriefMetadata",
+        Effect.fn("environment.civilization.projectBriefMetadata")(function* (args) {
+          yield* authorizeRead(args.endpoint.name);
+          return yield* projectBrief.readMetadata(args.query.projectId).pipe(
+            Effect.catchTags({
+              SqlError: (cause) => failEnvironmentInternal("internal_error", cause),
+            }),
+          );
+        }),
+      )
+      .handle(
+        "projectBriefDetail",
+        Effect.fn("environment.civilization.projectBriefDetail")(function* (args) {
+          yield* authorizeSettingsWrite(args.endpoint.name);
+          return yield* projectBrief.readDetail(args.query.projectId).pipe(
+            Effect.catchTags({
+              SqlError: (cause) => failEnvironmentInternal("internal_error", cause),
+            }),
+          );
+        }),
+      )
+      .handle(
+        "projectBriefSet",
+        Effect.fn("environment.civilization.projectBriefSet")(function* (args) {
+          yield* authorizeSettingsWrite(args.endpoint.name);
+          return yield* projectBrief.set(args.payload).pipe(
+            Effect.catchTags({
+              SqlError: (cause) => failEnvironmentInternal("internal_error", cause),
+            }),
+          );
+        }),
+      )
+      .handle(
+        "projectBriefClear",
+        Effect.fn("environment.civilization.projectBriefClear")(function* (args) {
+          yield* authorizeSettingsWrite(args.endpoint.name);
+          return yield* projectBrief.clear(args.payload).pipe(
+            Effect.catchTags({
+              SqlError: (cause) => failEnvironmentInternal("internal_error", cause),
+            }),
+          );
+        }),
+      )
+      .handle(
         "citizenDetail",
         Effect.fn("environment.civilization.citizenDetail")(function* (args) {
           yield* authorizeRead(args.endpoint.name);
@@ -212,6 +258,25 @@ export const layer = HttpApiBuilder.group(
             .pipe(
               Effect.catchTags({
                 SqlError: (cause) => failEnvironmentInternal("internal_error", cause),
+              }),
+            );
+        }),
+      )
+      .handle(
+        "citizenSearch",
+        Effect.fn("environment.civilization.citizenSearch")(function* (args) {
+          yield* authorizeRead(args.endpoint.name);
+          return yield* knowledge
+            .searchCitizens({
+              projectId: args.query.projectId,
+              query: args.query.query,
+              limit: args.query.limit === undefined ? undefined : Number(args.query.limit),
+            })
+            .pipe(
+              Effect.catchTags({
+                SqlError: (cause) => failEnvironmentInternal("internal_error", cause),
+                CivilizationKnowledgeInvalidError: (cause) =>
+                  Effect.fail(new EnvironmentHttpBadRequestError({ message: cause.message })),
               }),
             );
         }),

@@ -785,6 +785,7 @@ it.effect("forwards Civilization turn context only after the ownership gate", ()
           McpAppModelContext.layerEmpty,
           Layer.succeed(CivilizationContext.CivilizationContextService, {
             listCapabilities: () => Effect.succeed([]),
+            previewExistingCitizen: () => Effect.die("unused Civilization context preview"),
             forTurn: (input) =>
               Ref.update(order, (entries) => [
                 ...entries,
@@ -832,6 +833,9 @@ it.effect("forwards Civilization turn context only after the ownership gate", ()
                             censusRevision: 4,
                             notesRevision: 5,
                             inboxRevision: 6,
+                            briefRevision: null,
+                            briefBodyBytes: 0,
+                            briefIncluded: false,
                             packetHash: "sentinel-hash",
                             packetBytes: 29,
                             selectedCitizenIds: [],

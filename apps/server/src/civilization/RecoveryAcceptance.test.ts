@@ -30,6 +30,7 @@ import * as ProjectionMaintenance from "../orchestration-v2/ProjectionMaintenanc
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
 import * as ConfigService from "./ConfigService.ts";
 import * as KnowledgeService from "./KnowledgeService.ts";
+import * as OperationsService from "./OperationsService.ts";
 import { civilizationPersistenceParticipant } from "./PersistenceParticipant.ts";
 
 const providerInstanceId = ProviderInstanceId.make("codex");
@@ -126,6 +127,7 @@ const seedLatestFeatureRows = Effect.fn("RecoveryAcceptance.seedLatestFeatureRow
     readonly threadId: ThreadId;
     readonly lastAppliedSequence: number;
     readonly includeRichSnapshot?: boolean;
+    readonly includeProjectBrief?: boolean;
   }) {
     const sql = yield* SqlClient.SqlClient;
     const nameKey = ConfigService.normalizeCivilizationName("Ada Recovery");
@@ -223,6 +225,24 @@ const seedLatestFeatureRows = Effect.fn("RecoveryAcceptance.seedLatestFeatureRow
       ${fixedTime}, 'recipient_settled'
     )
   `;
+
+    if (input.includeProjectBrief !== false) {
+      const projectBriefJson = JSON.stringify({
+        version: 1,
+        summary: "Preserve the recovery fixture exactly.",
+        objectives: ["Keep authoritative Civilization state durable"],
+        constraints: ["Do not synthesize replacement state"],
+        references: [{ kind: "test", reference: "recovery-acceptance" }],
+      });
+      yield* sql`
+        INSERT INTO civilization_project_brief (
+          project_id, revision, content_json, body_bytes, updated_at
+        ) VALUES (
+          ${input.projectId}, 5, ${projectBriefJson}, ${Buffer.byteLength(projectBriefJson, "utf8")},
+          ${fixedTime}
+        )
+      `;
+    }
   },
 );
 
@@ -343,6 +363,18 @@ const readFeatureState = Effect.fn("RecoveryAcceptance.readFeatureState")(functi
         FROM civilization_achievement_awards
         WHERE project_id = ${projectId}
         ORDER BY awarded_at ASC, award_id ASC
+      `),
+    ],
+    projectBrief: [
+      ...(yield* sql<{
+        readonly revision: number;
+        readonly content_json: string | null;
+        readonly body_bytes: number;
+        readonly updated_at: string;
+      }>`
+        SELECT revision, content_json, body_bytes, updated_at
+        FROM civilization_project_brief
+        WHERE project_id = ${projectId}
       `),
     ],
     contextInspections: [
@@ -577,6 +609,65 @@ const makeFileLayer = (dbPath: string) =>
   );
 
 it.effect(
+  "upgrades the released v1.4 migration history through Project Brief without rewriting it",
+  () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      yield* runMigrations({ toMigrationInclusive: 77 });
+      const releasedHistory = yield* sql<{ readonly migration_id: number; readonly name: string }>`
+      SELECT migration_id, name
+      FROM effect_sql_migrations
+      WHERE migration_id BETWEEN 64 AND 77
+      ORDER BY migration_id ASC
+    `;
+      assert.deepEqual(
+        releasedHistory.map((row) => [row.migration_id, row.name]),
+        [
+          [64, "Civilization"],
+          [65, "CivilizationKnowledge"],
+          [66, "CivilizationMail"],
+          [67, "CivilizationOperations"],
+          [68, "CivilizationContextInspection"],
+          [69, "CivilizationPersonalityV2"],
+          [70, "CivilizationContextInspectionReferenceSync"],
+          [71, "CivilizationContextInspectionProviderReasons"],
+          [72, "CivilizationLineageIndex"],
+          [73, "CivilizationChronicle"],
+          [74, "CivilizationAchievements"],
+          [75, "CivilizationCorrespondenceHistory"],
+          [76, "CivilizationContextAnalyticsHourly"],
+          [77, "CivilizationChronicleSourceIndex"],
+        ],
+      );
+
+      assert.deepEqual(
+        (yield* runMigrations()).map(([id, name]) => [id, name]),
+        [
+          [78, "CanonicalizeThreadPullRequestLinks"],
+          [79, "CivilizationProjectBrief"],
+        ],
+      );
+      assert.deepEqual(
+        yield* sql<{ readonly migration_id: number; readonly name: string }>`
+        SELECT migration_id, name
+        FROM effect_sql_migrations
+        WHERE migration_id BETWEEN 64 AND 77
+        ORDER BY migration_id ASC
+      `,
+        releasedHistory,
+        "released Civilization migration IDs and names must remain byte-for-byte ledger-compatible",
+      );
+      assert.deepEqual(
+        yield* sql<{ readonly name: string }>`
+        SELECT name FROM sqlite_master
+        WHERE type = 'table' AND name = 'civilization_project_brief'
+      `,
+        [{ name: "civilization_project_brief" }],
+      );
+    }).pipe(Effect.provide(Layer.fresh(NodeSqliteClient.layer({ filename: ":memory:" })))),
+);
+
+it.effect(
   "migrates 064 identity/config rows to latest without rerolling names, profiles or epochs",
   () =>
     Effect.gen(function* () {
@@ -647,7 +738,7 @@ it.effect(
       const migrated = yield* runMigrations();
       assert.deepEqual(
         migrated.map(([id]) => id),
-        [65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77],
+        [65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79],
       );
       assert.deepEqual(
         (yield* sql<{
@@ -724,6 +815,7 @@ it.effect("rolls back partial 067 DDL and retries without changing retained feat
       threadId,
       lastAppliedSequence: 0,
       includeRichSnapshot: false,
+      includeProjectBrief: false,
     });
     const before = yield* readPreRichFeatureState(projectId);
     yield* assertRetainedStateCoherent(projectId);
@@ -811,6 +903,11 @@ it.effect(
       assert.equal(before.messages[0]?.recipient_delivery_epoch, 7);
       assert.equal(before.messages[0]?.terminal_reason, "recipient_settled");
       assert.isNotNull(before.messages[0]?.terminal_at);
+      assert.equal(before.projectBrief[0]?.revision, 5);
+      assert.include(
+        before.projectBrief[0]?.content_json ?? "",
+        "Preserve the recovery fixture exactly.",
+      );
     }).pipe(Effect.provide(Layer.fresh(makeRecoveryLayer(SqlitePersistence.layerMemory)))),
 );
 
@@ -877,6 +974,7 @@ it.effect("VACUUM INTO snapshot restore preserves config, notes, mail and epochs
       assert.isAbove(snapshotted.chronicle.length, 0);
       assert.lengthOf(snapshotted.contextInspections, 1);
       assert.lengthOf(snapshotted.contextAnalyticsHourly, 1);
+      assert.lengthOf(snapshotted.projectBrief, 1);
       assert.equal(snapshotted.contextAnalyticsHourly[0]?.inspection_count, 1);
       assert.isAbove(snapshotted.projectState[0]?.achievement_revision ?? 0, 0);
       assert.isAbove(snapshotted.projectState[0]?.chronicle_revision ?? 0, 0);
@@ -914,6 +1012,11 @@ it.effect("VACUUM INTO snapshot restore preserves config, notes, mail and epochs
       assert.equal(restored.notes[0]?.body, "snapshot note body");
       assert.equal(restored.messages[0]?.body, "closed mail body");
       assert.equal(restored.messages[0]?.terminal_reason, "recipient_settled");
+      assert.equal(restored.projectBrief[0]?.revision, 5);
+      assert.include(
+        restored.projectBrief[0]?.content_json ?? "",
+        "Preserve the recovery fixture exactly.",
+      );
       assert.equal(restored.contextInspections[0]?.inspection_id, "inspection:recovery:snapshot");
       assert.equal(restored.contextAnalyticsHourly[0]?.inspection_count, 1);
     }).pipe(Effect.provide(makeFileLayer(restoredPath)));
@@ -921,6 +1024,44 @@ it.effect("VACUUM INTO snapshot restore preserves config, notes, mail and epochs
     Effect.ensuring(Effect.sync(() => NodeFS.rmSync(tempDir, { recursive: true, force: true }))),
   );
 });
+
+it.effect(
+  "corrupt Project Brief storage fails export closed instead of returning opaque content",
+  () => {
+    const database = NodeSqliteClient.layer({ filename: ":memory:" });
+    const configLayer = ConfigService.layer.pipe(Layer.provide(database));
+    const operationsLayer = OperationsService.layer.pipe(
+      Layer.provide(Layer.mergeAll(database, configLayer)),
+    );
+    const layer = Layer.mergeAll(database, configLayer, operationsLayer);
+    return Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const operations = yield* OperationsService.CivilizationOperationsService;
+      const projectId = ProjectId.make("project:recovery:corrupt-brief");
+      yield* runMigrations();
+      yield* seedProject({ projectId });
+      const corrupt = '{"version":1,"summary":';
+      yield* sql`
+      INSERT INTO civilization_project_brief (
+        project_id, revision, content_json, body_bytes, updated_at
+      ) VALUES (
+        ${projectId}, 1, ${corrupt}, ${Buffer.byteLength(corrupt, "utf8")}, ${fixedTime}
+      )
+    `;
+
+      const failure = yield* operations.exportProjectData(projectId).pipe(Effect.flip);
+      assert.equal((failure as { readonly _tag?: string })._tag, "CivilizationUnavailableError");
+      assert.equal((failure as { readonly reason?: string }).reason, "corrupt_state");
+      assert.equal(
+        (yield* sql<{ readonly content_json: string }>`
+        SELECT content_json FROM civilization_project_brief WHERE project_id = ${projectId}
+      `)[0]?.content_json,
+        corrupt,
+        "fail-closed reads must not rewrite corrupt authoritative state",
+      );
+    }).pipe(Effect.provide(Layer.fresh(layer)));
+  },
+);
 
 it.effect(
   "partial and corrupt feature state fails writes closed instead of synthesizing replacement state",

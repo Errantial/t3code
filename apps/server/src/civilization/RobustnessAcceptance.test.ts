@@ -36,6 +36,7 @@ import * as ConfigService from "./ConfigService.ts";
 import * as ContextService from "./ContextService.ts";
 import * as KnowledgeService from "./KnowledgeService.ts";
 import * as MailService from "./MailService.ts";
+import * as ProjectBriefService from "./ProjectBriefService.ts";
 
 type FakeProviderCalls = {
   get: number;
@@ -81,9 +82,10 @@ const makeLayerWithDatabase = <E, R>(
   const providers = fakeProviderLayer(calls);
   const mailDependencies = Layer.mergeAll(database, config, providers);
   const mail = MailService.layer.pipe(Layer.provide(mailDependencies));
-  const contextDependencies = Layer.mergeAll(database, config, providers, mail);
+  const projectBrief = ProjectBriefService.layer.pipe(Layer.provide(database));
+  const contextDependencies = Layer.mergeAll(database, config, providers, mail, projectBrief);
   const context = ContextService.layer.pipe(Layer.provide(contextDependencies));
-  return Layer.mergeAll(database, config, knowledge, providers, mail, context);
+  return Layer.mergeAll(database, config, knowledge, providers, mail, projectBrief, context);
 };
 
 const makeLayer = (calls: FakeProviderCalls) =>

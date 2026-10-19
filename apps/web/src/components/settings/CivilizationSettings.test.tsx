@@ -28,6 +28,7 @@ const state = vi.hoisted(() => ({
   scrollTargets: [] as string[],
   scrollResult: false,
   projectInspectionProps: [] as Array<Record<string, unknown>>,
+  projectBriefProps: [] as Array<Record<string, unknown>>,
   contextAnalyticsProps: [] as Array<Record<string, unknown>>,
   contextInspectorProps: [] as Array<Record<string, unknown>>,
 }));
@@ -132,6 +133,13 @@ vi.mock("./CivilizationProjectInspection", () => ({
         Project inspection · {props.targetLabel} · {props.mode}
       </div>
     );
+  },
+}));
+
+vi.mock("./CivilizationProjectBrief", () => ({
+  CivilizationProjectBrief: (props: Record<string, unknown>) => {
+    state.projectBriefProps.push(props);
+    return <div data-testid="civilization-project-brief">Project Brief</div>;
   },
 }));
 
@@ -379,6 +387,7 @@ beforeEach(() => {
   state.scrollTargets = [];
   state.scrollResult = false;
   state.projectInspectionProps = [];
+  state.projectBriefProps = [];
   state.contextAnalyticsProps = [];
   state.contextInspectorProps = [];
 });
@@ -462,6 +471,28 @@ describe("Civilization settings participation editor", () => {
       participation: { ...EFFECTIVE.config.participation, enabled },
     },
     projectRevision,
+  });
+
+  it("mounts Project Brief only inside Configuration with the exact target and permission state", async () => {
+    const { environmentId, projectId } = writableTarget();
+
+    await act(() => {
+      renderer = create(<CivilizationSettingsPanel search={{ view: "configuration" }} />);
+    });
+
+    expect(state.projectBriefProps.at(-1)).toMatchObject({
+      environmentId,
+      projectId,
+      targetLabel: "Writable machine",
+      canRead: true,
+      canWrite: true,
+    });
+
+    state.projectBriefProps = [];
+    await act(() => {
+      renderer!.update(<CivilizationSettingsPanel search={{ view: "overview" }} />);
+    });
+    expect(state.projectBriefProps).toHaveLength(0);
   });
 
   it("stages a scalar locally, validates, re-checks permission, and commits the captured project revision", async () => {

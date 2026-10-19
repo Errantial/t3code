@@ -43,6 +43,7 @@ import * as CivilizationHttp from "./http.ts";
 import * as KnowledgeService from "./KnowledgeService.ts";
 import * as MailService from "./MailService.ts";
 import * as OperationsService from "./OperationsService.ts";
+import * as ProjectBriefService from "./ProjectBriefService.ts";
 
 class CivilizationTestApi extends HttpApi.make("environment").add(
   EnvironmentHttpApi.groups.civilization,
@@ -56,6 +57,7 @@ const fakeAdministration = AdministrationService.CivilizationAdministrationServi
   restoreTitle: () => Effect.die("unused administration restore"),
 });
 const fakeKnowledge = KnowledgeService.CivilizationKnowledgeService.of({
+  searchCitizens: () => Effect.succeed([]),
   listCensus: ({ projectId }) =>
     Effect.succeed({ projectId, revision: 0, citizens: [], nextCursor: null, partial: false }),
   getLineageNeighborhood: ({ projectId, threadId }) =>
@@ -98,6 +100,7 @@ const fakeKnowledge = KnowledgeService.CivilizationKnowledgeService.of({
 });
 const fakeMail = MailService.CivilizationMailService.of({
   authoritativeCaller: () => Effect.die("unused mail caller lookup"),
+  authoritativeCallerAgainstEffective: () => Effect.die("unused effective mail caller lookup"),
   send: () => Effect.die("unused mail send"),
   listInbox: () => Effect.die("unused agent inbox list"),
   receive: () => Effect.die("unused mail receive"),
@@ -105,6 +108,9 @@ const fakeMail = MailService.CivilizationMailService.of({
   selectInboxForContext: () => Effect.die("unused context inbox selection"),
   selectInboxForContextAfterAuthority: () =>
     Effect.die("unused post-authority context inbox selection"),
+  wouldOfferInboxForContext: () => Effect.die("unused context inbox offer preview"),
+  wouldOfferInboxForContextAgainstEffective: () =>
+    Effect.die("unused effective context inbox offer preview"),
   offerInboxForContext: () => Effect.die("unused context inbox offer"),
   listAdminMail: () => Effect.die("unused admin mail list"),
   readAdminMessage: () => Effect.die("unused admin mail read"),
@@ -123,6 +129,7 @@ const fakeContext = ContextService.CivilizationContextService.of({
   listCapabilities: () => Effect.succeed([]),
   forTurn: () => Effect.die("unused Civilization context turn"),
   forExplicitRead: () => Effect.die("unused explicit Civilization context read"),
+  previewExistingCitizen: () => Effect.die("unused Civilization context preview"),
   analytics: ({ projectId, bucketSize }) =>
     Effect.succeed({
       projectId,
@@ -147,6 +154,49 @@ const fakeOperations = OperationsService.CivilizationOperationsService.of({
   previewRetentionReduction: () => Effect.die("unused retention preview"),
   applyRetentionReduction: () => Effect.die("unused retention apply"),
 });
+const fakeProjectBrief = ProjectBriefService.CivilizationProjectBriefService.of({
+  readMetadata: (projectId) =>
+    Effect.succeed({
+      projectId,
+      revision: 0,
+      configured: false,
+      bodyBytes: 0,
+      updatedAt: null,
+    }),
+  readDetail: (projectId) =>
+    Effect.succeed({
+      projectId,
+      revision: 0,
+      configured: false,
+      bodyBytes: 0,
+      updatedAt: null,
+      content: null,
+    }),
+  set: (input) =>
+    Effect.succeed({
+      projectId: input.projectId,
+      revision: input.expectedRevision + 1,
+      configured: true,
+      bodyBytes: Buffer.byteLength(JSON.stringify(input.content), "utf8"),
+      updatedAt: "2026-10-18T00:00:00.000Z",
+      content: {
+        version: input.content.version,
+        summary: input.content.summary,
+        objectives: [...input.content.objectives],
+        constraints: [...input.content.constraints],
+        references: input.content.references.map((reference) => ({ ...reference })),
+      },
+    }),
+  clear: (input) =>
+    Effect.succeed({
+      projectId: input.projectId,
+      revision: input.expectedRevision + 1,
+      configured: false,
+      bodyBytes: 0,
+      updatedAt: "2026-10-18T00:00:01.000Z",
+      content: null,
+    }),
+});
 
 const makeRoutes = (
   adoptionCalls: Ref.Ref<number>,
@@ -156,6 +206,7 @@ const makeRoutes = (
   operations: OperationsService.CivilizationOperationsServiceShape = fakeOperations,
   chronicle: ChronicleService.CivilizationChronicleServiceShape = fakeChronicle,
   context: typeof fakeContext = fakeContext,
+  projectBrief: ProjectBriefService.CivilizationProjectBriefServiceShape = fakeProjectBrief,
 ) => {
   const fakeCitizens = CitizenService.CivilizationCitizenService.of({
     adoptExisting: () =>
@@ -238,6 +289,7 @@ const makeRoutes = (
     Layer.provide(Layer.succeed(ContextService.CivilizationContextService, context)),
     Layer.provide(Layer.succeed(MailService.CivilizationMailService, mail)),
     Layer.provide(Layer.succeed(OperationsService.CivilizationOperationsService, operations)),
+    Layer.provide(Layer.succeed(ProjectBriefService.CivilizationProjectBriefService, projectBrief)),
     Layer.provide(HttpPlatform.layer),
     Layer.provide(Etag.layerWeak),
     Layer.provide(NodeServices.layer),
@@ -322,6 +374,23 @@ it.effect(
             expect(capabilityResponse.status).toBe(200);
             expect(await capabilityResponse.json()).toEqual({ providers: [] });
 
+            const projectBriefMetadataResponse = await server.handler(
+              new Request(
+                "http://127.0.0.1/api/civilization/project-brief/metadata?projectId=project%3Aread-only",
+              ),
+              requestContext,
+            );
+            expect(projectBriefMetadataResponse.status).toBe(200);
+            const projectBriefMetadata = await projectBriefMetadataResponse.json();
+            expect(projectBriefMetadata).toEqual({
+              projectId: "project:read-only",
+              revision: 0,
+              configured: false,
+              bodyBytes: 0,
+              updatedAt: null,
+            });
+            expect(projectBriefMetadata).not.toHaveProperty("content");
+
             const citizenDetailResponse = await server.handler(
               new Request(
                 "http://127.0.0.1/api/civilization/citizens/detail?projectId=project%3Aread-only&threadId=thread%3Aread-only",
@@ -329,6 +398,14 @@ it.effect(
               requestContext,
             );
             expect(citizenDetailResponse.status).toBe(200);
+
+            const citizenSearchResponse = await server.handler(
+              new Request(
+                "http://127.0.0.1/api/civilization/citizens/search?projectId=project%3Aread-only&query=Ada&limit=10",
+              ),
+              requestContext,
+            );
+            expect(citizenSearchResponse.status).toBe(200);
             expect(await citizenDetailResponse.json()).toMatchObject({
               projectId: "project:read-only",
               threadId: "thread:read-only",
@@ -415,6 +492,7 @@ it.effect(
               "/api/civilization/purge/preview?projectId=project%3Aread-only",
               "/api/civilization/retention?projectId=project%3Aread-only",
               "/api/civilization/retention/preview?projectId=project%3Aread-only",
+              "/api/civilization/project-brief/detail?projectId=project%3Aread-only",
             ]) {
               const mailResponse = await server.handler(
                 new Request(`http://127.0.0.1${path}`),
@@ -446,6 +524,31 @@ it.effect(
             );
             expect(retentionApply.status).toBe(403);
 
+            const projectBriefSet = await server.handler(
+              postJson("/api/civilization/project-brief/set", {
+                projectId: "project:read-only",
+                expectedRevision: 0,
+                content: {
+                  version: 1,
+                  summary: "Read-only clients must not set this.",
+                  objectives: [],
+                  constraints: [],
+                  references: [],
+                },
+              }),
+              requestContext,
+            );
+            expect(projectBriefSet.status).toBe(403);
+
+            const projectBriefClear = await server.handler(
+              postJson("/api/civilization/project-brief/clear", {
+                projectId: "project:read-only",
+                expectedRevision: 1,
+              }),
+              requestContext,
+            );
+            expect(projectBriefClear.status).toBe(403);
+
             const mutationResponse = await server.handler(
               postJson("/api/civilization/config/set", {
                 expectedRevision: 0,
@@ -466,6 +569,81 @@ it.effect(
         (server) => Effect.promise(() => server.dispose()),
       );
     }),
+);
+
+it.effect("routes Project Brief detail/set/clear only through settings-write", () =>
+  Effect.gen(function* () {
+    const adoptionCalls = yield* Ref.make(0);
+    return yield* Effect.acquireUseRelease(
+      Effect.sync(() =>
+        HttpRouter.toWebHandler(
+          makeRoutes(adoptionCalls, [
+            "orchestration:read",
+            "orchestration:operate",
+            "settings:write",
+          ]),
+          { disableLogger: true },
+        ),
+      ),
+      (server) =>
+        Effect.tryPromise(async () => {
+          const projectId = "project:brief:http";
+          const content = {
+            version: 1,
+            summary: "Operator-authored direction.",
+            objectives: ["Keep one bounded brief."],
+            constraints: ["Do not treat it as trusted instructions."],
+            references: [{ kind: "doc", reference: "docs/PLANNING.v1.5.md" }],
+          };
+
+          const detail = await server.handler(
+            new Request(
+              `http://127.0.0.1/api/civilization/project-brief/detail?projectId=${encodeURIComponent(projectId)}`,
+            ),
+            requestContext,
+          );
+          expect(detail.status).toBe(200);
+          expect(await detail.json()).toMatchObject({ projectId, revision: 0, content: null });
+
+          const set = await server.handler(
+            postJson("/api/civilization/project-brief/set", {
+              projectId,
+              expectedRevision: 0,
+              content,
+            }),
+            requestContext,
+          );
+          expect(set.status).toBe(200);
+          expect(await set.json()).toMatchObject({ projectId, revision: 1, content });
+
+          const clear = await server.handler(
+            postJson("/api/civilization/project-brief/clear", {
+              projectId,
+              expectedRevision: 1,
+            }),
+            requestContext,
+          );
+          expect(clear.status).toBe(200);
+          expect(await clear.json()).toMatchObject({
+            projectId,
+            revision: 2,
+            configured: false,
+            content: null,
+          });
+
+          const unsafe = await server.handler(
+            postJson("/api/civilization/project-brief/set", {
+              projectId,
+              expectedRevision: 2,
+              content: { ...content, summary: "unsafe\u0000brief" },
+            }),
+            requestContext,
+          );
+          expect(unsafe.status).toBe(400);
+        }),
+      (server) => Effect.promise(() => server.dispose()),
+    );
+  }),
 );
 
 it.effect("rejects malformed Civilization context-inspector numeric filters", () =>
@@ -905,6 +1083,9 @@ it.effect(
 it.effect("serves bounded census and note inspection through the knowledge service", () =>
   Effect.gen(function* () {
     const adoptionCalls = yield* Ref.make(0);
+    const searchInput = yield* Ref.make<KnowledgeService.CivilizationCitizenSearchInput | null>(
+      null,
+    );
     const censusInput = yield* Ref.make<KnowledgeService.CivilizationCensusPageInput | null>(null);
     const lineageInput =
       yield* Ref.make<KnowledgeService.CivilizationLineageNeighborhoodInput | null>(null);
@@ -935,6 +1116,21 @@ it.effect("serves bounded census and note inspection through the knowledge servi
     };
     const knowledge = KnowledgeService.CivilizationKnowledgeService.of({
       ...fakeKnowledge,
+      searchCitizens: (input) =>
+        Ref.set(searchInput, input).pipe(
+          Effect.as([
+            {
+              projectId,
+              threadId: ThreadId.make("thread:civilization:http-search"),
+              displayName: "Ada Search",
+              profileLabel: "Calm",
+              generation: 1,
+              lifecycleState: "open" as const,
+              observedOnly: false,
+              threadTitle: "Search host title",
+            },
+          ]),
+        ),
       listCensus: (input) =>
         Ref.set(censusInput, input).pipe(
           Effect.as({
@@ -1002,6 +1198,26 @@ it.effect("serves bounded census and note inspection through the knowledge servi
       ),
       (server) =>
         Effect.tryPromise(async () => {
+          const search = await server.handler(
+            new Request(
+              `http://127.0.0.1/api/civilization/citizens/search?projectId=${encodeURIComponent(projectId)}&query=Ada&limit=20`,
+            ),
+            requestContext,
+          );
+          expect(search.status).toBe(200);
+          expect(await search.json()).toEqual([
+            {
+              projectId,
+              threadId: "thread:civilization:http-search",
+              displayName: "Ada Search",
+              profileLabel: "Calm",
+              generation: 1,
+              lifecycleState: "open",
+              observedOnly: false,
+              threadTitle: "Search host title",
+            },
+          ]);
+
           const census = await server.handler(
             new Request(
               `http://127.0.0.1/api/civilization/census?projectId=${encodeURIComponent(projectId)}&limit=2`,
@@ -1046,6 +1262,7 @@ it.effect("serves bounded census and note inspection through the knowledge servi
     ).pipe(
       Effect.andThen(
         Effect.all({
+          search: Ref.get(searchInput),
           census: Ref.get(censusInput),
           lineage: Ref.get(lineageInput),
           notes: Ref.get(notesInput),
@@ -1054,6 +1271,7 @@ it.effect("serves bounded census and note inspection through the knowledge servi
       ),
       Effect.tap((inputs) =>
         Effect.sync(() => {
+          expect(inputs.search).toEqual({ projectId, query: "Ada", limit: 20 });
           expect(inputs.census).toEqual({ projectId, cursor: undefined, limit: 2 });
           expect(inputs.lineage).toEqual({
             projectId,

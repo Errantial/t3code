@@ -267,6 +267,112 @@ it.effect("keeps stale revisions and invalid imports atomic", () =>
   }).pipe(Effect.provide(Layer.fresh(layer))),
 );
 
+it.effect("rejects a project write when the inherited environment revision changed", () =>
+  Effect.gen(function* () {
+    const service = yield* ConfigService.CivilizationConfigService;
+    const projectId = ProjectId.make("project:civilization:dual-revision-conflict");
+    yield* insertProject(projectId);
+
+    yield* service.set({
+      expectedRevision: 0,
+      override: {
+        version: CIVILIZATION_CONFIG_VERSION,
+        context: { rosterCount: 12 },
+      },
+    });
+    yield* service.set({
+      projectId,
+      expectedRevision: 0,
+      expectedEnvironmentRevision: 1,
+      override: {
+        version: CIVILIZATION_CONFIG_VERSION,
+        personalities: { rendering: "mild" },
+      },
+    });
+    yield* service.set({
+      expectedRevision: 1,
+      override: {
+        version: CIVILIZATION_CONFIG_VERSION,
+        context: { rosterCount: 10 },
+      },
+    });
+
+    const before = yield* service.readProject(projectId);
+    assert.equal(before.revision, 1);
+    assert.equal(before.override?.personalities?.rendering, "mild");
+
+    const conflict = yield* Effect.flip(
+      service.set({
+        projectId,
+        expectedRevision: 1,
+        expectedEnvironmentRevision: 1,
+        override: {
+          version: CIVILIZATION_CONFIG_VERSION,
+          personalities: { rendering: "rich" },
+        },
+      }),
+    );
+    assert.isTrue(isConflict(conflict));
+    if (isConflict(conflict)) {
+      assert.equal(conflict.scope, "environment");
+      assert.equal(conflict.expectedRevision, 1);
+      assert.equal(conflict.currentRevision, 2);
+    }
+
+    const after = yield* service.readProject(projectId);
+    assert.deepEqual(after, before);
+    const effective = yield* service.getEffective(projectId);
+    assert.equal(effective.environmentRevision, 2);
+    assert.equal(effective.projectRevision, 1);
+    assert.equal(effective.config.personalities.rendering, "mild");
+  }).pipe(Effect.provide(Layer.fresh(layer))),
+);
+
+it.effect("keeps project set behavior compatible when environment CAS is omitted", () =>
+  Effect.gen(function* () {
+    const service = yield* ConfigService.CivilizationConfigService;
+    const projectId = ProjectId.make("project:civilization:dual-revision-optional");
+    yield* insertProject(projectId);
+
+    yield* service.set({
+      expectedRevision: 0,
+      override: {
+        version: CIVILIZATION_CONFIG_VERSION,
+        context: { rosterCount: 12 },
+      },
+    });
+    yield* service.set({
+      projectId,
+      expectedRevision: 0,
+      override: {
+        version: CIVILIZATION_CONFIG_VERSION,
+        personalities: { rendering: "mild" },
+      },
+    });
+    yield* service.set({
+      expectedRevision: 1,
+      override: {
+        version: CIVILIZATION_CONFIG_VERSION,
+        context: { rosterCount: 10 },
+      },
+    });
+
+    const updated = yield* service.set({
+      projectId,
+      expectedRevision: 1,
+      override: {
+        version: CIVILIZATION_CONFIG_VERSION,
+        personalities: { rendering: "rich" },
+      },
+    });
+
+    assert.equal(updated.revision, 2);
+    assert.equal(updated.effective.environmentRevision, 2);
+    assert.equal(updated.effective.projectRevision, 2);
+    assert.equal(updated.effective.config.personalities.rendering, "rich");
+  }).pipe(Effect.provide(Layer.fresh(layer))),
+);
+
 it.effect(
   "fails persisted logical corruption closed without revalidating untouched built-in pools",
   () =>

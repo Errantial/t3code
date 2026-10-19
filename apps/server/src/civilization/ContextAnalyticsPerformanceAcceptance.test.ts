@@ -18,6 +18,7 @@ import { runMigrations } from "../persistence/Migrations.ts";
 import * as ConfigService from "./ConfigService.ts";
 import * as ContextService from "./ContextService.ts";
 import * as MailService from "./MailService.ts";
+import * as ProjectBriefService from "./ProjectBriefService.ts";
 
 const PROJECT_ID = ProjectId.make("project:context-analytics:performance");
 const PROVIDER_ID = ProviderInstanceId.make("codex-main");
@@ -52,10 +53,11 @@ const adapters = Layer.succeed(
   }),
 );
 const mail = MailService.layer.pipe(Layer.provide(Layer.mergeAll(database, adapters)));
+const projectBrief = ProjectBriefService.layer.pipe(Layer.provide(database));
 const context = ContextService.layer.pipe(
-  Layer.provide(Layer.mergeAll(database, config, adapters, mail)),
+  Layer.provide(Layer.mergeAll(database, config, adapters, mail, projectBrief)),
 );
-const testLayer = Layer.mergeAll(database, config, adapters, mail, context);
+const testLayer = Layer.mergeAll(database, config, adapters, mail, projectBrief, context);
 
 it.effect(
   "keeps max-range 100k context analytics bounded under the v1.1 read budget",

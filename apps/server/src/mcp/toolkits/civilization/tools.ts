@@ -1,4 +1,6 @@
 import {
+  CivilizationCitizenSearchRequest,
+  CivilizationCitizenSearchResult,
   CivilizationCitizenSummary,
   CivilizationContextResponse,
   CivilizationInboxListRequest,
@@ -84,6 +86,24 @@ const CivilizationCensusTool = Tool.make("civilization_census", {
   dependencies,
 })
   .annotate(Tool.Title, "List Civilization citizens")
+  .annotate(Tool.Readonly, true)
+  .annotate(Tool.Destructive, false)
+  .annotate(Tool.Idempotent, true);
+
+const CivilizationCitizenSearchTool = Tool.make("civilization_citizen_search", {
+  description:
+    "Search bounded Civilization citizen identity and current host-thread title metadata in one project. Thread callers default to and are restricted to their own project; external clients must pass projectId. This never searches notes, mail, profiles, prompts, or other bodies.",
+  parameters: Schema.Struct({
+    projectId: Schema.optional(ProjectId),
+    query: CivilizationCitizenSearchRequest.fields.query,
+    limit: Schema.optional(CivilizationCitizenSearchRequest.fields.limit),
+  }),
+  success: Schema.Array(CivilizationCitizenSearchResult),
+  failure: readFailure,
+  failureMode: "return",
+  dependencies,
+})
+  .annotate(Tool.Title, "Search Civilization citizens")
   .annotate(Tool.Readonly, true)
   .annotate(Tool.Destructive, false)
   .annotate(Tool.Idempotent, true);
@@ -256,6 +276,7 @@ const CivilizationMailAcknowledgeTool = Tool.make("civilization_mail_acknowledge
 export const CivilizationToolkit = Toolkit.make(
   CivilizationContextTool,
   CivilizationCensusTool,
+  CivilizationCitizenSearchTool,
   CivilizationNoteListTool,
   CivilizationNoteReadTool,
   CivilizationInboxListTool,

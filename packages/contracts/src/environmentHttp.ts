@@ -68,6 +68,7 @@ import {
   PullRequestUnavailableError,
 } from "./pullRequest.ts";
 import {
+  CIVILIZATION_CITIZEN_SEARCH_MAX_LIMIT,
   CivilizationConfigDescription,
   CivilizationConfigDiffResult,
   CivilizationConfigExportResult,
@@ -99,6 +100,8 @@ import {
   CivilizationCapabilitiesResult,
   CivilizationCitizenDetail,
   CivilizationCitizenNotFoundError,
+  CivilizationCitizenSearchQuery,
+  CivilizationCitizenSearchResult,
   CivilizationCitizenReassignmentPreview,
   CivilizationCitizenReassignmentRequest,
   CivilizationCitizenSummary,
@@ -126,6 +129,12 @@ import {
   CivilizationNotesPage,
   CivilizationOperationInvalidError,
   CivilizationProjectDataExport,
+  CivilizationProjectBriefClearRequest,
+  CivilizationProjectBriefConflictError,
+  CivilizationProjectBriefDetail,
+  CivilizationProjectBriefInvalidError,
+  CivilizationProjectBriefMetadata,
+  CivilizationProjectBriefSetRequest,
   CivilizationPurgeApplyRequest,
   CivilizationPurgeConflictError,
   CivilizationPurgePreview,
@@ -725,6 +734,8 @@ const EnvironmentCivilizationErrors = [
   EnvironmentInternalError,
   CivilizationConfigInvalidError,
   CivilizationConfigConflictError,
+  CivilizationProjectBriefInvalidError,
+  CivilizationProjectBriefConflictError,
   CivilizationUnavailableError,
   CivilizationOperationInvalidError,
   CivilizationCitizenNotFoundError,
@@ -755,6 +766,24 @@ const EnvironmentCivilizationCensusQuery = Schema.Struct({
 const EnvironmentCivilizationCitizenDetailQuery = Schema.Struct({
   projectId: ProjectId,
   threadId: ThreadId,
+});
+const EnvironmentCivilizationCitizenSearchLimit = TrimmedNonEmptyString.check(
+  Schema.makeFilter(
+    (value: string) => {
+      const parsed = Number(value);
+      return (
+        Number.isSafeInteger(parsed) &&
+        parsed >= 1 &&
+        parsed <= CIVILIZATION_CITIZEN_SEARCH_MAX_LIMIT
+      );
+    },
+    { expected: `an integer from 1 to ${CIVILIZATION_CITIZEN_SEARCH_MAX_LIMIT}` },
+  ),
+);
+const EnvironmentCivilizationCitizenSearchQuery = Schema.Struct({
+  projectId: ProjectId,
+  query: CivilizationCitizenSearchQuery,
+  limit: Schema.optionalKey(EnvironmentCivilizationCitizenSearchLimit),
 });
 const EnvironmentCivilizationLineageQuery = Schema.Struct({
   projectId: ProjectId,
@@ -1003,11 +1032,51 @@ class EnvironmentCivilizationHttpApi extends HttpApiGroup.make("civilization")
     }).middleware(EnvironmentAuthenticatedAuth),
   )
   .add(
+    HttpApiEndpoint.get("projectBriefMetadata", "/api/civilization/project-brief/metadata", {
+      headers: OptionalBearerHeaders,
+      query: EnvironmentCivilizationProjectQuery,
+      success: CivilizationProjectBriefMetadata,
+      error: EnvironmentCivilizationErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.get("projectBriefDetail", "/api/civilization/project-brief/detail", {
+      headers: OptionalBearerHeaders,
+      query: EnvironmentCivilizationProjectQuery,
+      success: CivilizationProjectBriefDetail,
+      error: EnvironmentCivilizationErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.post("projectBriefSet", "/api/civilization/project-brief/set", {
+      headers: OptionalBearerHeaders,
+      payload: CivilizationProjectBriefSetRequest,
+      success: CivilizationProjectBriefDetail,
+      error: EnvironmentCivilizationErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.post("projectBriefClear", "/api/civilization/project-brief/clear", {
+      headers: OptionalBearerHeaders,
+      payload: CivilizationProjectBriefClearRequest,
+      success: CivilizationProjectBriefDetail,
+      error: EnvironmentCivilizationErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
     HttpApiEndpoint.get("citizenDetail", "/api/civilization/citizens/detail", {
       headers: OptionalBearerHeaders,
       query: EnvironmentCivilizationCitizenDetailQuery,
       success: CivilizationCitizenDetail,
       error: EnvironmentCivilizationErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.get("citizenSearch", "/api/civilization/citizens/search", {
+      headers: OptionalBearerHeaders,
+      query: EnvironmentCivilizationCitizenSearchQuery,
+      success: Schema.Array(CivilizationCitizenSearchResult),
+      error: EnvironmentCivilizationKnowledgeReadErrors,
     }).middleware(EnvironmentAuthenticatedAuth),
   )
   .add(

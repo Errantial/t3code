@@ -24,6 +24,7 @@ import * as ConfigService from "./ConfigService.ts";
 import * as ContextService from "./ContextService.ts";
 import * as KnowledgeService from "./KnowledgeService.ts";
 import * as MailService from "./MailService.ts";
+import * as ProjectBriefService from "./ProjectBriefService.ts";
 
 const PROJECT_ID = ProjectId.make("project:civilization:g7");
 const PROVIDER_ID = ProviderInstanceId.make("codex-main");
@@ -178,9 +179,10 @@ const makeLayer = <E>(
   const mailDependencies = Layer.mergeAll(database, providers);
   const mail = MailService.layer.pipe(Layer.provide(mailDependencies));
   const knowledge = KnowledgeService.layer.pipe(Layer.provide(database));
-  const contextDependencies = Layer.mergeAll(database, config, providers, mail);
+  const projectBrief = ProjectBriefService.layer.pipe(Layer.provide(database));
+  const contextDependencies = Layer.mergeAll(database, config, providers, mail, projectBrief);
   const context = ContextService.layer.pipe(Layer.provide(contextDependencies));
-  return Layer.mergeAll(database, config, providers, mail, knowledge, context);
+  return Layer.mergeAll(database, config, providers, mail, knowledge, projectBrief, context);
 };
 
 const seedFixture = (

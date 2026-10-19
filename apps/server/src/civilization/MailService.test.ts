@@ -1149,6 +1149,107 @@ it.effect(
   },
 );
 
+it.effect("simulates context offers with runtime parity and zero mail mutation", () => {
+  const calls: FakeProviderCalls = { get: 0, unexpectedProviderWork: 0 };
+  return Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    const service = yield* MailService.CivilizationMailService;
+    const projectId = ProjectId.make("project:mail:context-would-offer");
+    const sender: ActorSeed = {
+      threadId: ThreadId.make("thread:mail:context-would-offer:from"),
+      runId: RunId.make("run:mail:context-would-offer:from"),
+    };
+    const recipient: ActorSeed = {
+      threadId: ThreadId.make("thread:mail:context-would-offer:to"),
+      runId: RunId.make("run:mail:context-would-offer:to"),
+    };
+    yield* seedProject(projectId);
+    yield* enableFeature();
+    yield* seedActor(projectId, sender);
+    yield* seedActor(projectId, recipient);
+    const senderCaller = yield* service.authoritativeCaller(callerInput(projectId, sender));
+    const recipientCaller = yield* service.authoritativeCaller(callerInput(projectId, recipient));
+    const first = yield* service.send({
+      caller: senderCaller,
+      targetThreadId: recipient.threadId,
+      clientRequestId: "context:would:first",
+      body: "first",
+    });
+    const second = yield* service.send({
+      caller: senderCaller,
+      targetThreadId: recipient.threadId,
+      clientRequestId: "context:would:second",
+      body: "second",
+    });
+    const third = yield* service.send({
+      caller: senderCaller,
+      targetThreadId: recipient.threadId,
+      clientRequestId: "context:would:third",
+      body: "third",
+    });
+    yield* sql`
+      UPDATE civilization_messages
+      SET acknowledged_at = '2026-10-16T10:01:00.000Z'
+      WHERE message_id = ${second.message.messageId}
+    `;
+
+    const lifecycle = () =>
+      sql<{
+        readonly message_id: string;
+        readonly first_offered_at: string | null;
+        readonly last_offered_at: string | null;
+        readonly offer_count: number;
+      }>`
+        SELECT message_id, first_offered_at, last_offered_at, offer_count
+        FROM civilization_messages
+        WHERE project_id = ${projectId}
+        ORDER BY message_id ASC
+      `;
+    const mailRevision = () =>
+      sql<{ readonly mail_revision: number }>`
+        SELECT mail_revision FROM civilization_project_state
+        WHERE project_id = ${projectId}
+        LIMIT 1
+      `.pipe(Effect.map((rows) => rows[0]!.mail_revision));
+    const requested = [
+      third.message.messageId,
+      first.message.messageId,
+      second.message.messageId,
+      third.message.messageId,
+    ];
+    const beforeLifecycle = yield* lifecycle();
+    const beforeRevision = yield* mailRevision();
+
+    const simulated = yield* service.wouldOfferInboxForContext({
+      caller: recipientCaller,
+      messageIds: requested,
+    });
+    assert.deepEqual(
+      simulated.messages.map((message) => message.messageId),
+      [third.message.messageId, first.message.messageId],
+    );
+    assert.equal(simulated.revision, beforeRevision);
+    assert.deepEqual(yield* lifecycle(), beforeLifecycle);
+    assert.equal(yield* mailRevision(), beforeRevision);
+
+    const offered = yield* service.offerInboxForContext({
+      caller: recipientCaller,
+      messageIds: requested,
+    });
+    assert.deepEqual(
+      offered.messages.map((message) => message.messageId),
+      simulated.messages.map((message) => message.messageId),
+    );
+    const afterLifecycle = yield* lifecycle();
+    const byId = new Map(afterLifecycle.map((row) => [row.message_id, row] as const));
+    assert.equal(byId.get(first.message.messageId)?.offer_count, 1);
+    assert.equal(byId.get(second.message.messageId)?.offer_count, 0);
+    assert.equal(byId.get(third.message.messageId)?.offer_count, 1);
+    assert.isAbove(yield* mailRevision(), beforeRevision);
+    assert.equal(calls.unexpectedProviderWork, 0);
+  }).pipe(Effect.provide(Layer.fresh(makeLayer(calls))));
+});
+
 it.effect("keeps reply references inside the current lifecycle epochs of both participants", () => {
   const calls: FakeProviderCalls = { get: 0, unexpectedProviderWork: 0 };
   return Effect.gen(function* () {

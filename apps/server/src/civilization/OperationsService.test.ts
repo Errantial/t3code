@@ -20,6 +20,14 @@ const database = SqlitePersistence.layerMemory;
 const projectId = ProjectId.make("project:civilization:operations");
 const threadA = ThreadId.make("thread:civilization:operations:a");
 const threadB = ThreadId.make("thread:civilization:operations:b");
+const projectBriefContent = {
+  version: 1,
+  summary: "Keep the release safe and reviewable.",
+  objectives: ["Ship Project Brief lifecycle integration"],
+  constraints: ["Do not broaden authority"],
+  references: [{ kind: "issue", reference: "V15-1" }],
+} as const;
+const projectBriefJson = JSON.stringify(projectBriefContent);
 
 const layer = (() => {
   const config = ConfigService.layer.pipe(Layer.provide(database));
@@ -155,6 +163,11 @@ const seedSensitiveData = Effect.fn("OperationsService.test.seedSensitiveData")(
       project_id, scope_kind, scope_id, window_start_minute, accepted_count, updated_at
     ) VALUES (${projectId}, 'project', ${projectId}, '2026-10-16T00:00:00Z', 1, '2026-10-16T00:00:00.000Z')
   `;
+  yield* sql`
+    INSERT INTO civilization_project_brief (project_id, revision, content_json, body_bytes, updated_at)
+    VALUES (${projectId}, 3, ${projectBriefJson}, ${Buffer.byteLength(projectBriefJson, "utf8")},
+      '2026-10-16T00:00:00.000Z')
+  `;
 });
 
 const setup = Effect.gen(function* () {
@@ -180,13 +193,16 @@ it.effect(
       const operations = yield* OperationsService.CivilizationOperationsService;
       yield* setup;
       const exported = yield* operations.exportProjectData(projectId);
-      assert.equal(exported.schemaVersion, 3);
+      assert.equal(exported.schemaVersion, 4);
       assert.equal(exported.projectRevision, 1);
       assert.equal(exported.citizens.length, 2);
       assert.equal(exported.notes.length, 2);
       assert.equal(exported.mail.length, 2);
       assert.equal(exported.chronicle.length, 5);
       assert.equal(exported.achievements.length, 1);
+      assert.deepEqual(exported.projectBrief?.content, projectBriefContent);
+      assert.equal(exported.projectBrief?.revision, 3);
+      assert.isTrue(exported.projectBrief?.configured ?? false);
       assert.equal(
         (exported.achievements[0] as { readonly achievement_id?: string }).achievement_id,
         "project_founder",
@@ -204,6 +220,7 @@ it.effect(
       assert.include(serialized, "note-body-one");
       assert.include(serialized, "mail-body-one");
       assert.include(serialized, "private rich style text");
+      assert.include(serialized, "Keep the release safe and reviewable.");
       assert.notInclude(serialized, "accessToken");
       assert.notInclude(serialized, "refreshToken");
       assert.notInclude(serialized, "providerCredential");
@@ -214,6 +231,19 @@ it.effect(
       assert.notInclude(serializedChronicle, "mail-body-one");
       assert.notInclude(serializedChronicle, "private rich style text");
       assert.notInclude(serializedChronicle, "historical-packet-secret");
+
+      const sql = yield* SqlClient.SqlClient;
+      yield* sql`
+        UPDATE civilization_project_brief
+        SET revision = 4, content_json = NULL, body_bytes = 0,
+            updated_at = '2026-10-16T00:30:00.000Z'
+        WHERE project_id = ${projectId}
+      `;
+      const cleared = yield* operations.exportProjectData(projectId);
+      assert.equal(cleared.projectBrief?.revision, 4);
+      assert.isFalse(cleared.projectBrief?.configured ?? true);
+      assert.equal(cleared.projectBrief?.bodyBytes, 0);
+      assert.isNull(cleared.projectBrief?.content ?? null);
     }).pipe(Effect.provide(Layer.fresh(layer))),
 );
 
@@ -238,6 +268,8 @@ it.effect("previews exact purge counts/body bytes and rejects a stale preview", 
       quotaWindows: 1,
       projectConfigRows: 1,
       projectStateRows: 1,
+      projectBriefRows: 1,
+      projectBriefBodyBytes: Buffer.byteLength(projectBriefJson, "utf8"),
     });
     yield* sql`
       INSERT INTO civilization_notes (
@@ -252,6 +284,36 @@ it.effect("previews exact purge counts/body bytes and rejects a stale preview", 
       .pipe(Effect.flip);
     assert.equal((conflict as { readonly code?: string }).code, "civilization_purge_conflict");
   }).pipe(Effect.provide(Layer.fresh(layer))),
+);
+
+it.effect(
+  "binds purge approval to the Project Brief revision even when count and bytes are unchanged",
+  () =>
+    Effect.gen(function* () {
+      const operations = yield* OperationsService.CivilizationOperationsService;
+      const sql = yield* SqlClient.SqlClient;
+      yield* setup;
+      yield* disableParticipation;
+      const preview = yield* operations.previewPurge(projectId);
+      yield* sql`
+      UPDATE civilization_project_brief
+      SET revision = revision + 1, updated_at = '2026-10-16T00:20:00.000Z'
+      WHERE project_id = ${projectId}
+    `;
+      const current = yield* operations.previewPurge(projectId);
+      assert.deepEqual(current.counts, preview.counts);
+      assert.notEqual(current.previewToken, preview.previewToken);
+      const conflict = yield* operations
+        .applyPurge({ projectId, expectedPreviewToken: preview.previewToken, batchSize: 100 })
+        .pipe(Effect.flip);
+      assert.equal((conflict as { readonly code?: string }).code, "civilization_purge_conflict");
+      assert.equal(
+        (yield* sql<{ readonly count: number }>`
+        SELECT COUNT(*) AS count FROM civilization_project_brief WHERE project_id = ${projectId}
+      `)[0]?.count,
+        1,
+      );
+    }).pipe(Effect.provide(Layer.fresh(layer))),
 );
 
 it.effect("requires live-project participation disabled before first purge apply", () =>
@@ -384,6 +446,13 @@ it.effect(
         2,
         "citizen identity is never a retention-cleanup candidate",
       );
+      assert.equal(
+        (yield* sql<{ readonly count: number }>`
+          SELECT COUNT(*) AS count FROM civilization_project_brief WHERE project_id = ${projectId}
+        `)[0]?.count,
+        1,
+        "Project Brief state is not an age-based retention-cleanup candidate",
+      );
     }).pipe(Effect.provide(Layer.fresh(layer))),
 );
 
@@ -438,6 +507,7 @@ it.effect(
         "civilization_mail_quota_windows",
         "civilization_messages",
         "civilization_notes",
+        "civilization_project_brief",
         "civilization_citizens",
         "civilization_project_config",
         "civilization_project_state",

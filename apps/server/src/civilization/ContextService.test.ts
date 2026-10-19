@@ -22,6 +22,7 @@ import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as ConfigService from "./ConfigService.ts";
 import * as ContextService from "./ContextService.ts";
 import * as MailService from "./MailService.ts";
+import * as ProjectBriefService from "./ProjectBriefService.ts";
 
 const database = SqlitePersistence.layerMemory;
 
@@ -68,12 +69,16 @@ const makeLayer = (
   const config = ConfigService.layer.pipe(Layer.provide(database));
   const registry = providerLayer(drivers, overrides);
   const mail = MailService.layer.pipe(Layer.provide(Layer.mergeAll(database, registry)));
+  const projectBrief = ProjectBriefService.layer.pipe(Layer.provide(database));
   return Layer.mergeAll(
     database,
     config,
     registry,
     mail,
-    ContextService.layer.pipe(Layer.provide(Layer.mergeAll(database, config, registry, mail))),
+    projectBrief,
+    ContextService.layer.pipe(
+      Layer.provide(Layer.mergeAll(database, config, registry, mail, projectBrief)),
+    ),
   );
 };
 
@@ -238,6 +243,16 @@ const parsePacket = (text: string) =>
       readonly axiom?: string;
       readonly voice?: string;
       readonly text: string;
+    };
+    readonly brief?: {
+      readonly revision: number;
+      readonly content: {
+        readonly version: 1;
+        readonly summary: string;
+        readonly objectives: ReadonlyArray<string>;
+        readonly constraints: ReadonlyArray<string>;
+        readonly references: ReadonlyArray<{ readonly kind: string; readonly reference: string }>;
+      };
     };
     readonly census: {
       readonly partial: boolean;
@@ -694,6 +709,143 @@ it.effect(
 );
 
 it.effect(
+  "includes the whole Project Brief before bounded sections and revises on update/clear",
+  () => {
+    return Effect.gen(function* () {
+      const service = yield* ContextService.CivilizationContextService;
+      const projectBrief = yield* ProjectBriefService.CivilizationProjectBriefService;
+      yield* setup({
+        packetBytes: 16 * 1024,
+        rosterCount: 1,
+        noteCount: 1,
+        inboxExcerptCount: 0,
+        selection: "stable_id",
+      });
+      yield* seedCitizen({ id: ThreadId.make("thread:brief:peer"), name: "Brief Peer" });
+      yield* seedNote({ id: "note:brief", body: "bounded note after brief" });
+      const created = yield* projectBrief.set({
+        projectId,
+        expectedRevision: 0,
+        content: {
+          version: 1,
+          summary: "Keep the shared packet focused on the release goal.",
+          objectives: ["Ship the bounded context path."],
+          constraints: ["Do not widen authority."],
+          references: [{ kind: "issue", reference: "V15-1" }],
+        },
+      });
+
+      const first = yield* service.forTurn(turnInput("codex-main"));
+      assert.isNotNull(first.packet);
+      const firstPacket = parsePacket(first.packet!.text);
+      assert.equal(firstPacket.brief?.revision, created.revision);
+      assert.deepEqual(firstPacket.brief?.content, created.content);
+      assert.isBelow(first.packet!.text.indexOf('"brief"'), first.packet!.text.indexOf('"census"'));
+      assert.equal(first.packet!.reference.briefRevision, created.revision);
+      assert.equal(first.packet!.reference.briefBodyBytes, created.bodyBytes);
+      assert.isTrue(first.packet!.reference.briefIncluded);
+      const firstInspection = (yield* service.listInspections({ projectId })).inspections[0]!;
+      assert.deepEqual(firstInspection.composition.brief, {
+        candidates: 1,
+        included: 1,
+        omitted: 0,
+      });
+      assert.isAbove(firstInspection.budget.briefBytes, 0);
+      assert.equal(firstInspection.briefRevision, created.revision);
+      assert.equal(firstInspection.briefBodyBytes, created.bodyBytes);
+      assert.isTrue(firstInspection.briefIncluded);
+
+      const updated = yield* projectBrief.set({
+        projectId,
+        expectedRevision: created.revision,
+        content: {
+          ...created.content!,
+          summary: "Keep the shared packet focused on the revised release goal.",
+        },
+      });
+      const second = yield* service.forTurn(turnInput("codex-main", { providerTurnOrdinal: 2 }));
+      assert.isNotNull(second.packet);
+      assert.notEqual(second.packet!.revision, first.packet!.revision);
+      assert.equal(parsePacket(second.packet!.text).brief?.revision, updated.revision);
+      assert.equal(
+        parsePacket(second.packet!.text).brief?.content.summary,
+        updated.content?.summary,
+      );
+
+      const cleared = yield* projectBrief.clear({
+        projectId,
+        expectedRevision: updated.revision,
+      });
+      const third = yield* service.forTurn(turnInput("codex-main", { providerTurnOrdinal: 3 }));
+      assert.isNotNull(third.packet);
+      assert.isUndefined(parsePacket(third.packet!.text).brief);
+      assert.notEqual(third.packet!.revision, second.packet!.revision);
+      assert.equal(third.packet!.reference.briefRevision, cleared.revision);
+      assert.equal(third.packet!.reference.briefBodyBytes, 0);
+      assert.isFalse(third.packet!.reference.briefIncluded);
+    }).pipe(Effect.provide(Layer.fresh(makeLayer({ "codex-main": "codex" }))));
+  },
+);
+
+it.effect("omits a configured Project Brief whole when it does not fit the packet budget", () => {
+  return Effect.gen(function* () {
+    const service = yield* ContextService.CivilizationContextService;
+    const config = yield* ConfigService.CivilizationConfigService;
+    const projectBrief = yield* ProjectBriefService.CivilizationProjectBriefService;
+    yield* setup({
+      packetBytes: 16 * 1024,
+      rosterCount: 0,
+      noteCount: 0,
+      inboxExcerptCount: 0,
+    });
+    const baseline = yield* service.forTurn(turnInput("codex-main"));
+    assert.isNotNull(baseline.packet);
+    const baselineInspection = (yield* service.listInspections({ projectId })).inspections[0]!;
+    const summary = `oversized-for-packet-${"x".repeat(1800)}`;
+    const detail = yield* projectBrief.set({
+      projectId,
+      expectedRevision: 0,
+      content: {
+        version: 1,
+        summary,
+        objectives: [],
+        constraints: [],
+        references: [],
+      },
+    });
+    yield* config.set({
+      expectedRevision: 1,
+      override: {
+        version: CIVILIZATION_CONFIG_VERSION,
+        participation: { enabled: true },
+        context: {
+          packetBytes: baselineInspection.budget.requiredBytes + 64,
+          rosterCount: 0,
+          noteCount: 0,
+          inboxExcerptCount: 0,
+        },
+      },
+    });
+
+    const response = yield* service.forTurn(turnInput("codex-main", { providerTurnOrdinal: 2 }));
+    assert.isNotNull(response.packet);
+    assert.isUndefined(parsePacket(response.packet!.text).brief);
+    assert.notInclude(response.packet!.text, summary);
+    assert.equal(response.packet!.reference.briefRevision, detail.revision);
+    assert.equal(response.packet!.reference.briefBodyBytes, detail.bodyBytes);
+    assert.isFalse(response.packet!.reference.briefIncluded);
+    const inspection = (yield* service.listInspections({ projectId })).inspections.find(
+      (entry) => entry.providerTurnOrdinal === 2,
+    )!;
+    assert.deepEqual(inspection.composition.brief, { candidates: 1, included: 0, omitted: 1 });
+    assert.equal(inspection.budget.briefBytes, 0);
+    assert.equal(inspection.briefRevision, detail.revision);
+    assert.equal(inspection.briefBodyBytes, detail.bodyBytes);
+    assert.isFalse(inspection.briefIncluded);
+  }).pipe(Effect.provide(Layer.fresh(makeLayer({ "codex-main": "codex" }))));
+});
+
+it.effect(
   "keeps profile labels and style text out of provider packets when rendering is off",
   () => {
     return Effect.gen(function* () {
@@ -1090,6 +1242,89 @@ it.effect(
     }).pipe(Effect.provide(Layer.fresh(makeLayer({ "codex-main": "codex" }))));
   },
 );
+
+it.effect("matches read-only mail simulation with runtime packet inbox selection", () => {
+  return Effect.gen(function* () {
+    const service = yield* ContextService.CivilizationContextService;
+    const mail = yield* MailService.CivilizationMailService;
+    const sql = yield* SqlClient.SqlClient;
+    yield* setup({
+      packetBytes: 4096,
+      inboxExcerptCount: 2,
+      selection: "stable_id",
+    });
+    const firstId = yield* seedMail({ id: "mail:parity:a", body: "first" });
+    const secondId = yield* seedMail({ id: "mail:parity:b", body: "second" });
+    const input = turnInput("codex-main");
+    const caller = yield* mail.authoritativeCaller({
+      projectId: input.projectId,
+      threadId: input.threadId,
+      runId: input.runId,
+      providerInstanceId: input.providerInstanceId,
+      runtimeMode: input.runtimeMode,
+      interactionMode: input.interactionMode,
+    });
+    const beforeSimulation = (yield* sql<{
+      readonly mail_revision: number;
+      readonly reference_count: number;
+      readonly inspection_count: number;
+    }>`
+      SELECT
+        COALESCE((SELECT mail_revision FROM civilization_project_state WHERE project_id = ${projectId}), 0) AS mail_revision,
+        (SELECT COUNT(*) FROM civilization_context_references WHERE project_id = ${projectId}) AS reference_count,
+        (SELECT COUNT(*) FROM civilization_context_inspections WHERE project_id = ${projectId}) AS inspection_count
+    `)[0]!;
+
+    const simulated = yield* mail.wouldOfferInboxForContext({
+      caller,
+      messageIds: [firstId, secondId],
+    });
+    assert.deepEqual(
+      simulated.messages.map((message) => message.messageId),
+      [firstId, secondId],
+    );
+    assert.deepEqual(
+      yield* sql<{ readonly message_id: string; readonly offer_count: number }>`
+        SELECT message_id, offer_count FROM civilization_messages
+        WHERE project_id = ${projectId}
+        ORDER BY message_id ASC
+      `,
+      [
+        { message_id: firstId, offer_count: 0 },
+        { message_id: secondId, offer_count: 0 },
+      ],
+    );
+    const afterSimulation = (yield* sql<{
+      readonly mail_revision: number;
+      readonly reference_count: number;
+      readonly inspection_count: number;
+    }>`
+      SELECT
+        COALESCE((SELECT mail_revision FROM civilization_project_state WHERE project_id = ${projectId}), 0) AS mail_revision,
+        (SELECT COUNT(*) FROM civilization_context_references WHERE project_id = ${projectId}) AS reference_count,
+        (SELECT COUNT(*) FROM civilization_context_inspections WHERE project_id = ${projectId}) AS inspection_count
+    `)[0]!;
+    assert.deepEqual(afterSimulation, beforeSimulation);
+
+    const response = yield* service.forTurn(input);
+    assert.isNotNull(response.packet);
+    assert.deepEqual(
+      response.packet!.reference.selectedInboxIds,
+      simulated.messages.map((message) => message.messageId),
+    );
+    assert.deepEqual(
+      yield* sql<{ readonly message_id: string; readonly offer_count: number }>`
+        SELECT message_id, offer_count FROM civilization_messages
+        WHERE project_id = ${projectId}
+        ORDER BY message_id ASC
+      `,
+      [
+        { message_id: firstId, offer_count: 1 },
+        { message_id: secondId, offer_count: 1 },
+      ],
+    );
+  }).pipe(Effect.provide(Layer.fresh(makeLayer({ "codex-main": "codex" }))));
+});
 
 it.effect(
   "keeps explicit context reads body-free and mail-state read-only while revising on mail state",

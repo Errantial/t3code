@@ -18,6 +18,7 @@ import {
   CivilizationMailInvalidError,
   CivilizationMailNotFoundError,
   CivilizationMailQuotaError,
+  type CivilizationEffectiveConfig,
   CivilizationUnavailableError,
   type CivilizationMailReceiveResult,
   type CivilizationMailSendResult,
@@ -768,7 +769,10 @@ const make = Effect.gen(function* () {
 
   const assertFreshCaller = Effect.fn("CivilizationMail.assertFreshCaller")(function* (
     caller: CivilizationMailCaller,
-    effective: Effect.Success<ReturnType<typeof getEffectiveCivilizationConfig>>,
+    effective: Pick<
+      CivilizationEffectiveConfig,
+      "config" | "environmentRevision" | "projectRevision"
+    >,
     preloaded?: Effect.Success<ReturnType<typeof assertBasePrincipal>>,
   ) {
     if (!effective.config.participation.enabled || effective.config.participation.emergencyOff) {
@@ -840,12 +844,15 @@ const make = Effect.gen(function* () {
     } as const;
   });
 
-  const authoritativeCaller = Effect.fn("CivilizationMail.authoritativeCaller")(function* (
+  const authoritativeCallerAgainstEffective = Effect.fn(
+    "CivilizationMail.authoritativeCallerAgainstEffective",
+  )(function* (
     input: CivilizationMailCallerInput,
+    effective: Pick<
+      CivilizationEffectiveConfig,
+      "config" | "environmentRevision" | "projectRevision"
+    >,
   ) {
-    const effective = yield* getEffectiveCivilizationConfig(input.projectId).pipe(
-      Effect.provideService(SqlClient.SqlClient, sql),
-    );
     const base = yield* assertBasePrincipal(input);
     if (base.citizen.observed_only === 1) {
       return yield* denied(
@@ -876,6 +883,15 @@ const make = Effect.gen(function* () {
       runtimeMode: fresh.runtimeMode,
       interactionMode: fresh.interactionMode,
     } satisfies CivilizationMailCaller;
+  });
+
+  const authoritativeCaller = Effect.fn("CivilizationMail.authoritativeCaller")(function* (
+    input: CivilizationMailCallerInput,
+  ) {
+    const effective = yield* getEffectiveCivilizationConfig(input.projectId).pipe(
+      Effect.provideService(SqlClient.SqlClient, sql),
+    );
+    return yield* authoritativeCallerAgainstEffective(input, effective);
   });
 
   const receiptExpiry = (days: number) => `+${days} days`;
@@ -1728,6 +1744,104 @@ const make = Effect.gen(function* () {
       .map((row) => ({ message: messageBody(row) }) satisfies CivilizationMailContextCandidate);
   });
 
+  const contextOfferEligibility = Effect.fn("CivilizationMail.contextOfferEligibility")(
+    function* (input: {
+      readonly caller: CivilizationMailCaller;
+      readonly messageIds: ReadonlyArray<CivilizationMessageIdType>;
+      readonly effective?:
+        | Pick<CivilizationEffectiveConfig, "config" | "environmentRevision" | "projectRevision">
+        | undefined;
+    }) {
+      const effective =
+        input.effective ??
+        (yield* getEffectiveCivilizationConfig(input.caller.projectId).pipe(
+          Effect.provideService(SqlClient.SqlClient, sql),
+        ));
+      const fresh = yield* assertFreshCaller(input.caller, effective);
+      const time = yield* currentTime(sql);
+      const messageIds = [...new Set(input.messageIds)];
+      const candidates =
+        messageIds.length === 0
+          ? []
+          : yield* sql<MessageRow>`
+              SELECT message_id, project_id, sender_thread_id, sender_name_at_send,
+                     sender_citizen_epoch, sender_run_id, recipient_thread_id, recipient_delivery_epoch,
+                     reply_to_message_id, body, body_bytes, accepted_runtime_mode,
+                     accepted_interaction_mode, accepted_environment_revision, accepted_project_revision,
+                     accepted_at, expires_at, terminal_retention_days, first_offered_at, last_offered_at,
+                     offer_count, acknowledged_at, terminal_at, terminal_reason
+              FROM civilization_messages
+              WHERE project_id = ${input.caller.projectId}
+                AND message_id IN ${sql.in(messageIds)}
+            `;
+      const candidatesById = new Map(candidates.map((row) => [row.message_id, row] as const));
+      const eligible = messageIds.flatMap((messageId) => {
+        const row = candidatesById.get(messageId);
+        if (
+          row === undefined ||
+          row.recipient_thread_id !== input.caller.threadId ||
+          row.recipient_delivery_epoch !== input.caller.deliveryEpoch ||
+          row.terminal_at !== null ||
+          row.acknowledged_at !== null ||
+          row.expires_at <= time.now ||
+          exceededDispatchModeLimit(
+            {
+              runtimeMode: row.accepted_runtime_mode,
+              interactionMode: row.accepted_interaction_mode,
+            },
+            { runtimeMode: fresh.runtimeMode, interactionMode: fresh.interactionMode },
+          ) !== undefined
+        ) {
+          return [];
+        }
+        return [row];
+      });
+      return { offeredAt: time.now, messageIds, eligible } as const;
+    },
+  );
+
+  const wouldOfferInboxForContext = Effect.fn("CivilizationMail.wouldOfferInboxForContext")(
+    function* (input: {
+      readonly caller: CivilizationMailCaller;
+      readonly messageIds: ReadonlyArray<CivilizationMessageIdType>;
+    }) {
+      const eligible = yield* contextOfferEligibility(input);
+      const revision =
+        (yield* sql<{ readonly mail_revision: number }>`
+          SELECT mail_revision FROM civilization_project_state
+          WHERE project_id = ${input.caller.projectId} LIMIT 1
+        `)[0]?.mail_revision ?? 0;
+      return {
+        revision,
+        offeredAt: eligible.offeredAt,
+        messages: eligible.eligible.map(messageBody),
+      } as const;
+    },
+  );
+
+  const wouldOfferInboxForContextAgainstEffective = Effect.fn(
+    "CivilizationMail.wouldOfferInboxForContextAgainstEffective",
+  )(function* (input: {
+    readonly caller: CivilizationMailCaller;
+    readonly messageIds: ReadonlyArray<CivilizationMessageIdType>;
+    readonly effective: Pick<
+      CivilizationEffectiveConfig,
+      "config" | "environmentRevision" | "projectRevision"
+    >;
+  }) {
+    const eligible = yield* contextOfferEligibility(input);
+    const revision =
+      (yield* sql<{ readonly mail_revision: number }>`
+        SELECT mail_revision FROM civilization_project_state
+        WHERE project_id = ${input.caller.projectId} LIMIT 1
+      `)[0]?.mail_revision ?? 0;
+    return {
+      revision,
+      offeredAt: eligible.offeredAt,
+      messages: eligible.eligible.map(messageBody),
+    } as const;
+  });
+
   const offerInboxForContext = Effect.fn("CivilizationMail.offerInboxForContext")(
     function* (input: {
       readonly caller: CivilizationMailCaller;
@@ -1735,55 +1849,20 @@ const make = Effect.gen(function* () {
     }) {
       return yield* sql.withTransaction(
         Effect.gen(function* () {
-          const effective = yield* getEffectiveCivilizationConfig(input.caller.projectId).pipe(
-            Effect.provideService(SqlClient.SqlClient, sql),
-          );
-          const fresh = yield* assertFreshCaller(input.caller, effective);
-          const time = yield* currentTime(sql);
-          const messageIds = [...new Set(input.messageIds)];
-          const candidates =
-            messageIds.length === 0
-              ? []
-              : yield* sql<MessageRow>`
-                  SELECT message_id, project_id, sender_thread_id, sender_name_at_send,
-                         sender_citizen_epoch, sender_run_id, recipient_thread_id, recipient_delivery_epoch,
-                         reply_to_message_id, body, body_bytes, accepted_runtime_mode,
-                         accepted_interaction_mode, accepted_environment_revision, accepted_project_revision,
-                         accepted_at, expires_at, terminal_retention_days, first_offered_at, last_offered_at,
-                         offer_count, acknowledged_at, terminal_at, terminal_reason
-                  FROM civilization_messages
-                  WHERE project_id = ${input.caller.projectId}
-                    AND message_id IN ${sql.in(messageIds)}
-                `;
-          const eligibleIds = candidates
-            .filter(
-              (row) =>
-                row.recipient_thread_id === input.caller.threadId &&
-                row.recipient_delivery_epoch === input.caller.deliveryEpoch &&
-                row.terminal_at === null &&
-                row.acknowledged_at === null &&
-                row.expires_at > time.now &&
-                exceededDispatchModeLimit(
-                  {
-                    runtimeMode: row.accepted_runtime_mode,
-                    interactionMode: row.accepted_interaction_mode,
-                  },
-                  { runtimeMode: fresh.runtimeMode, interactionMode: fresh.interactionMode },
-                ) === undefined,
-            )
-            .map((row) => row.message_id);
+          const eligible = yield* contextOfferEligibility(input);
+          const eligibleIds = eligible.eligible.map((row) => row.message_id);
           const updated =
             eligibleIds.length === 0
               ? []
               : yield* sql<MessageRow>`
                   UPDATE civilization_messages
-                  SET first_offered_at = COALESCE(first_offered_at, ${time.now}),
-                      last_offered_at = ${time.now}, offer_count = offer_count + 1
+                  SET first_offered_at = COALESCE(first_offered_at, ${eligible.offeredAt}),
+                      last_offered_at = ${eligible.offeredAt}, offer_count = offer_count + 1
                   WHERE project_id = ${input.caller.projectId}
                     AND message_id IN ${sql.in(eligibleIds)}
                     AND recipient_thread_id = ${input.caller.threadId}
                     AND recipient_delivery_epoch = ${input.caller.deliveryEpoch}
-                    AND terminal_at IS NULL AND acknowledged_at IS NULL AND expires_at > ${time.now}
+                    AND terminal_at IS NULL AND acknowledged_at IS NULL AND expires_at > ${eligible.offeredAt}
                   RETURNING message_id, project_id, sender_thread_id, sender_name_at_send,
                             sender_citizen_epoch, sender_run_id, recipient_thread_id, recipient_delivery_epoch,
                             reply_to_message_id, body, body_bytes, accepted_runtime_mode,
@@ -1792,7 +1871,7 @@ const make = Effect.gen(function* () {
                             offer_count, acknowledged_at, terminal_at, terminal_reason
                 `;
           const updatedById = new Map(updated.map((row) => [row.message_id, row] as const));
-          const offered = messageIds.flatMap((messageId) => {
+          const offered = eligible.messageIds.flatMap((messageId) => {
             const row = updatedById.get(messageId);
             return row === undefined ? [] : [row];
           });
@@ -1803,7 +1882,7 @@ const make = Effect.gen(function* () {
           `)[0]?.mail_revision ?? 0;
           return {
             revision,
-            offeredAt: time.now,
+            offeredAt: eligible.offeredAt,
             messages: offered.map(messageBody),
           } as const;
         }),
@@ -2454,12 +2533,15 @@ const make = Effect.gen(function* () {
 
   return {
     authoritativeCaller,
+    authoritativeCallerAgainstEffective,
     send,
     listInbox,
     receive,
     acknowledge,
     selectInboxForContext,
     selectInboxForContextAfterAuthority,
+    wouldOfferInboxForContext,
+    wouldOfferInboxForContextAgainstEffective,
     offerInboxForContext,
     listAdminMail,
     readAdminMessage,
@@ -2474,12 +2556,15 @@ export type CivilizationMailServiceShape = Effect.Success<typeof make>;
 const unavailable = () => Effect.die("Civilization mail is not installed in this runtime layer.");
 const unavailableService = {
   authoritativeCaller: () => unavailable(),
+  authoritativeCallerAgainstEffective: () => unavailable(),
   send: () => unavailable(),
   listInbox: () => unavailable(),
   receive: () => unavailable(),
   acknowledge: () => unavailable(),
   selectInboxForContext: () => unavailable(),
   selectInboxForContextAfterAuthority: () => unavailable(),
+  wouldOfferInboxForContext: () => unavailable(),
+  wouldOfferInboxForContextAgainstEffective: () => unavailable(),
   offerInboxForContext: () => unavailable(),
   listAdminMail: () => unavailable(),
   readAdminMessage: () => unavailable(),

@@ -1,7 +1,10 @@
 // @effect-diagnostics nodeBuiltinImport:off preferSchemaOverJson:off -- export snapshots and preview hashes are deliberate JSON boundaries.
 import {
   CIVILIZATION_EXPORT_SCHEMA_VERSION,
+  type CivilizationProjectBriefContentV1,
+  type CivilizationProjectBriefDetail,
   CivilizationPurgeConflictError,
+  CivilizationUnavailableError,
   type CivilizationProjectDataExport,
   type CivilizationPurgeCounts,
   type CivilizationPurgePreview,
@@ -49,6 +52,22 @@ type ConfigRow = { readonly revision: number };
 type CountRow = { readonly count: number; readonly bytes: number };
 type ThreadRow = { readonly thread_id: string };
 type DeletedProjectRow = { readonly deleted_at: string | null };
+type ProjectBriefRow = {
+  readonly project_id: ProjectId;
+  readonly revision: number;
+  readonly content_json: string | null;
+  readonly body_bytes: number;
+  readonly updated_at: string;
+};
+type ProjectBriefContentV1 = CivilizationProjectBriefContentV1;
+type ProjectBriefExport = CivilizationProjectBriefDetail;
+type ProjectDataExportWithBrief = CivilizationProjectDataExport & {
+  readonly projectBrief: ProjectBriefExport | null;
+};
+type PurgeCountsWithBrief = CivilizationPurgeCounts & {
+  readonly projectBriefRows: number;
+  readonly projectBriefBodyBytes: number;
+};
 type RetentionStateRow = {
   readonly applied_note_retention_days: number;
   readonly applied_diagnostic_retention_days: number;
@@ -70,6 +89,76 @@ const limitations = {
 
 const hash = (value: unknown) =>
   `sha256:${NodeCrypto.createHash("sha256").update(JSON.stringify(value), "utf8").digest("hex")}`;
+
+const briefCorrupt = () =>
+  new CivilizationUnavailableError({
+    code: "civilization_unavailable",
+    reason: "corrupt_state",
+    message: "Stored Civilization Project Brief is corrupt.",
+  });
+
+const isStringArray = (value: unknown): value is ReadonlyArray<string> =>
+  Array.isArray(value) && value.every((item) => typeof item === "string");
+
+const isProjectBriefContentV1 = (value: unknown): value is ProjectBriefContentV1 => {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const candidate = value as Record<string, unknown>;
+  if (
+    candidate.version !== 1 ||
+    typeof candidate.summary !== "string" ||
+    !isStringArray(candidate.objectives) ||
+    !isStringArray(candidate.constraints) ||
+    !Array.isArray(candidate.references)
+  ) {
+    return false;
+  }
+  return candidate.references.every(
+    (reference) =>
+      typeof reference === "object" &&
+      reference !== null &&
+      !Array.isArray(reference) &&
+      typeof (reference as Record<string, unknown>).kind === "string" &&
+      typeof (reference as Record<string, unknown>).reference === "string",
+  );
+};
+
+const decodeProjectBriefRow = (row: ProjectBriefRow) => {
+  const contentJson = row.content_json;
+  if (contentJson === null) {
+    return row.body_bytes === 0
+      ? Effect.succeed<ProjectBriefExport>({
+          projectId: row.project_id,
+          revision: row.revision,
+          configured: false,
+          bodyBytes: 0,
+          updatedAt: row.updated_at,
+          content: null,
+        })
+      : Effect.fail(briefCorrupt());
+  }
+  if (Buffer.byteLength(contentJson, "utf8") !== row.body_bytes) {
+    return Effect.fail(briefCorrupt());
+  }
+  return Effect.try({
+    try: () => JSON.parse(contentJson) as unknown,
+    catch: briefCorrupt,
+  }).pipe(
+    Effect.flatMap((content) =>
+      isProjectBriefContentV1(content) ? Effect.succeed(content) : Effect.fail(briefCorrupt()),
+    ),
+    Effect.map(
+      (content) =>
+        ({
+          projectId: row.project_id,
+          revision: row.revision,
+          configured: true,
+          bodyBytes: row.body_bytes,
+          updatedAt: row.updated_at,
+          content,
+        }) satisfies ProjectBriefExport,
+    ),
+  );
+};
 
 const make = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
@@ -445,7 +534,15 @@ const make = Effect.gen(function* () {
           WHERE project_id = ${projectId}
           ORDER BY awarded_at ASC, award_id ASC
         `;
-        return {
+        const projectBriefRow = (yield* sql<ProjectBriefRow>`
+          SELECT project_id, revision, content_json, body_bytes, updated_at
+          FROM civilization_project_brief
+          WHERE project_id = ${projectId}
+          LIMIT 1
+        `)[0];
+        const projectBrief =
+          projectBriefRow === undefined ? null : yield* decodeProjectBriefRow(projectBriefRow);
+        const exported: ProjectDataExportWithBrief = {
           schemaVersion: CIVILIZATION_EXPORT_SCHEMA_VERSION,
           projectId,
           exportedAt,
@@ -471,7 +568,9 @@ const make = Effect.gen(function* () {
             };
           }),
           achievements,
-        } satisfies CivilizationProjectDataExport;
+          projectBrief,
+        };
+        return exported;
       }),
     );
   });
@@ -521,7 +620,13 @@ const make = Effect.gen(function* () {
         (yield* sql<CountRow>`SELECT COUNT(*) AS count, 0 AS bytes FROM civilization_project_config WHERE project_id = ${projectId}`)[0]!;
       const projectStateRows =
         (yield* sql<CountRow>`SELECT COUNT(*) AS count, 0 AS bytes FROM civilization_project_state WHERE project_id = ${projectId}`)[0]!;
-      const counts = {
+      const projectBrief =
+        (yield* sql<CountRow>`SELECT COUNT(*) AS count, COALESCE(SUM(body_bytes), 0) AS bytes FROM civilization_project_brief WHERE project_id = ${projectId}`)[0]!;
+      const projectBriefRevision =
+        (yield* sql<{ readonly revision: number }>`
+          SELECT revision FROM civilization_project_brief WHERE project_id = ${projectId} LIMIT 1
+        `)[0]?.revision ?? 0;
+      const counts: PurgeCountsWithBrief = {
         citizens: citizens.count,
         notes: notes.count,
         noteBodyBytes: notes.bytes,
@@ -535,7 +640,9 @@ const make = Effect.gen(function* () {
         quotaWindows: quotaWindows.count,
         projectConfigRows: projectConfigRows.count,
         projectStateRows: projectStateRows.count,
-      } satisfies CivilizationPurgeCounts;
+        projectBriefRows: projectBrief.count,
+        projectBriefBodyBytes: projectBrief.bytes,
+      };
       const tokenSource = {
         projectId,
         environmentRevision,
@@ -545,6 +652,7 @@ const make = Effect.gen(function* () {
         mailRevision: state.mail_revision,
         chronicleRevision: state.chronicle_revision,
         achievementRevision: state.achievement_revision,
+        projectBriefRevision,
         counts,
       };
       return {
@@ -586,7 +694,8 @@ const make = Effect.gen(function* () {
       counts.receipts +
       counts.quotaWindows +
       counts.projectConfigRows +
-      counts.projectStateRows
+      counts.projectStateRows +
+      counts.projectBriefRows
     );
   });
 
@@ -655,6 +764,7 @@ const make = Effect.gen(function* () {
     yield* deleteRows("civilization_chronicle_entries");
     yield* deleteRows("civilization_messages");
     yield* deleteRows("civilization_notes");
+    yield* deleteRows("civilization_project_brief");
 
     if (remainingBatch > 0) {
       const threads = yield* sql<ThreadRow>`

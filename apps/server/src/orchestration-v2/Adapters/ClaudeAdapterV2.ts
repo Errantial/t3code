@@ -1240,6 +1240,7 @@ export const CLAUDE_READ_ONLY_T3_MCP_ALLOWED_TOOLS: ReadonlyArray<string> = [
   "mcp__t3-code__html_render",
   "mcp__t3-code__civilization_context",
   "mcp__t3-code__civilization_census",
+  "mcp__t3-code__civilization_citizen_search",
   "mcp__t3-code__civilization_note_list",
   "mcp__t3-code__civilization_note_read",
   "mcp__t3-code__civilization_inbox_list",

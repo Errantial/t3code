@@ -26,11 +26,33 @@ const v2TableCount = Effect.gen(function* () {
 });
 
 describe("runMigrations", () => {
+  it("keeps Project Brief at the post-upstream migration id", () => {
+    assert.deepStrictEqual(migrationManifest.at(-1), [79, "CivilizationProjectBrief"]);
+  });
+
   it.effect("migrates a fresh database through the whole manifest", () =>
     Effect.gen(function* () {
       yield* runMigrations();
       assert.deepStrictEqual(yield* history, migrationManifest);
       assert.isAbove(yield* v2TableCount, 0);
+      const sql = yield* SqlClient.SqlClient;
+      assert.deepStrictEqual(
+        yield* sql<{ readonly name: string }>`
+          SELECT name FROM sqlite_master
+          WHERE type = 'table' AND name = 'civilization_project_brief'
+        `,
+        [{ name: "civilization_project_brief" }],
+      );
+      for (const table of ["civilization_context_references", "civilization_context_inspections"]) {
+        const columns = yield* sql.unsafe<{ readonly name: string }>(`PRAGMA table_info(${table})`);
+        for (const column of ["brief_revision", "brief_body_bytes", "brief_included"]) {
+          assert.include(
+            columns.map((entry) => entry.name),
+            column,
+            `${table} should retain ${column}`,
+          );
+        }
+      }
     }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
   );
 
