@@ -10,6 +10,7 @@
 - [Source control](./user/source-control.md)
 - [Project settings](./user/project-settings.md)
 - [Civilization](./user/civilization.md)
+- [Civilization v1.5 release notes](./releases/civilization-v1.5.md)
 - [Appearance and themes](./user/appearance.md)
 - [Keyboard shortcuts](./user/keybindings.md)
 - [SnapShots](./user/snap-shot.md)
