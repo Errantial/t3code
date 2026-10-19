@@ -69,6 +69,7 @@ import {
 } from "./pullRequest.ts";
 import {
   CIVILIZATION_CITIZEN_SEARCH_MAX_LIMIT,
+  CivilizationAttentionResult,
   CivilizationConfigDescription,
   CivilizationConfigDiffResult,
   CivilizationConfigExportResult,
@@ -95,6 +96,7 @@ import {
   CivilizationCorrespondenceHistoryPage,
   CivilizationCorrespondenceReplyRelation,
   CivilizationCorrespondenceThreadPage,
+  CivilizationMailContentKind,
   CivilizationLineageCursor,
   CivilizationLineageNeighborhood,
   CivilizationCapabilitiesResult,
@@ -128,6 +130,12 @@ import {
   CivilizationNotesCursor,
   CivilizationNotesPage,
   CivilizationOperationInvalidError,
+  CivilizationOnboardingContentPreviewRequest,
+  CivilizationOnboardingContentPreviewResult,
+  CivilizationOnboardingPresetsResult,
+  CivilizationOnboardingPreviewRequest,
+  CivilizationOnboardingPreviewResult,
+  CivilizationOnboardingPreviewUnavailableError,
   CivilizationProjectDataExport,
   CivilizationProjectBriefClearRequest,
   CivilizationProjectBriefConflictError,
@@ -736,6 +744,7 @@ const EnvironmentCivilizationErrors = [
   CivilizationConfigConflictError,
   CivilizationProjectBriefInvalidError,
   CivilizationProjectBriefConflictError,
+  CivilizationOnboardingPreviewUnavailableError,
   CivilizationUnavailableError,
   CivilizationOperationInvalidError,
   CivilizationCitizenNotFoundError,
@@ -845,6 +854,7 @@ const EnvironmentCivilizationCorrespondenceQuery = Schema.Struct({
   counterpartyThreadId: Schema.optionalKey(ThreadId),
   senderThreadId: Schema.optionalKey(ThreadId),
   recipientThreadId: Schema.optionalKey(ThreadId),
+  contentKind: Schema.optionalKey(CivilizationMailContentKind),
   replyRelation: Schema.optionalKey(CivilizationCorrespondenceReplyRelation),
   replyToMessageId: Schema.optionalKey(CivilizationMessageId),
   acknowledged: Schema.optionalKey(Schema.Literals(["true", "false"])),
@@ -969,6 +979,14 @@ class EnvironmentCivilizationHttpApi extends HttpApiGroup.make("civilization")
     }).middleware(EnvironmentAuthenticatedAuth),
   )
   .add(
+    HttpApiEndpoint.get("attention", "/api/civilization/attention", {
+      headers: OptionalBearerHeaders,
+      query: EnvironmentCivilizationProjectQuery,
+      success: CivilizationAttentionResult,
+      error: EnvironmentCivilizationErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
     HttpApiEndpoint.get("configDescribe", "/api/civilization/config/describe", {
       headers: OptionalBearerHeaders,
       success: CivilizationConfigDescription,
@@ -1030,6 +1048,34 @@ class EnvironmentCivilizationHttpApi extends HttpApiGroup.make("civilization")
       success: CivilizationConfigExportResult,
       error: EnvironmentCivilizationErrors,
     }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.get("onboardingPresets", "/api/civilization/onboarding/presets", {
+      headers: OptionalBearerHeaders,
+      query: EnvironmentCivilizationProjectQuery,
+      success: CivilizationOnboardingPresetsResult,
+      error: EnvironmentCivilizationErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.post("onboardingPreview", "/api/civilization/onboarding/preview", {
+      headers: OptionalBearerHeaders,
+      payload: CivilizationOnboardingPreviewRequest,
+      success: CivilizationOnboardingPreviewResult,
+      error: EnvironmentCivilizationErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.post(
+      "onboardingContentPreview",
+      "/api/civilization/onboarding/preview/content",
+      {
+        headers: OptionalBearerHeaders,
+        payload: CivilizationOnboardingContentPreviewRequest,
+        success: CivilizationOnboardingContentPreviewResult,
+        error: EnvironmentCivilizationErrors,
+      },
+    ).middleware(EnvironmentAuthenticatedAuth),
   )
   .add(
     HttpApiEndpoint.get("projectBriefMetadata", "/api/civilization/project-brief/metadata", {

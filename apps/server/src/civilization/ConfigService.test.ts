@@ -78,6 +78,7 @@ it.effect("resolves built-in -> environment -> project overrides with provenance
     yield* service.set({
       projectId,
       expectedRevision: 0,
+      expectedEnvironmentRevision: 1,
       override: {
         version: CIVILIZATION_CONFIG_VERSION,
         context: { rosterCount: 4 },
@@ -126,6 +127,7 @@ it.effect(
       yield* service.set({
         projectId,
         expectedRevision: 0,
+        expectedEnvironmentRevision: 1,
         override: {
           version: CIVILIZATION_CONFIG_VERSION,
           names: { selectedPoolId: "alt" },
@@ -328,7 +330,7 @@ it.effect("rejects a project write when the inherited environment revision chang
   }).pipe(Effect.provide(Layer.fresh(layer))),
 );
 
-it.effect("keeps project set behavior compatible when environment CAS is omitted", () =>
+it.effect("accepts a project write when both captured revisions still match", () =>
   Effect.gen(function* () {
     const service = yield* ConfigService.CivilizationConfigService;
     const projectId = ProjectId.make("project:civilization:dual-revision-optional");
@@ -344,6 +346,7 @@ it.effect("keeps project set behavior compatible when environment CAS is omitted
     yield* service.set({
       projectId,
       expectedRevision: 0,
+      expectedEnvironmentRevision: 1,
       override: {
         version: CIVILIZATION_CONFIG_VERSION,
         personalities: { rendering: "mild" },
@@ -360,6 +363,7 @@ it.effect("keeps project set behavior compatible when environment CAS is omitted
     const updated = yield* service.set({
       projectId,
       expectedRevision: 1,
+      expectedEnvironmentRevision: 2,
       override: {
         version: CIVILIZATION_CONFIG_VERSION,
         personalities: { rendering: "rich" },
@@ -371,6 +375,53 @@ it.effect("keeps project set behavior compatible when environment CAS is omitted
     assert.equal(updated.effective.projectRevision, 2);
     assert.equal(updated.effective.config.personalities.rendering, "rich");
   }).pipe(Effect.provide(Layer.fresh(layer))),
+);
+
+it.effect(
+  "keeps project import scoped to the project revision while resolving against current environment",
+  () =>
+    Effect.gen(function* () {
+      const service = yield* ConfigService.CivilizationConfigService;
+      const projectId = ProjectId.make("project:civilization:import-project-cas");
+      yield* insertProject(projectId);
+
+      yield* service.set({
+        expectedRevision: 0,
+        override: {
+          version: CIVILIZATION_CONFIG_VERSION,
+          context: { rosterCount: 12 },
+        },
+      });
+      const firstImport = yield* service.import({
+        projectId,
+        expectedRevision: 0,
+        json: JSON.stringify({
+          version: CIVILIZATION_CONFIG_VERSION,
+          personalities: { rendering: "mild" },
+        }),
+      });
+      assert.equal(firstImport.revision, 1);
+      assert.equal(firstImport.effective.environmentRevision, 1);
+
+      yield* service.set({
+        expectedRevision: 1,
+        override: {
+          version: CIVILIZATION_CONFIG_VERSION,
+          context: { rosterCount: 10 },
+        },
+      });
+      const secondImport = yield* service.import({
+        projectId,
+        expectedRevision: 1,
+        json: JSON.stringify({
+          version: CIVILIZATION_CONFIG_VERSION,
+          personalities: { rendering: "rich" },
+        }),
+      });
+      assert.equal(secondImport.revision, 2);
+      assert.equal(secondImport.effective.environmentRevision, 2);
+      assert.equal(secondImport.effective.config.personalities.rendering, "rich");
+    }).pipe(Effect.provide(Layer.fresh(layer))),
 );
 
 it.effect(
@@ -493,6 +544,7 @@ it.effect("invalidates the runtime config cache after supported writes", () =>
     yield* service.set({
       projectId,
       expectedRevision: 0,
+      expectedEnvironmentRevision: 0,
       override: {
         version: CIVILIZATION_CONFIG_VERSION,
         personalities: { rendering: "rich" },

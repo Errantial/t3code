@@ -57,11 +57,13 @@ import { civilizationPersistenceParticipant } from "../civilization/PersistenceP
 import * as CivilizationConfig from "../civilization/ConfigService.ts";
 import * as CivilizationCitizens from "../civilization/CitizenService.ts";
 import * as CivilizationAdministration from "../civilization/AdministrationService.ts";
+import * as CivilizationAttention from "../civilization/AttentionService.ts";
 import * as CivilizationContext from "../civilization/ContextService.ts";
 import * as CivilizationChronicle from "../civilization/ChronicleService.ts";
 import * as CivilizationKnowledge from "../civilization/KnowledgeService.ts";
 import * as CivilizationMailCleanup from "../civilization/MailCleanupService.ts";
 import * as CivilizationMail from "../civilization/MailService.ts";
+import * as CivilizationOnboarding from "../civilization/OnboardingService.ts";
 import * as CivilizationOperations from "../civilization/OperationsService.ts";
 import * as CivilizationProjectBrief from "../civilization/ProjectBriefService.ts";
 import * as CivilizationTitleOwnership from "../civilization/TitleOwnership.ts";
@@ -171,6 +173,19 @@ const layerCivilizationContextProvided = CivilizationContext.layer.pipe(
       layerCivilizationProjectBriefProvided,
       layerProviderAdapterRegistryProvided,
       layerCivilizationMailProvided,
+    ),
+  ),
+);
+const layerCivilizationAttentionProvided = CivilizationAttention.layer.pipe(
+  Layer.provide(Layer.mergeAll(layerCivilizationConfigProvided, layerCivilizationContextProvided)),
+);
+const layerCivilizationOnboardingProvided = CivilizationOnboarding.layer.pipe(
+  Layer.provide(
+    Layer.mergeAll(
+      layerCivilizationConfigProvided,
+      layerCivilizationCitizensProvided,
+      layerCivilizationContextProvided,
+      ProjectionStore.layer,
     ),
   ),
 );
@@ -422,6 +437,8 @@ export const layer = Layer.mergeAll(
   layerCivilizationProjectBriefProvided,
   layerCivilizationMailProvided,
   layerCivilizationContextProvided,
+  layerCivilizationAttentionProvided,
+  layerCivilizationOnboardingProvided,
   layerCivilizationAdministrationProvided,
   layerCivilizationOperationsProvided,
   layerLegacyV1ThreadImporterProvided,

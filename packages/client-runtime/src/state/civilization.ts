@@ -1,5 +1,6 @@
 import {
   CivilizationAgentAccessError,
+  type CivilizationAttentionResult,
   type CivilizationAchievementCursor,
   type CivilizationCensusCursor,
   type CivilizationChronicleCursor,
@@ -24,10 +25,14 @@ import {
   CivilizationMailConflictError,
   CivilizationMailInvalidError,
   CivilizationMailNotFoundError,
+  type CivilizationMailContentKind,
   type CivilizationMessageId,
   type CivilizationNoteId,
   CivilizationNoteNotFoundError,
   type CivilizationNotesCursor,
+  type CivilizationOnboardingContentPreviewRequest,
+  CivilizationOnboardingPreviewUnavailableError,
+  type CivilizationOnboardingPreviewRequest,
   CivilizationOperationInvalidError,
   CivilizationProjectBriefConflictError,
   type CivilizationProjectBriefClearRequest,
@@ -67,6 +72,7 @@ const isMailConflict = Schema.is(CivilizationMailConflictError);
 const isMailNotFound = Schema.is(CivilizationMailNotFoundError);
 const isAgentAccess = Schema.is(CivilizationAgentAccessError);
 const isPurgeConflict = Schema.is(CivilizationPurgeConflictError);
+const isOnboardingPreviewUnavailable = Schema.is(CivilizationOnboardingPreviewUnavailableError);
 
 const unwrapCivilizationConfigError = <E>(error: E) => {
   if (
@@ -91,7 +97,8 @@ const unwrapCivilizationConfigError = <E>(error: E) => {
       isMailConflict(cause) ||
       isMailNotFound(cause) ||
       isAgentAccess(cause) ||
-      isPurgeConflict(cause)
+      isPurgeConflict(cause) ||
+      isOnboardingPreviewUnavailable(cause)
     ) {
       return cause;
     }
@@ -149,6 +156,28 @@ export const fetchEnvironmentCivilizationCapabilities = Effect.fn(
       request: ({ client, headers }) => client.capabilities({ headers }),
     }),
   );
+});
+
+/** Read bounded body-free attention for one exact project. */
+export const fetchEnvironmentCivilizationAttention = Effect.fn(
+  "clientRuntime.state.fetchEnvironmentCivilizationAttention",
+)(function* (
+  input: CivilizationEnvironmentRequestInput & {
+    readonly projectId: ProjectId;
+  },
+) {
+  const endpoint = { query: { projectId: input.projectId } };
+  const result: CivilizationAttentionResult = yield* preserveCivilizationConfigErrors(
+    executeAuthenticatedEnvironmentHttpRequest({
+      ...input,
+      group: "civilization",
+      method: "GET",
+      url: (urls) => urls.attention(endpoint),
+      timeoutMs: input.timeoutMs ?? DEFAULT_CIVILIZATION_READ_TIMEOUT_MS,
+      request: ({ client, headers }) => client.attention({ ...endpoint, headers }),
+    }),
+  );
+  return result;
 });
 
 /** Read the server-owned Civilization schema metadata, limits, and application timing. */
@@ -236,20 +265,21 @@ export const diffEnvironmentCivilizationConfig = Effect.fn(
 export const setEnvironmentCivilizationConfig = Effect.fn(
   "clientRuntime.state.setEnvironmentCivilizationConfig",
 )(function* (
-  input: CivilizationScopedEnvironmentRequestInput & {
-    readonly expectedRevision: number;
-    readonly expectedEnvironmentRevision?: number | undefined;
-    readonly override: CivilizationConfigOverride;
-  },
+  input: CivilizationScopedEnvironmentRequestInput &
+    (
+      | {
+          readonly projectId?: undefined;
+          readonly expectedRevision: number;
+          readonly override: CivilizationConfigOverride;
+        }
+      | {
+          readonly projectId: ProjectId;
+          readonly expectedRevision: number;
+          readonly expectedEnvironmentRevision: number;
+          readonly override: CivilizationConfigOverride;
+        }
+    ),
 ) {
-  const payload = {
-    ...scopeQuery(input.projectId),
-    expectedRevision: input.expectedRevision,
-    ...(input.expectedEnvironmentRevision === undefined
-      ? {}
-      : { expectedEnvironmentRevision: input.expectedEnvironmentRevision }),
-    override: input.override,
-  };
   return yield* preserveCivilizationConfigErrors(
     executeAuthenticatedEnvironmentHttpRequest({
       ...input,
@@ -257,7 +287,24 @@ export const setEnvironmentCivilizationConfig = Effect.fn(
       method: "POST",
       url: (urls) => urls.configSet(),
       timeoutMs: input.timeoutMs ?? DEFAULT_CIVILIZATION_WRITE_TIMEOUT_MS,
-      request: ({ client, headers }) => client.configSet({ payload, headers }),
+      request: ({ client, headers }) =>
+        input.projectId === undefined
+          ? client.configSet({
+              payload: {
+                expectedRevision: input.expectedRevision,
+                override: input.override,
+              },
+              headers,
+            })
+          : client.configSet({
+              payload: {
+                projectId: input.projectId,
+                expectedRevision: input.expectedRevision,
+                expectedEnvironmentRevision: input.expectedEnvironmentRevision,
+                override: input.override,
+              },
+              headers,
+            }),
     }),
   );
 });
@@ -325,6 +372,72 @@ export const exportEnvironmentCivilizationConfig = Effect.fn(
       url: (urls) => urls.configExport(endpoint),
       timeoutMs: input.timeoutMs ?? DEFAULT_CIVILIZATION_READ_TIMEOUT_MS,
       request: ({ client, headers }) => client.configExport({ ...endpoint, headers }),
+    }),
+  );
+});
+
+/** Read server-described Civilization onboarding presets for one exact project. */
+export const fetchEnvironmentCivilizationOnboardingPresets = Effect.fn(
+  "clientRuntime.state.fetchEnvironmentCivilizationOnboardingPresets",
+)(function* (
+  input: CivilizationEnvironmentRequestInput & {
+    readonly projectId: ProjectId;
+  },
+) {
+  const endpoint = { query: { projectId: input.projectId } };
+  return yield* preserveCivilizationConfigErrors(
+    executeAuthenticatedEnvironmentHttpRequest({
+      ...input,
+      group: "civilization",
+      method: "GET",
+      url: (urls) => urls.onboardingPresets(endpoint),
+      timeoutMs: input.timeoutMs ?? DEFAULT_CIVILIZATION_READ_TIMEOUT_MS,
+      request: ({ client, headers }) => client.onboardingPresets({ ...endpoint, headers }),
+    }),
+  );
+});
+
+/** Build a body-free onboarding preview without mutating Civilization state. */
+export const previewEnvironmentCivilizationOnboarding = Effect.fn(
+  "clientRuntime.state.previewEnvironmentCivilizationOnboarding",
+)(function* (
+  input: CivilizationEnvironmentRequestInput & {
+    readonly preview: CivilizationOnboardingPreviewRequest;
+  },
+) {
+  const preview = input.preview;
+  return yield* preserveCivilizationConfigErrors(
+    executeAuthenticatedEnvironmentHttpRequest({
+      ...input,
+      group: "civilization",
+      method: "POST",
+      url: (urls) => urls.onboardingPreview(),
+      timeoutMs: input.timeoutMs ?? DEFAULT_CIVILIZATION_READ_TIMEOUT_MS,
+      request: ({ client, headers }) =>
+        preview.previewKind === "configuration_only"
+          ? client.onboardingPreview({ payload: preview, headers })
+          : client.onboardingPreview({ payload: preview, headers }),
+    }),
+  );
+});
+
+/** Explicitly reveal exact current packet content for one existing citizen. */
+export const previewEnvironmentCivilizationOnboardingContent = Effect.fn(
+  "clientRuntime.state.previewEnvironmentCivilizationOnboardingContent",
+)(function* (
+  input: CivilizationEnvironmentRequestInput & {
+    readonly preview: CivilizationOnboardingContentPreviewRequest;
+  },
+) {
+  return yield* preserveCivilizationConfigErrors(
+    executeAuthenticatedEnvironmentHttpRequest({
+      ...input,
+      group: "civilization",
+      method: "POST",
+      url: (urls) => urls.onboardingContentPreview(),
+      timeoutMs: input.timeoutMs ?? DEFAULT_CIVILIZATION_READ_TIMEOUT_MS,
+      request: ({ client, headers }) =>
+        client.onboardingContentPreview({ payload: input.preview, headers }),
     }),
   );
 });
@@ -824,6 +937,7 @@ export const fetchEnvironmentCivilizationCorrespondencePage = Effect.fn(
     readonly counterpartyThreadId?: ThreadId | undefined;
     readonly senderThreadId?: ThreadId | undefined;
     readonly recipientThreadId?: ThreadId | undefined;
+    readonly contentKind?: CivilizationMailContentKind | undefined;
     readonly replyRelation?: CivilizationCorrespondenceReplyRelation | undefined;
     readonly replyToMessageId?: CivilizationMessageId | undefined;
     readonly acknowledged?: boolean | undefined;
@@ -847,6 +961,7 @@ export const fetchEnvironmentCivilizationCorrespondencePage = Effect.fn(
     ...(input.recipientThreadId === undefined
       ? {}
       : { recipientThreadId: input.recipientThreadId }),
+    ...(input.contentKind === undefined ? {} : { contentKind: input.contentKind }),
     ...(input.replyRelation === undefined ? {} : { replyRelation: input.replyRelation }),
     ...(input.replyToMessageId === undefined ? {} : { replyToMessageId: input.replyToMessageId }),
     ...(input.acknowledged === undefined
@@ -1122,6 +1237,13 @@ const currentCivilizationAuth = Effect.gen(function* () {
     RemoteEnvironmentAuthorization.RemoteEnvironmentAuthorization,
   );
   return { signer, remoteAuthorization };
+});
+
+export const fetchCurrentEnvironmentCivilizationAttention = Effect.fn(
+  "clientRuntime.state.fetchCurrentEnvironmentCivilizationAttention",
+)(function* (input: { readonly prepared: PreparedConnection; readonly projectId: ProjectId }) {
+  const auth = yield* currentCivilizationAuth;
+  return yield* fetchEnvironmentCivilizationAttention({ ...input, ...auth });
 });
 
 export const fetchCurrentEnvironmentCivilizationCensusPage = Effect.fn(
@@ -1467,39 +1589,61 @@ export const runEnvironmentCivilizationConfigAction = Effect.fn(
     prepared: input.prepared,
     signer,
     remoteAuthorization,
-    ...(input.projectId === undefined ? {} : { projectId: input.projectId }),
     ...(input.timeoutMs === undefined ? {} : { timeoutMs: input.timeoutMs }),
   };
   switch (input.action.type) {
     case "validate":
       return yield* validateEnvironmentCivilizationConfig({
         ...auth,
+        ...(input.projectId === undefined ? {} : { projectId: input.projectId }),
         override: input.action.override,
       });
     case "diff":
-      return yield* diffEnvironmentCivilizationConfig({ ...auth, override: input.action.override });
+      return yield* diffEnvironmentCivilizationConfig({
+        ...auth,
+        ...(input.projectId === undefined ? {} : { projectId: input.projectId }),
+        override: input.action.override,
+      });
     case "set":
+      if (input.projectId === undefined) {
+        return yield* setEnvironmentCivilizationConfig({
+          ...auth,
+          expectedRevision: input.action.expectedRevision,
+          override: input.action.override,
+        });
+      }
+      if (input.action.expectedEnvironmentRevision === undefined) {
+        return yield* Effect.die(
+          new Error(
+            "Project-scoped Civilization config writes require an expected environment revision.",
+          ),
+        );
+      }
       return yield* setEnvironmentCivilizationConfig({
         ...auth,
+        projectId: input.projectId,
         expectedRevision: input.action.expectedRevision,
-        ...(input.action.expectedEnvironmentRevision === undefined
-          ? {}
-          : { expectedEnvironmentRevision: input.action.expectedEnvironmentRevision }),
+        expectedEnvironmentRevision: input.action.expectedEnvironmentRevision,
         override: input.action.override,
       });
     case "reset":
       return yield* resetEnvironmentCivilizationConfig({
         ...auth,
+        ...(input.projectId === undefined ? {} : { projectId: input.projectId }),
         expectedRevision: input.action.expectedRevision,
       });
     case "import":
       return yield* importEnvironmentCivilizationConfig({
         ...auth,
+        ...(input.projectId === undefined ? {} : { projectId: input.projectId }),
         expectedRevision: input.action.expectedRevision,
         json: input.action.json,
       });
     case "export":
-      return yield* exportEnvironmentCivilizationConfig(auth);
+      return yield* exportEnvironmentCivilizationConfig({
+        ...auth,
+        ...(input.projectId === undefined ? {} : { projectId: input.projectId }),
+      });
   }
 });
 

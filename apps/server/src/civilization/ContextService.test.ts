@@ -4,12 +4,13 @@ import {
   CIVILIZATION_CONFIG_VERSION,
   CivilizationMessageId,
   ProjectId,
+  ProviderDriverKind,
   ProviderInstanceId,
   RunAttemptId,
   RunId,
   ThreadId,
 } from "@t3tools/contracts";
-import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
+import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -483,6 +484,7 @@ it.effect("aggregates only safe context metadata and applies logical diagnostic 
     yield* config.set({
       projectId,
       expectedRevision: 0,
+      expectedEnvironmentRevision: 1,
       override: {
         version: CIVILIZATION_CONFIG_VERSION,
         operations: { diagnosticRetentionDays: 1 },
@@ -518,6 +520,7 @@ it.effect("aggregates only safe context metadata and applies logical diagnostic 
     yield* config.set({
       projectId,
       expectedRevision: 1,
+      expectedEnvironmentRevision: 1,
       override: {
         version: CIVILIZATION_CONFIG_VERSION,
         operations: { diagnosticRetentionDays: 1, responseBodyBytes: 1 },
@@ -1227,6 +1230,7 @@ it.effect(
       const tools = parsePacket(response.packet!.text).tools;
       assert.include(tools, "civilization_inbox_list");
       assert.include(tools, "civilization_mail_send");
+      assert.include(tools, "civilization_handoff_send");
       assert.include(tools, "civilization_mail_receive");
       assert.include(tools, "civilization_mail_acknowledge");
 
@@ -1325,6 +1329,143 @@ it.effect("matches read-only mail simulation with runtime packet inbox selection
     );
   }).pipe(Effect.provide(Layer.fresh(makeLayer({ "codex-main": "codex" }))));
 });
+
+it.effect(
+  "previews candidate-effective context with simulate+none and leaves mail/history/title state unchanged",
+  () => {
+    return Effect.gen(function* () {
+      const service = yield* ContextService.CivilizationContextService;
+      const config = yield* ConfigService.CivilizationConfigService;
+      const sql = yield* SqlClient.SqlClient;
+      yield* setup({
+        packetBytes: 4096,
+        rosterCount: 3,
+        noteCount: 3,
+        inboxExcerptCount: 3,
+        selection: "stable_id",
+      });
+      yield* seedNote({ id: "note:onboarding-preview", body: "private note body" });
+      const firstId = yield* seedMail({
+        id: "mail:onboarding-preview:a",
+        body: "first private mail",
+      });
+      yield* seedMail({ id: "mail:onboarding-preview:b", body: "second private mail" });
+
+      const candidate = yield* config.diff({
+        projectId,
+        override: {
+          version: CIVILIZATION_CONFIG_VERSION,
+          participation: { enabled: true },
+          knowledge: { packetInclusion: false },
+          context: {
+            packetBytes: 4096,
+            rosterCount: 0,
+            noteCount: 0,
+            inboxExcerptCount: 1,
+            selection: "stable_id",
+          },
+          messaging: { enabled: true },
+        },
+      });
+
+      const snapshot = () =>
+        Effect.all({
+          aggregate: sql<{
+            readonly mail_revision: number;
+            readonly reference_count: number;
+            readonly inspection_count: number;
+            readonly turn_item_count: number;
+          }>`
+          SELECT
+            COALESCE((SELECT mail_revision FROM civilization_project_state WHERE project_id = ${projectId}), 0) AS mail_revision,
+            (SELECT COUNT(*) FROM civilization_context_references WHERE project_id = ${projectId}) AS reference_count,
+            (SELECT COUNT(*) FROM civilization_context_inspections WHERE project_id = ${projectId}) AS inspection_count,
+            (SELECT COUNT(*) FROM orchestration_v2_projection_turn_items WHERE thread_id = ${callerThreadId}) AS turn_item_count
+        `.pipe(Effect.map((rows) => rows[0]!)),
+          mail: sql<{
+            readonly message_id: string;
+            readonly first_offered_at: string | null;
+            readonly last_offered_at: string | null;
+            readonly offer_count: number;
+          }>`
+          SELECT message_id, first_offered_at, last_offered_at, offer_count
+          FROM civilization_messages
+          WHERE project_id = ${projectId}
+          ORDER BY message_id ASC
+        `,
+          citizen: sql<{
+            readonly title_managed: number;
+            readonly preserved_title: string | null;
+            readonly last_managed_title: string | null;
+            readonly title_topic: string;
+            readonly revision: number;
+          }>`
+          SELECT title_managed, preserved_title, last_managed_title, title_topic, revision
+          FROM civilization_citizens
+          WHERE thread_id = ${callerThreadId}
+        `.pipe(Effect.map((rows) => rows[0]!)),
+        });
+
+      const before = yield* snapshot();
+      const { message: _message, source: _source, ...turn } = turnInput("codex-main");
+      const preview = yield* service.previewExistingCitizen({
+        ...turn,
+        effective: candidate.effective,
+      });
+      assert.isNotNull(preview.packet);
+      assert.deepEqual(preview.packet!.reference.selectedCitizenIds, []);
+      assert.deepEqual(preview.packet!.reference.selectedNoteIds, []);
+      assert.deepEqual(preview.packet!.reference.selectedInboxIds, [firstId]);
+      assert.equal(preview.composition.inbox.included, 1);
+      assert.equal(preview.composition.notes.included, 0);
+      assert.equal(preview.composition.roster.included, 0);
+      assert.deepEqual(yield* snapshot(), before);
+    }).pipe(Effect.provide(Layer.fresh(makeLayer({ "codex-main": "codex" }))));
+  },
+);
+
+it.effect(
+  "fails exact preview on capability-probe errors while runtime capability resolution still degrades",
+  () => {
+    const probeFailure = new ProviderAdapter.ProviderAdapterCapabilitiesError({
+      driver: ProviderDriverKind.make("codex"),
+    });
+    return Effect.gen(function* () {
+      const service = yield* ContextService.CivilizationContextService;
+      const config = yield* ConfigService.CivilizationConfigService;
+      yield* setup({ packetBytes: 4096 });
+      const candidate = yield* config.diff({
+        projectId,
+        override: {
+          version: CIVILIZATION_CONFIG_VERSION,
+          participation: { enabled: true },
+        },
+      });
+      const runtime = yield* service.forTurn(turnInput("codex-main"));
+      assert.equal(runtime.capability.support, "unsupported");
+      assert.isNull(runtime.packet);
+
+      const { message: _message, source: _source, ...turn } = turnInput("codex-main");
+      const error = yield* service
+        .previewExistingCitizen({ ...turn, effective: candidate.effective })
+        .pipe(Effect.flip);
+      assert.instanceOf(error, ProviderAdapterRegistry.ProviderAdapterRegistryMetadataError);
+    }).pipe(
+      Effect.provide(
+        Layer.fresh(
+          makeLayer(
+            { "codex-main": "codex" },
+            {
+              "codex-main": {
+                getCivilizationCapability: () => Effect.fail(probeFailure),
+              },
+            },
+          ),
+        ),
+      ),
+    );
+  },
+);
 
 it.effect(
   "keeps explicit context reads body-free and mail-state read-only while revising on mail state",

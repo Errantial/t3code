@@ -1,4 +1,5 @@
 import type {
+  CivilizationOnboardingPresetId,
   CivilizationContextInspectionOutcome,
   CivilizationContextSuppressionReason,
   CivilizationMessageId,
@@ -22,6 +23,29 @@ export type CivilizationActivityMode = (typeof CIVILIZATION_ACTIVITY_MODES)[numb
 
 export const CIVILIZATION_CONTEXT_MODES = ["analytics", "inspector"] as const;
 export type CivilizationContextMode = (typeof CIVILIZATION_CONTEXT_MODES)[number];
+
+export const CIVILIZATION_ONBOARDING_STAGES = [
+  "target",
+  "providers",
+  "preset",
+  "adoption",
+  "privacy",
+  "preview",
+  "apply",
+] as const;
+export type CivilizationOnboardingStage = (typeof CIVILIZATION_ONBOARDING_STAGES)[number];
+
+export const CIVILIZATION_ONBOARDING_PRESETS = [
+  "minimal",
+  "standard",
+  "rich",
+  "custom",
+] as const satisfies readonly CivilizationOnboardingPresetId[];
+export const CIVILIZATION_ONBOARDING_ADOPTIONS = ["future_only", "all_existing"] as const;
+export type CivilizationOnboardingAdoption = (typeof CIVILIZATION_ONBOARDING_ADOPTIONS)[number];
+export const CIVILIZATION_ONBOARDING_TITLE_POLICIES = ["preserve", "managed"] as const;
+export type CivilizationOnboardingTitlePolicy =
+  (typeof CIVILIZATION_ONBOARDING_TITLE_POLICIES)[number];
 
 export const CIVILIZATION_CONTEXT_OUTCOMES = [
   "skipped",
@@ -100,6 +124,7 @@ const CIVILIZATION_TARGET_VIEWS: Readonly<Record<string, CivilizationViewTarget>
   "civilization-providers": { view: "configuration" },
   "civilization-config": { view: "configuration" },
   "civilization-data-retention": { view: "configuration" },
+  "civilization-onboarding": { view: "configuration" },
 };
 
 export function civilizationViewForTargetId(targetId: string): CivilizationViewTarget | null {
@@ -129,6 +154,10 @@ interface CivilizationNavigationSearchBase {
   readonly contextFilterSuppression?: CivilizationContextSuppressionReason | undefined;
   readonly contextFilterFrom?: string | undefined;
   readonly contextFilterTo?: string | undefined;
+  readonly onboarding?: CivilizationOnboardingStage | undefined;
+  readonly onboardingPreset?: CivilizationOnboardingPresetId | undefined;
+  readonly onboardingAdoption?: CivilizationOnboardingAdoption | undefined;
+  readonly onboardingTitlePolicy?: CivilizationOnboardingTitlePolicy | undefined;
 }
 
 type WithoutHistoricalContext = {
@@ -156,6 +185,10 @@ export const CIVILIZATION_NAVIGATION_SEARCH_KEYS = [
   "contextFilterSuppression",
   "contextFilterFrom",
   "contextFilterTo",
+  "onboarding",
+  "onboardingPreset",
+  "onboardingAdoption",
+  "onboardingTitlePolicy",
   "contextThread",
   "contextRun",
   "contextAttempt",

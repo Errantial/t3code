@@ -40,6 +40,16 @@ const modelSelection = {
 } satisfies ModelSelection;
 
 const fixedTime = "2026-10-16T10:00:00.000Z";
+const recoveryHandoffPayload = {
+  version: 1,
+  summary: "Resume from the recovered passive handoff state.",
+  completed: ["Captured the recovery checkpoint"],
+  decisions: ["Keep handoff delivery passive"],
+  nextActions: ["Continue only when the recipient runs normally"],
+  blockersOrQuestions: [],
+  references: [{ kind: "test", reference: "recovery-acceptance" }],
+} as const;
+const recoveryHandoffBody = JSON.stringify(recoveryHandoffPayload);
 
 function makeThread(input: {
   readonly threadId: ThreadId;
@@ -128,6 +138,7 @@ const seedLatestFeatureRows = Effect.fn("RecoveryAcceptance.seedLatestFeatureRow
     readonly lastAppliedSequence: number;
     readonly includeRichSnapshot?: boolean;
     readonly includeProjectBrief?: boolean;
+    readonly includeStructuredHandoff?: boolean;
   }) {
     const sql = yield* SqlClient.SqlClient;
     const nameKey = ConfigService.normalizeCivilizationName("Ada Recovery");
@@ -226,6 +237,28 @@ const seedLatestFeatureRows = Effect.fn("RecoveryAcceptance.seedLatestFeatureRow
     )
   `;
 
+    if (input.includeStructuredHandoff === true) {
+      yield* sql`
+        INSERT INTO civilization_messages (
+          message_id, project_id, content_kind, sender_thread_id, sender_name_at_send,
+          sender_citizen_epoch, sender_run_id, recipient_thread_id, recipient_delivery_epoch,
+          reply_to_message_id, body, body_bytes,
+          accepted_runtime_mode, accepted_interaction_mode,
+          accepted_environment_revision, accepted_project_revision,
+          accepted_at, expires_at, terminal_retention_days,
+          first_offered_at, last_offered_at, offer_count, acknowledged_at,
+          terminal_at, terminal_reason
+        ) VALUES (
+          'mail:recovery:handoff', ${input.projectId}, 'handoff_v1',
+          'thread:recovery:sender', 'Sender', 2, 'run:recovery:sender', ${input.threadId}, 7,
+          NULL, ${recoveryHandoffBody}, ${Buffer.byteLength(recoveryHandoffBody, "utf8")},
+          'full-access', 'default', 1, 2,
+          ${fixedTime}, '2026-11-15T10:00:00.000Z', 30,
+          NULL, NULL, 0, NULL, ${fixedTime}, 'recipient_settled'
+        )
+      `;
+    }
+
     if (input.includeProjectBrief !== false) {
       const projectBriefJson = JSON.stringify({
         version: 1,
@@ -315,6 +348,7 @@ const readFeatureState = Effect.fn("RecoveryAcceptance.readFeatureState")(functi
     messages: [
       ...(yield* sql<{
         readonly message_id: string;
+        readonly content_kind: string;
         readonly body: string;
         readonly body_bytes: number;
         readonly recipient_thread_id: string;
@@ -323,7 +357,7 @@ const readFeatureState = Effect.fn("RecoveryAcceptance.readFeatureState")(functi
         readonly terminal_at: string | null;
         readonly terminal_reason: string | null;
       }>`
-        SELECT message_id, body, body_bytes, recipient_thread_id, recipient_delivery_epoch,
+        SELECT message_id, content_kind, body, body_bytes, recipient_thread_id, recipient_delivery_epoch,
                acknowledged_at, terminal_at, terminal_reason
         FROM civilization_messages
         WHERE project_id = ${projectId}
@@ -645,6 +679,7 @@ it.effect(
         [
           [78, "CanonicalizeThreadPullRequestLinks"],
           [79, "CivilizationProjectBrief"],
+          [80, "CivilizationMailContentKind"],
         ],
       );
       assert.deepEqual(
@@ -738,7 +773,7 @@ it.effect(
       const migrated = yield* runMigrations();
       assert.deepEqual(
         migrated.map(([id]) => id),
-        [65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79],
+        [65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80],
       );
       assert.deepEqual(
         (yield* sql<{
@@ -887,9 +922,15 @@ it.effect(
       yield* config.set({
         projectId,
         expectedRevision: 0,
+        expectedEnvironmentRevision: 1,
         override: { version: CIVILIZATION_CONFIG_VERSION, context: { rosterCount: 4 } },
       });
-      yield* seedLatestFeatureRows({ projectId, threadId, lastAppliedSequence: 1 });
+      yield* seedLatestFeatureRows({
+        projectId,
+        threadId,
+        lastAppliedSequence: 1,
+        includeStructuredHandoff: true,
+      });
       yield* assertRetainedStateCoherent(projectId);
       const before = yield* readFeatureState(projectId);
 
@@ -903,6 +944,9 @@ it.effect(
       assert.equal(before.messages[0]?.recipient_delivery_epoch, 7);
       assert.equal(before.messages[0]?.terminal_reason, "recipient_settled");
       assert.isNotNull(before.messages[0]?.terminal_at);
+      assert.equal(before.messages[1]?.content_kind, "handoff_v1");
+      assert.equal(before.messages[1]?.body, recoveryHandoffBody);
+      assert.equal(before.messages[1]?.terminal_reason, "recipient_settled");
       assert.equal(before.projectBrief[0]?.revision, 5);
       assert.include(
         before.projectBrief[0]?.content_json ?? "",
@@ -937,9 +981,15 @@ it.effect("VACUUM INTO snapshot restore preserves config, notes, mail and epochs
       yield* config.set({
         projectId,
         expectedRevision: 0,
+        expectedEnvironmentRevision: 1,
         override: { version: CIVILIZATION_CONFIG_VERSION, context: { rosterCount: 6 } },
       });
-      yield* seedLatestFeatureRows({ projectId, threadId, lastAppliedSequence: 12 });
+      yield* seedLatestFeatureRows({
+        projectId,
+        threadId,
+        lastAppliedSequence: 12,
+        includeStructuredHandoff: true,
+      });
       yield* sql`
         INSERT INTO civilization_chronicle_entries (
           entry_id, project_id, kind, primary_thread_id, secondary_thread_id,
@@ -1012,6 +1062,9 @@ it.effect("VACUUM INTO snapshot restore preserves config, notes, mail and epochs
       assert.equal(restored.notes[0]?.body, "snapshot note body");
       assert.equal(restored.messages[0]?.body, "closed mail body");
       assert.equal(restored.messages[0]?.terminal_reason, "recipient_settled");
+      assert.equal(restored.messages[1]?.content_kind, "handoff_v1");
+      assert.equal(restored.messages[1]?.body, recoveryHandoffBody);
+      assert.equal(restored.messages[1]?.terminal_reason, "recipient_settled");
       assert.equal(restored.projectBrief[0]?.revision, 5);
       assert.include(
         restored.projectBrief[0]?.content_json ?? "",
@@ -1189,6 +1242,7 @@ it.effect("worktree removal and path changes leave project-scoped feature state 
       projectId,
       threadId,
       lastAppliedSequence: yield* eventStore.latestSequence(),
+      includeStructuredHandoff: true,
     });
     const beforeRemoval = yield* readFeatureState(projectId);
 
@@ -1220,6 +1274,9 @@ it.effect("worktree removal and path changes leave project-scoped feature state 
     assert.equal(afterMove.notes[0]?.body, beforeRemoval.notes[0]?.body);
     assert.equal(afterMove.messages[0]?.body, beforeRemoval.messages[0]?.body);
     assert.equal(afterMove.messages[0]?.terminal_reason, "recipient_settled");
+    assert.equal(afterMove.messages[1]?.content_kind, "handoff_v1");
+    assert.equal(afterMove.messages[1]?.body, recoveryHandoffBody);
+    assert.equal(afterMove.messages[1]?.terminal_reason, "recipient_settled");
     yield* assertRetainedStateCoherent(projectId);
   }).pipe(
     Effect.provide(Layer.fresh(makeRecoveryLayer(SqlitePersistence.layerMemory))),

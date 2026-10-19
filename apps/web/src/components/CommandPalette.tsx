@@ -41,8 +41,10 @@ import {
 } from "@t3tools/client-runtime/state/runtime";
 import {
   AuthOrchestrationOperateScope,
+  AuthOrchestrationReadScope,
   AuthSourceControlWriteScope,
   AuthFilesystemReadScope,
+  CIVILIZATION_CITIZEN_SEARCH_DEFAULT_LIMIT,
   type DesktopWslState,
   type ClientSettings,
   type EnvironmentId,
@@ -77,6 +79,7 @@ import {
   SquarePenIcon,
   SunIcon,
   TextSearchIcon,
+  UsersIcon,
 } from "lucide-react";
 import { requestThreadFindOpen } from "./chat/threadFindActionBus";
 import {
@@ -119,6 +122,7 @@ import { readLocalApi } from "../localApi";
 import { desktopLocalBackendId } from "../connection/desktopLocal";
 import { filesystemEnvironment, useFilesystemReadAccess } from "../state/filesystem";
 import { projectEnvironment } from "../state/projects";
+import { useCivilizationCitizenSearch } from "../state/civilization";
 import { useEnvironmentQuery } from "../state/query";
 import { serverEnvironment } from "../state/server";
 import { threadEnvironment } from "../state/threads";
@@ -134,8 +138,15 @@ import {
   useEnvironments,
   usePrimaryEnvironmentId,
 } from "../state/environments";
-import { useProjects, useServerConfigs, useThreadShells, waitForProject } from "../state/entities";
-import { useThreadSearch } from "../state/queries";
+import {
+  readProject,
+  readThreadShell,
+  useProjects,
+  useServerConfigs,
+  useThreadShells,
+  waitForProject,
+} from "../state/entities";
+import { useDebouncedValue, useThreadSearch } from "../state/queries";
 import { resolveThreadActionProjectRef, startNewThreadFromContext } from "../lib/chatThreadActions";
 import {
   appendBrowsePathSegment,
@@ -177,6 +188,8 @@ import {
   ADDON_ICON_CLASS,
   browseInputEndPaddingClass,
   buildBrowseGroups,
+  buildCitizenSearchActionItems,
+  commandPaletteCitizenSearchInput,
   buildCommandPaletteProjectMetadata,
   buildProjectActionItems,
   buildRootGroups,
@@ -185,6 +198,10 @@ import {
   buildCommandPaletteRows,
   enumerateCommandPaletteItems,
   findHighlightedCommandPaletteItem,
+  getCitizenSearchEmptyStateMessage,
+  isExactCitizenNavigationTargetAvailable,
+  mergeCitizenSearchGroup,
+  normalizeCommandPaletteCitizenSearchQuery,
   type CommandPaletteActionItem,
   type CommandPaletteOpenIntent,
   type CommandPaletteProject,
@@ -252,6 +269,8 @@ import { readPullRequestListPreferences } from "~/components/pullRequest/pullReq
 import { useThreadRouteTarget } from "../hooks/useThreadRouteTarget";
 
 const EMPTY_BROWSE_ENTRIES: FilesystemBrowseResult["entries"] = [];
+const CITIZEN_SEARCH_DEBOUNCE_MS = 200;
+const CITIZEN_SEARCH_VIEW_PREFIX = "citizen-search:";
 
 function getEnvironmentBrowsePlatform(os: string | null | undefined): string {
   if (os === "windows") {
@@ -824,6 +843,11 @@ function OpenCommandPaletteDialog(props: {
   );
   const [viewStack, setViewStack] = useState<CommandPaletteView[]>([]);
   const currentView = viewStack.at(-1) ?? null;
+  const [citizenSearchTarget, setCitizenSearchTarget] = useState<{
+    readonly environmentId: EnvironmentId;
+    readonly projectId: ProjectId;
+    readonly label: string;
+  } | null>(null);
   const environmentIds = environments
     .filter((environment) => environment.connection.phase === "connected")
     .map((environment) => environment.environmentId);
@@ -977,6 +1001,63 @@ function OpenCommandPaletteDialog(props: {
   };
 
   const { projectCwdById, projectByKey, projectTitleById } = useProjectLookups();
+  const contextualCitizenProjectRef = activeThread
+    ? scopeProjectRef(activeThread.environmentId, activeThread.projectId)
+    : activeDraftThread
+      ? scopeProjectRef(activeDraftThread.environmentId, activeDraftThread.projectId)
+      : null;
+  const contextualCitizenProject =
+    contextualCitizenProjectRef === null
+      ? null
+      : (projectByKey.get(
+          `${contextualCitizenProjectRef.environmentId}:${contextualCitizenProjectRef.projectId}`,
+        ) ?? null);
+  const isCitizenSearchView =
+    currentView?.groups[0]?.value.startsWith(CITIZEN_SEARCH_VIEW_PREFIX) === true;
+  const rootCitizenSearchTarget =
+    currentView === null && contextualCitizenProject !== null
+      ? {
+          environmentId: contextualCitizenProject.environmentId,
+          projectId: contextualCitizenProject.id,
+          label: contextualCitizenProject.title,
+        }
+      : null;
+  const activeCitizenSearchTarget = isCitizenSearchView
+    ? citizenSearchTarget
+    : rootCitizenSearchTarget;
+  const citizenSearchCanRead = useEnvironmentScope(
+    activeCitizenSearchTarget?.environmentId ?? null,
+    AuthOrchestrationReadScope,
+  );
+  const boundedCitizenSearchQuery = isActionsOnly
+    ? null
+    : normalizeCommandPaletteCitizenSearchQuery(deferredQuery);
+  const citizenSearchInput = commandPaletteCitizenSearchInput({
+    query: deferredQuery,
+    isActionsOnly,
+    hasExactTarget: activeCitizenSearchTarget !== null && citizenSearchCanRead,
+  });
+  const debouncedCitizenSearchInput = useDebouncedValue(
+    citizenSearchInput ?? "",
+    CITIZEN_SEARCH_DEBOUNCE_MS,
+  );
+  const settledCitizenSearchInput =
+    citizenSearchInput !== null && citizenSearchInput === debouncedCitizenSearchInput
+      ? citizenSearchInput
+      : null;
+  const citizenSearch = useCivilizationCitizenSearch(
+    settledCitizenSearchInput === null ? null : (activeCitizenSearchTarget?.environmentId ?? null),
+    settledCitizenSearchInput === null ? null : (activeCitizenSearchTarget?.projectId ?? null),
+    settledCitizenSearchInput,
+    CIVILIZATION_CITIZEN_SEARCH_DEFAULT_LIMIT,
+  );
+  const citizenSearchIsPending =
+    citizenSearchInput !== null &&
+    (citizenSearchInput !== debouncedCitizenSearchInput || citizenSearch.isPending);
+  const citizenSearchResults =
+    settledCitizenSearchInput === null || !citizenSearch.isSuccess || citizenSearch.error !== null
+      ? []
+      : (citizenSearch.data ?? []);
 
   const activeThreadId = activeThread?.id;
   const supportsThreadFind =
@@ -1275,6 +1356,59 @@ function OpenCommandPaletteDialog(props: {
     },
   });
   const recentThreadItems = allThreadItems.slice(0, RECENT_THREAD_LIMIT);
+  const citizenSearchItems =
+    activeCitizenSearchTarget === null
+      ? []
+      : buildCitizenSearchActionItems({
+          environmentId: activeCitizenSearchTarget.environmentId,
+          results: citizenSearchResults,
+          icon: <UsersIcon className={ITEM_ICON_CLASS} />,
+          renderDescription: (result) => (
+            <span className="flex min-w-0 flex-wrap items-center gap-x-1">
+              <span className="max-w-64 truncate">{result.threadTitle || "Untitled thread"}</span>
+              <CommandPaletteMetaDot />
+              <span>{activeCitizenSearchTarget.label}</span>
+              <CommandPaletteMetaDot />
+              <span className="capitalize">{result.lifecycleState}</span>
+              <CommandPaletteMetaDot />
+              <span>{result.profileLabel}</span>
+              <CommandPaletteMetaDot />
+              <span>Gen {result.generation}</span>
+              {result.observedOnly ? (
+                <>
+                  <CommandPaletteMetaDot />
+                  <span>Observed</span>
+                </>
+              ) : null}
+            </span>
+          ),
+          runCitizen: async (result) => {
+            const target = activeCitizenSearchTarget;
+            if (target.projectId !== result.projectId) {
+              throw new Error("The exact Civilization project is no longer selected.");
+            }
+            if (!readEnvironmentScope(target.environmentId, AuthOrchestrationReadScope)) {
+              throw new Error("orchestration:read access is required to open this citizen result.");
+            }
+            const projectRef = scopeProjectRef(target.environmentId, result.projectId);
+            const threadRef = scopeThreadRef(target.environmentId, result.threadId);
+            if (
+              !isExactCitizenNavigationTargetAvailable({
+                environmentId: target.environmentId,
+                projectId: result.projectId,
+                threadId: result.threadId,
+                project: readProject(projectRef),
+                thread: readThreadShell(threadRef),
+              })
+            ) {
+              throw new Error("That citizen is no longer available in this exact checkout.");
+            }
+            await navigate({
+              to: "/$environmentId/$threadId",
+              params: buildThreadRouteParams(threadRef),
+            });
+          },
+        });
 
   // Stable so the item builders that capture it during render never see the
   // highlight ref it writes.
@@ -1305,6 +1439,9 @@ function OpenCommandPaletteDialog(props: {
     browseNavigation.invalidate();
     setAddProjectCloneFlow(null);
     setNewProjectFlow(null);
+    if (isCitizenSearchView) {
+      setCitizenSearchTarget(null);
+    }
     if (viewStack.length <= 1) {
       setAddProjectEnvironmentId(null);
     } else if (newProjectFlow?.sourcesEnvironmentId) {
@@ -1577,6 +1714,78 @@ function OpenCommandPaletteDialog(props: {
     if (firstOption) startNewProject(firstOption.environmentId, null);
   };
 
+  const isCitizenProjectChooserView = currentView?.groups[0]?.value === "citizen-search-projects";
+  const rootCitizenChooserInitialQuery =
+    currentView === null && rootCitizenSearchTarget === null && !isActionsOnly
+      ? (normalizeCommandPaletteCitizenSearchQuery(deferredQuery) ?? undefined)
+      : undefined;
+  const citizenProjectChooserSearchTerm = isCitizenProjectChooserView
+    ? (currentView.initialQuery ?? "")
+    : (rootCitizenChooserInitialQuery ?? "");
+  const citizenSearchAddonIcon = <UsersIcon className={ADDON_ICON_CLASS} />;
+  const citizenProjectSearchItems = buildProjectActionItems({
+    projects: projects
+      .filter((project) => readEnvironmentScope(project.environmentId, AuthOrchestrationReadScope))
+      .map((project) => ({ ...project, displayName: project.title })),
+    valuePrefix: "citizen-search-project",
+    searchTerms: (project) => {
+      const metadata = buildCommandPaletteProjectMetadata({
+        projects: [project],
+        locationByEnvironmentId: projectEnvironmentLocationById,
+      });
+      return [...metadata.searchTerms, citizenProjectChooserSearchTerm];
+    },
+    renderDescription: (project) => {
+      const metadata = buildCommandPaletteProjectMetadata({
+        projects: [project],
+        locationByEnvironmentId: projectEnvironmentLocationById,
+      });
+      const location = projectEnvironmentLocationById.get(project.environmentId) ?? {
+        kind: "remote" as const,
+        label: "Remote",
+        machine: "server" as const,
+      };
+      return (
+        <ProjectSearchDescription
+          environmentLabels={metadata.environmentLabels}
+          grouped={false}
+          location={location}
+          workspaceRoot={project.workspaceRoot}
+        />
+      );
+    },
+    icon: projectFaviconIcon,
+    runProject: async (project) => {
+      if (!readEnvironmentScope(project.environmentId, AuthOrchestrationReadScope)) {
+        throw new Error("orchestration:read access is required to search this checkout.");
+      }
+      const projectRef = scopeProjectRef(project.environmentId, project.id);
+      if (readProject(projectRef) === null) {
+        throw new Error("That exact project checkout is no longer available.");
+      }
+      const initialQuery =
+        currentView?.groups[0]?.value === "citizen-search-projects"
+          ? currentView.initialQuery
+          : undefined;
+      setCitizenSearchTarget({
+        environmentId: project.environmentId,
+        projectId: project.id,
+        label: project.title,
+      });
+      pushPaletteView({
+        addonIcon: citizenSearchAddonIcon,
+        groups: [
+          {
+            value: `${CITIZEN_SEARCH_VIEW_PREFIX}${project.environmentId}:${project.id}`,
+            label: "Citizens",
+            items: [],
+          },
+        ],
+        ...(initialQuery === undefined ? {} : { initialQuery }),
+      });
+    },
+  }).map((item) => ({ ...item, keepOpen: true }));
+
   const actionItems: Array<CommandPaletteActionItem | CommandPaletteSubmenuItem> = [];
 
   if (projects.length > 0) {
@@ -1616,6 +1825,35 @@ function OpenCommandPaletteDialog(props: {
       addonIcon: <SquarePenIcon className={ADDON_ICON_CLASS} />,
       groups: [{ value: "projects", label: "Projects", items: projectThreadItems }],
     });
+
+    if (citizenProjectSearchItems.length > 0) {
+      actionItems.push({
+        kind: "submenu",
+        value: "action:citizen-search",
+        searchTerms: [
+          "citizen",
+          "civilization",
+          "agent",
+          "find",
+          "lookup",
+          ...(rootCitizenChooserInitialQuery === undefined ? [] : [rootCitizenChooserInitialQuery]),
+        ],
+        title: "Search citizens in...",
+        description: "Choose one exact project checkout",
+        icon: <UsersIcon className={ITEM_ICON_CLASS} />,
+        addonIcon: <UsersIcon className={ADDON_ICON_CLASS} />,
+        groups: [
+          {
+            value: "citizen-search-projects",
+            label: "Projects / checkouts",
+            items: citizenProjectSearchItems,
+          },
+        ],
+        ...(rootCitizenChooserInitialQuery === undefined
+          ? {}
+          : { initialQuery: rootCitizenChooserInitialQuery }),
+      });
+    }
   }
 
   if (scratchTargetEnvironmentId !== null) {
@@ -1943,6 +2181,7 @@ function OpenCommandPaletteDialog(props: {
   // parent's intent and may navigate, so it runs after commit but before paint.
   const projectThreadItemCount = projectThreadItems.length;
   const applyOpenIntent = useEffectEvent((intent: CommandPaletteOpenIntent) => {
+    setCitizenSearchTarget(null);
     switch (intent.kind) {
       case "search":
         browseNavigation.invalidate();
@@ -2145,6 +2384,19 @@ function OpenCommandPaletteDialog(props: {
           })
         : allThreadItems,
   });
+  const filteredGroupsWithCitizens =
+    currentView === null &&
+    rootCitizenSearchTarget !== null &&
+    settledCitizenSearchInput !== null &&
+    !isActionsOnly
+      ? mergeCitizenSearchGroup({
+          groups: filteredGroups,
+          items: citizenSearchItems,
+          results: citizenSearchResults,
+          environmentId: rootCitizenSearchTarget.environmentId,
+          query: settledCitizenSearchInput,
+        })
+      : filteredGroups;
 
   const handleAddProjectForEnvironment = async (input: {
     readonly environmentId: EnvironmentId;
@@ -2764,7 +3016,13 @@ function OpenCommandPaletteDialog(props: {
           },
         ];
 
-  let displayedGroups: CommandPaletteView["groups"] = filteredGroups;
+  const dedicatedCitizenGroups: CommandPaletteView["groups"] =
+    isCitizenSearchView && citizenSearchItems.length > 0
+      ? [{ value: "citizens-search", label: "Citizens", items: citizenSearchItems }]
+      : [];
+  let displayedGroups: CommandPaletteView["groups"] = isCitizenSearchView
+    ? dedicatedCitizenGroups
+    : filteredGroupsWithCitizens;
   if (newProjectFlow !== null) {
     displayedGroups = [
       ...(newProjectMachineGroup ? [newProjectMachineGroup] : []),
@@ -2785,8 +3043,25 @@ function OpenCommandPaletteDialog(props: {
   const inputPlaceholder =
     newProjectFlow !== null
       ? "Project name"
-      : (remoteProjectInputPlaceholder(addProjectCloneFlow) ??
-        getCommandPaletteInputPlaceholder(paletteMode));
+      : isCitizenSearchView && activeCitizenSearchTarget !== null
+        ? `Search citizens in ${activeCitizenSearchTarget.label}`
+        : (remoteProjectInputPlaceholder(addProjectCloneFlow) ??
+          getCommandPaletteInputPlaceholder(paletteMode));
+  const citizenSearchEmptyStateMessage = getCitizenSearchEmptyStateMessage({
+    dedicated: isCitizenSearchView,
+    targetLabel: activeCitizenSearchTarget?.label ?? null,
+    accessAllowed: activeCitizenSearchTarget !== null && citizenSearchCanRead,
+    hasValidQuery: citizenSearchInput !== null,
+    isPending: citizenSearchIsPending,
+    error: citizenSearch.error,
+    isSuccess: settledCitizenSearchInput !== null && citizenSearch.isSuccess,
+    rootSearchActive:
+      currentView === null &&
+      rootCitizenSearchTarget !== null &&
+      boundedCitizenSearchQuery !== null &&
+      !isActionsOnly,
+    threadSearchPending: threadSearch.isPending,
+  });
   const isSubmenu = paletteMode === "submenu" || paletteMode === "submenu-browse";
   const hasHighlightedBrowseItem = highlightedItemValue?.startsWith("browse:") ?? false;
   const canWriteSourceControl = useEnvironmentScope(
@@ -3343,9 +3618,11 @@ function OpenCommandPaletteDialog(props: {
                 ? {
                     emptyStateMessage: "Press Enter to create this folder and add it as a project.",
                   }
-                : threadSearch.isPending
-                  ? { emptyStateMessage: "Searching thread messages…" }
-                  : {})}
+                : citizenSearchEmptyStateMessage !== null
+                  ? { emptyStateMessage: citizenSearchEmptyStateMessage }
+                  : threadSearch.isPending
+                    ? { emptyStateMessage: "Searching thread messages…" }
+                    : {})}
       />
     </CommandPaletteContent>
   );

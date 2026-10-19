@@ -244,6 +244,7 @@ const withFakeCivilizationServer = <A, E, R>(
                   messageId: decodeURIComponent(
                     url.pathname.slice("/api/civilization/inbox/".length),
                   ),
+                  contentKind: "text",
                   senderThreadId: "thread:sender",
                   senderNameAtSend: "Ada",
                   senderCitizenEpoch: 2,
@@ -275,7 +276,7 @@ const withFakeCivilizationServer = <A, E, R>(
               response.setHeader("content-type", "application/json");
               response.end(
                 encodeJson({
-                  schemaVersion: 1,
+                  schemaVersion: 4,
                   projectId: url.searchParams.get("projectId"),
                   exportedAt: "2026-10-16T10:00:00.000Z",
                   environmentRevision: 0,
@@ -295,6 +296,9 @@ const withFakeCivilizationServer = <A, E, R>(
                   citizens: [],
                   notes: [],
                   mail: [],
+                  chronicle: [],
+                  achievements: [],
+                  projectBrief: null,
                 }),
               );
               return;
@@ -311,12 +315,16 @@ const withFakeCivilizationServer = <A, E, R>(
                   censusRevision: 0,
                   notesRevision: 0,
                   mailRevision: 0,
+                  chronicleRevision: 0,
+                  achievementRevision: 0,
                   counts: {
                     citizens: 0,
                     notes: 0,
                     noteBodyBytes: 0,
                     messages: 0,
                     messageBodyBytes: 0,
+                    chronicleEntries: 0,
+                    achievementAwards: 0,
                     contextReferences: 0,
                     contextInspections: 0,
                     receipts: 0,
@@ -444,6 +452,33 @@ const withFakeCivilizationServer = <A, E, R>(
                     diagnosticReferences: 4,
                     diagnosticInspections: 2,
                     tombstones: 1,
+                  },
+                }),
+              );
+              return;
+            }
+            if (request.method === "POST" && url.pathname === "/api/civilization/config/set") {
+              const body = await new Promise<string>((resolveBody) => {
+                let text = "";
+                request.setEncoding("utf8");
+                request.on("data", (chunk) => {
+                  text += chunk;
+                });
+                request.on("end", () => resolveBody(text));
+              });
+              observedRequest.body = JSON.parse(body) as unknown;
+              response.statusCode = 200;
+              response.setHeader("content-type", "application/json");
+              response.end(
+                encodeJson({
+                  revision: 4,
+                  effective: {
+                    config: CivilizationDefaultConfig,
+                    environmentRevision: 7,
+                    projectRevision: 4,
+                    provenance: [],
+                    selectedNameProbabilities: [],
+                    selectedProfileProbabilities: [],
                   },
                 }),
               );
@@ -826,8 +861,29 @@ it.effect(
             "--base-dir",
             baseDir,
           ]);
+          const configOverridePath = NodePath.join(baseDir, "project-override.json");
+          NodeFS.writeFileSync(
+            configOverridePath,
+            JSON.stringify({ version: CivilizationDefaultConfig.version }),
+            "utf8",
+          );
+          yield* runCli([
+            "civilization",
+            "config",
+            "set",
+            "--project",
+            "project:test",
+            "--expected-revision",
+            "3",
+            "--expected-environment-revision",
+            "7",
+            "--file",
+            configOverridePath,
+            "--base-dir",
+            baseDir,
+          ]);
 
-          assert.equal(authorizations.length, 12);
+          assert.equal(authorizations.length, 13);
           assert.isTrue(authorizations.every((value) => /^Bearer .+/.test(value ?? "")));
 
           const seen = requests.map(({ method, url, body }) => ({
@@ -904,6 +960,14 @@ it.effect(
           assert.deepEqual(retentionApply?.body, {
             projectId: "project:test",
             expectedPreviewToken: "sha256:retention-preview",
+          });
+          const configSet = seen.find(({ url }) => url.pathname === "/api/civilization/config/set");
+          assert.equal(configSet?.method, "POST");
+          assert.deepEqual(configSet?.body, {
+            projectId: "project:test",
+            expectedRevision: 3,
+            expectedEnvironmentRevision: 7,
+            override: { version: CivilizationDefaultConfig.version },
           });
         }),
       ),

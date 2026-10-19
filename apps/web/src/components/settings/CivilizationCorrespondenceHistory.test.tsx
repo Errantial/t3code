@@ -17,6 +17,7 @@ const messageId = CivilizationMessageId.make("mail:correspondence-ui");
 
 const message: CivilizationMailSummary = {
   messageId,
+  contentKind: "text",
   senderThreadId: senderId,
   senderNameAtSend: "Ada",
   senderCitizenEpoch: 3,
@@ -40,6 +41,22 @@ const message: CivilizationMailSummary = {
   terminalReason: null,
 };
 
+const handoffMessage: CivilizationMailSummary = {
+  ...message,
+  contentKind: "handoff_v1",
+  bodyBytes: 256,
+};
+
+const handoff = {
+  version: 1 as const,
+  summary: "Preserve the release candidate state.",
+  completed: ["Validated passive delivery."],
+  decisions: ["Keep the existing project authority boundary."],
+  nextActions: ["Run the focused regression suite."],
+  blockersOrQuestions: ["Confirm the final acceptance evidence."],
+  references: [{ kind: "thread", reference: "thread:handoff-reference" }],
+};
+
 const testState = vi.hoisted(() => ({
   pageCalls: [] as unknown[][],
   threadCalls: [] as unknown[][],
@@ -47,12 +64,20 @@ const testState = vi.hoisted(() => ({
   writable: true,
   emptyPage: false,
   emptyThread: false,
+  handoffMode: false,
 }));
 
 vi.mock("@effect/atom-react", () => ({
   useAtomSet: () => async (input: unknown) => {
     testState.sensitiveReads.push(input);
-    return { projectId, ...message, body: "secret-body-text" };
+    return testState.handoffMode
+      ? {
+          projectId,
+          ...handoffMessage,
+          body: "Summary:\nPreserve the release candidate state.\n\nCompleted:\n- Validated passive delivery.",
+          handoff,
+        }
+      : { projectId, ...message, body: "secret-body-text" };
   },
 }));
 
@@ -69,7 +94,7 @@ vi.mock("../../state/civilization", () => ({
       data: {
         projectId,
         revision: 4,
-        messages: testState.emptyPage ? [] : [message],
+        messages: testState.emptyPage ? [] : [testState.handoffMode ? handoffMessage : message],
         citizenReferences: [
           { threadId: senderId, name: "Ada Current" },
           { threadId: recipientId, name: "Grace" },
@@ -95,7 +120,14 @@ vi.mock("../../state/civilization", () => ({
               selectedMessageId: messageId,
               entries: testState.emptyThread
                 ? []
-                : [{ message, relation: "selected", depth: 0, unresolvedParent: false }],
+                : [
+                    {
+                      message: testState.handoffMode ? handoffMessage : message,
+                      relation: "selected",
+                      depth: 0,
+                      unresolvedParent: false,
+                    },
+                  ],
               citizenReferences: [
                 { threadId: senderId, name: "Ada Current" },
                 { threadId: recipientId, name: "Grace" },
@@ -135,6 +167,16 @@ vi.mock("./settingsLayout", () => ({
   ),
 }));
 
+vi.mock("../ui/dialog", () => ({
+  Dialog: ({ open, children }: { readonly open: boolean; readonly children: ReactNode }) =>
+    open ? <div>{children}</div> : null,
+  DialogDescription: ({ children }: { readonly children: ReactNode }) => <p>{children}</p>,
+  DialogHeader: ({ children }: { readonly children: ReactNode }) => <div>{children}</div>,
+  DialogPanel: ({ children }: { readonly children: ReactNode }) => <div>{children}</div>,
+  DialogPopup: ({ children }: { readonly children: ReactNode }) => <div>{children}</div>,
+  DialogTitle: ({ children }: { readonly children: ReactNode }) => <h3>{children}</h3>,
+}));
+
 import { CivilizationCorrespondenceHistory } from "./CivilizationCorrespondenceHistory";
 
 let renderer: ReactTestRenderer | undefined;
@@ -164,6 +206,7 @@ beforeEach(() => {
   testState.writable = true;
   testState.emptyPage = false;
   testState.emptyThread = false;
+  testState.handoffMode = false;
   onViewLineage.mockReset();
   onViewChronicleSource.mockReset();
   onViewCitizen.mockReset();
@@ -193,6 +236,7 @@ describe("Civilization correspondence history", () => {
     const rendered = renderedText(renderer?.toJSON());
     expect(rendered).toContain("Correspondence history");
     expect(rendered).toContain("Sender epoch 3");
+    expect(rendered).toContain("Text message");
     expect(rendered).toContain("Delivery epoch 7");
     expect(rendered).toContain("Grace");
     expect(rendered).toContain("Acknowledged");
@@ -317,6 +361,13 @@ describe("Civilization correspondence history", () => {
     );
     await act(() => sender!.props.onChange({ currentTarget: { value: senderId } }));
     await act(() => recipient!.props.onChange({ currentTarget: { value: recipientId } }));
+    const contentKindSelect = renderer!.root
+      .findAll(
+        (node) => node.props.value === "any" && typeof node.props.onValueChange === "function",
+      )
+      .find((node) => renderedText(node.props.children).includes("Structured handoffs"));
+    expect(contentKindSelect).toBeDefined();
+    await act(() => contentKindSelect!.props.onValueChange("handoff_v1"));
     const apply = renderer!.root
       .findAllByType("button")
       .find((button) => button.props.children === "Apply advanced filters");
@@ -326,10 +377,45 @@ describe("Civilization correspondence history", () => {
       participantThreadId: senderId,
       senderThreadId: senderId,
       recipientThreadId: recipientId,
+      contentKind: "handoff_v1",
       replyRelation: "any",
     });
     expect(testState.pageCalls.at(-1)?.[4]).toBe(10);
     expect(testState.sensitiveReads).toHaveLength(0);
+  });
+
+  it("renders structured handoff metadata and the typed body without side effects", async () => {
+    testState.handoffMode = true;
+    await act(() => {
+      renderer = create(
+        <CivilizationCorrespondenceHistory
+          environmentId={environmentId}
+          projectId={projectId}
+          pageSize={10}
+          allowSensitiveActions
+        />,
+      );
+    });
+
+    expect(renderedText(renderer?.toJSON())).toContain("Structured handoff");
+    const bodyButton = renderer!.root
+      .findAllByType("button")
+      .find((button) => button.props.children === "View message");
+    await act(async () => bodyButton!.props.onClick());
+
+    const rendered = renderedText(renderer?.toJSON());
+    expect(rendered).toContain("Handoff v1");
+    expect(rendered).toContain("Preserve the release candidate state.");
+    expect(rendered).toContain("Validated passive delivery.");
+    expect(rendered).toContain("Keep the existing project authority boundary.");
+    expect(rendered).toContain("Run the focused regression suite.");
+    expect(rendered).toContain("Confirm the final acceptance evidence.");
+    expect(rendered).toContain("thread: thread:handoff-reference");
+    expect(rendered).toContain("Rendered body");
+    expect(rendered).toContain("Summary:\nPreserve the release candidate state.");
+    expect(testState.sensitiveReads).toEqual([
+      { type: "mailBody", environmentId, projectId, messageId },
+    ]);
   });
 
   it("shows explicit loaded-empty states for conversations and reply chains", async () => {

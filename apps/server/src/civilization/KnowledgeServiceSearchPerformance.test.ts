@@ -42,6 +42,7 @@ it.effect(
       yield* configService.set({
         projectId: PROJECT_ID,
         expectedRevision: 0,
+        expectedEnvironmentRevision: 0,
         override: {
           version: CIVILIZATION_CONFIG_VERSION,
           participation: { enabled: true, showObservedAgents: false },

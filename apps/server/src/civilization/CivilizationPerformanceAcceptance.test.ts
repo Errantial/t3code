@@ -201,6 +201,7 @@ const seedFixture = (
     yield* config.set({
       projectId: PROJECT_ID,
       expectedRevision: 0,
+      expectedEnvironmentRevision: 0,
       override: {
         version: CIVILIZATION_CONFIG_VERSION,
         participation: { enabled: true },
@@ -533,6 +534,7 @@ it.effect(
       yield* config.set({
         projectId: PROJECT_ID,
         expectedRevision: 1,
+        expectedEnvironmentRevision: 0,
         override: {
           version: CIVILIZATION_CONFIG_VERSION,
           participation: { enabled: false },

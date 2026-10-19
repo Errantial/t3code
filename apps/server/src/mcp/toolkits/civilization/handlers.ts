@@ -310,6 +310,22 @@ const handlers = {
     }).pipe(Effect.mapError(mcpFailure)),
   ),
 
+  civilization_handoff_send: McpToolAccess.actsAsCaller((input) =>
+    Effect.gen(function* () {
+      const caller = yield* authoritativeMailCaller();
+      const mail = yield* Mail.CivilizationMailService;
+      return yield* mail.sendHandoff({
+        caller,
+        targetThreadId: input.targetThreadId,
+        clientRequestId: input.clientRequestId,
+        handoff: input.handoff,
+        ...(input.replyToMessageId === undefined
+          ? {}
+          : { replyToMessageId: input.replyToMessageId }),
+      });
+    }).pipe(Effect.mapError(mcpFailure)),
+  ),
+
   civilization_mail_receive: McpToolAccess.actsAsCaller((input) =>
     Effect.gen(function* () {
       const caller = yield* authoritativeMailCaller();

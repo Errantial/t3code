@@ -14,6 +14,18 @@ export interface MobileCivilizationTarget extends MobileCivilizationEnvironmentT
   readonly projectId: ProjectId | null;
 }
 
+export interface MobileCivilizationProjectTarget extends MobileCivilizationEnvironmentTarget {
+  readonly projectId: ProjectId;
+}
+
+export interface MobileCivilizationAttentionViewState {
+  readonly permissionMessage: string | null;
+  readonly isPending: boolean;
+  readonly error: string | null;
+  readonly hasData: boolean;
+  readonly itemCount: number;
+}
+
 export function mobileCivilizationPermissionMessage(input: {
   readonly canRead: boolean;
   readonly sessionAvailable: boolean;
@@ -42,4 +54,24 @@ export function resolveMobileCivilizationTargets(input: {
       ? []
       : [{ ...environment, projectId: member.id } satisfies MobileCivilizationTarget];
   });
+}
+
+export function resolveMobileCivilizationAttentionTarget(
+  targets: readonly MobileCivilizationTarget[],
+): MobileCivilizationProjectTarget | null {
+  if (targets.length !== 1) return null;
+  const target = targets[0];
+  if (target === undefined || target.projectId === null) return null;
+  return { ...target, projectId: target.projectId };
+}
+
+export function mobileCivilizationAttentionMessage(
+  input: MobileCivilizationAttentionViewState,
+): string | null {
+  if (input.permissionMessage !== null) return input.permissionMessage;
+  if (input.isPending) return "Checking attention…";
+  if (input.error !== null) return `Unavailable · ${input.error}`;
+  if (!input.hasData) return "Unavailable · This environment did not return attention data.";
+  if (input.itemCount === 0) return "Nothing needs attention.";
+  return null;
 }

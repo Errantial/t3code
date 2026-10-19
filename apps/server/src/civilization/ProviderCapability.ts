@@ -78,13 +78,15 @@ export function civilizationProviderCapability(
   };
 }
 
-export const resolveCivilizationProviderCapability = Effect.fn(
-  "Civilization.resolveProviderCapability",
-)(function* (input: {
+type ResolveCivilizationProviderCapabilityInput = {
   readonly adapter: ProviderAdapter.ProviderAdapterV2["Service"];
   readonly providerInstanceId: ProviderInstanceId;
   readonly observedOnly: boolean;
-}) {
+};
+
+export const resolveCivilizationProviderCapabilityStrict = Effect.fn(
+  "Civilization.resolveProviderCapabilityStrict",
+)(function* (input: ResolveCivilizationProviderCapabilityInput) {
   if (input.observedOnly || input.adapter.getCivilizationCapability === undefined) {
     return {
       capability: civilizationProviderCapability({
@@ -97,18 +99,22 @@ export const resolveCivilizationProviderCapability = Effect.fn(
     } as const;
   }
 
-  return yield* input.adapter.getCivilizationCapability().pipe(
-    Effect.map((profile) => {
-      const { contextTransport, providerCommandRefresh, ...capability } = profile;
-      return {
-        capability: {
-          providerInstanceId: input.providerInstanceId,
-          ...capability,
-        } satisfies CivilizationProviderCapability,
-        transport: contextTransport,
-        providerCommandRefresh,
-      } as const;
-    }),
+  const profile = yield* input.adapter.getCivilizationCapability();
+  const { contextTransport, providerCommandRefresh, ...capability } = profile;
+  return {
+    capability: {
+      providerInstanceId: input.providerInstanceId,
+      ...capability,
+    } satisfies CivilizationProviderCapability,
+    transport: contextTransport,
+    providerCommandRefresh,
+  } as const;
+});
+
+export const resolveCivilizationProviderCapability = Effect.fn(
+  "Civilization.resolveProviderCapability",
+)((input: ResolveCivilizationProviderCapabilityInput) =>
+  resolveCivilizationProviderCapabilityStrict(input).pipe(
     Effect.catch(() =>
       Effect.succeed({
         capability: civilizationProviderCapability({
@@ -120,5 +126,5 @@ export const resolveCivilizationProviderCapability = Effect.fn(
         providerCommandRefresh: false,
       } as const),
     ),
-  );
-});
+  ),
+);

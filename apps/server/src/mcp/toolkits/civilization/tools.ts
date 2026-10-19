@@ -11,6 +11,7 @@ import {
   CivilizationMailReceiveResult,
   CivilizationMailSendRequest,
   CivilizationMailSendResult,
+  CivilizationPassiveHandoffSendRequest,
   CivilizationNoteBody,
   CivilizationNoteCreateRequest,
   CivilizationNoteId,
@@ -239,6 +240,27 @@ const CivilizationMailSendTool = Tool.make("civilization_mail_send", {
   .annotate(Tool.Destructive, false)
   .annotate(Tool.Idempotent, false);
 
+const CivilizationHandoffSendTool = Tool.make("civilization_handoff_send", {
+  description:
+    "Send one structured passive Civilization handoff as the currently running citizen. Sender/project/run/epochs/provider/modes are authoritative server state and cannot be overridden. Delivery is passive and does not wake, steer, poll, or auto-reply to the recipient.",
+  parameters: Schema.Struct({
+    targetThreadId: CivilizationPassiveHandoffSendRequest.fields.targetThreadId,
+    clientRequestId: CivilizationPassiveHandoffSendRequest.fields.clientRequestId,
+    handoff: CivilizationPassiveHandoffSendRequest.fields.handoff,
+    replyToMessageId: Schema.optional(
+      CivilizationPassiveHandoffSendRequest.fields.replyToMessageId,
+    ),
+  }),
+  success: CivilizationMailSendResult,
+  failure: OrchestratorMcpFailure,
+  failureMode: "return",
+  dependencies,
+})
+  .annotate(Tool.Title, "Send Civilization handoff")
+  .annotate(Tool.Readonly, false)
+  .annotate(Tool.Destructive, false)
+  .annotate(Tool.Idempotent, false);
+
 const CivilizationMailReceiveTool = Tool.make("civilization_mail_receive", {
   description:
     "Offer one addressed Civilization mail body to the currently running citizen. This records the body offer for idempotency/audit but does not acknowledge the message.",
@@ -284,6 +306,7 @@ export const CivilizationToolkit = Toolkit.make(
   CivilizationNoteUpdateTool,
   CivilizationNoteResolveTool,
   CivilizationMailSendTool,
+  CivilizationHandoffSendTool,
   CivilizationMailReceiveTool,
   CivilizationMailAcknowledgeTool,
 );

@@ -28,6 +28,16 @@ const projectBriefContent = {
   references: [{ kind: "issue", reference: "V15-1" }],
 } as const;
 const projectBriefJson = JSON.stringify(projectBriefContent);
+const handoffPayload = {
+  version: 1,
+  summary: "Carry the reviewed release state forward.",
+  completed: ["Validated the passive handoff path"],
+  decisions: ["Keep delivery passive"],
+  nextActions: ["Continue from the reviewed checkpoint"],
+  blockersOrQuestions: [],
+  references: [{ kind: "test", reference: "operations-export" }],
+} as const;
+const handoffBody = JSON.stringify(handoffPayload);
 
 const layer = (() => {
   const config = ConfigService.layer.pipe(Layer.provide(database));
@@ -245,6 +255,109 @@ it.effect(
       assert.equal(cleared.projectBrief?.bodyBytes, 0);
       assert.isNull(cleared.projectBrief?.content ?? null);
     }).pipe(Effect.provide(Layer.fresh(layer))),
+);
+
+it.effect(
+  "exports handoff_v1 losslessly while keeping legacy text mail representation unchanged",
+  () =>
+    Effect.gen(function* () {
+      const operations = yield* OperationsService.CivilizationOperationsService;
+      const sql = yield* SqlClient.SqlClient;
+      yield* setup;
+      yield* sql`
+        INSERT INTO civilization_messages (
+          message_id, project_id, content_kind, sender_thread_id, sender_name_at_send,
+          sender_citizen_epoch, sender_run_id, recipient_thread_id, recipient_delivery_epoch,
+          reply_to_message_id, body, body_bytes, accepted_runtime_mode, accepted_interaction_mode,
+          accepted_environment_revision, accepted_project_revision, accepted_at, expires_at,
+          terminal_retention_days, first_offered_at, last_offered_at, offer_count,
+          acknowledged_at, terminal_at, terminal_reason
+        ) VALUES (
+          'mail:handoff', ${projectId}, 'handoff_v1', ${threadA}, 'Ada Secret',
+          0, 'run:a', ${threadB}, 0, NULL, ${handoffBody}, ${Buffer.byteLength(handoffBody, "utf8")},
+          'full-access', 'default', 0, 1,
+          '2026-10-16T00:00:02.000Z', '2026-11-16T00:00:00.000Z', 30,
+          NULL, NULL, 0, NULL, NULL, NULL
+        )
+      `;
+
+      const exported = yield* operations.exportProjectData(projectId);
+      assert.equal(exported.schemaVersion, 4);
+      assert.isFalse(exported.limitations.restorable);
+
+      const legacyText = exported.mail.find(
+        (row) => (row as { readonly message_id?: string }).message_id === "mail:one",
+      ) as Record<string, unknown> | undefined;
+      assert.isDefined(legacyText);
+      assert.equal(legacyText.body, "mail-body-one");
+      assert.notProperty(legacyText, "content_kind");
+      assert.notProperty(legacyText, "contentKind");
+      assert.notProperty(legacyText, "handoff");
+
+      const structured = exported.mail.find(
+        (row) => (row as { readonly message_id?: string }).message_id === "mail:handoff",
+      ) as
+        | {
+            readonly contentKind?: string;
+            readonly body?: string;
+            readonly handoff?: unknown;
+          }
+        | undefined;
+      assert.isDefined(structured);
+      assert.equal(structured.contentKind, "handoff_v1");
+      assert.equal(structured.body, handoffBody);
+      assert.deepEqual(structured.handoff, handoffPayload);
+
+      const stored = (yield* sql<{
+        readonly content_kind: string;
+        readonly body: string;
+        readonly body_bytes: number;
+      }>`
+        SELECT content_kind, body, body_bytes
+        FROM civilization_messages
+        WHERE message_id = 'mail:handoff'
+      `)[0]!;
+      assert.deepEqual(stored, {
+        content_kind: "handoff_v1",
+        body: handoffBody,
+        body_bytes: Buffer.byteLength(handoffBody, "utf8"),
+      });
+    }).pipe(Effect.provide(Layer.fresh(layer))),
+);
+
+it.effect("fails body-bearing export closed for corrupt structured handoff storage", () =>
+  Effect.gen(function* () {
+    const operations = yield* OperationsService.CivilizationOperationsService;
+    const sql = yield* SqlClient.SqlClient;
+    yield* setup;
+    const corruptBody = '{"version":1,"summary":"broken"}';
+    yield* sql`
+      INSERT INTO civilization_messages (
+        message_id, project_id, content_kind, sender_thread_id, sender_name_at_send,
+        sender_citizen_epoch, sender_run_id, recipient_thread_id, recipient_delivery_epoch,
+        reply_to_message_id, body, body_bytes, accepted_runtime_mode, accepted_interaction_mode,
+        accepted_environment_revision, accepted_project_revision, accepted_at, expires_at,
+        terminal_retention_days, first_offered_at, last_offered_at, offer_count,
+        acknowledged_at, terminal_at, terminal_reason
+      ) VALUES (
+        'mail:corrupt-handoff', ${projectId}, 'handoff_v1', ${threadA}, 'Ada Secret',
+        0, 'run:a', ${threadB}, 0, NULL, ${corruptBody}, ${Buffer.byteLength(corruptBody, "utf8")},
+        'full-access', 'default', 0, 1,
+        '2026-10-16T00:00:03.000Z', '2026-11-16T00:00:00.000Z', 30,
+        NULL, NULL, 0, NULL, NULL, NULL
+      )
+    `;
+
+    const failure = yield* operations.exportProjectData(projectId).pipe(Effect.flip);
+    assert.equal((failure as { readonly _tag?: string })._tag, "CivilizationUnavailableError");
+    assert.equal((failure as { readonly reason?: string }).reason, "corrupt_state");
+    assert.equal(
+      (yield* sql<{ readonly body: string }>`
+        SELECT body FROM civilization_messages WHERE message_id = 'mail:corrupt-handoff'
+      `)[0]?.body,
+      corruptBody,
+    );
+  }).pipe(Effect.provide(Layer.fresh(layer))),
 );
 
 it.effect("previews exact purge counts/body bytes and rejects a stale preview", () =>
@@ -584,6 +697,22 @@ it.effect("resumes project-deletion cleanup in bounded idempotent batches", () =
     const operations = yield* OperationsService.CivilizationOperationsService;
     const sql = yield* SqlClient.SqlClient;
     yield* setup;
+    yield* sql`
+      INSERT INTO civilization_messages (
+        message_id, project_id, content_kind, sender_thread_id, sender_name_at_send,
+        sender_citizen_epoch, sender_run_id, recipient_thread_id, recipient_delivery_epoch,
+        reply_to_message_id, body, body_bytes, accepted_runtime_mode, accepted_interaction_mode,
+        accepted_environment_revision, accepted_project_revision, accepted_at, expires_at,
+        terminal_retention_days, first_offered_at, last_offered_at, offer_count,
+        acknowledged_at, terminal_at, terminal_reason
+      ) VALUES (
+        'mail:cleanup-handoff', ${projectId}, 'handoff_v1', ${threadA}, 'Ada Secret',
+        0, 'run:a', ${threadB}, 0, NULL, ${handoffBody}, ${Buffer.byteLength(handoffBody, "utf8")},
+        'full-access', 'default', 0, 1,
+        '2026-10-16T00:00:02.000Z', '2026-11-16T00:00:00.000Z', 30,
+        NULL, NULL, 0, NULL, '2026-10-16T00:00:03.000Z', 'recipient_settled'
+      )
+    `;
     assert.equal(
       (yield* sql<{ readonly count: number }>`
         SELECT COUNT(*) AS count
@@ -625,6 +754,12 @@ it.effect("resumes project-deletion cleanup in bounded idempotent batches", () =
         SELECT COUNT(*) AS count
         FROM civilization_context_analytics_hourly
         WHERE project_id = ${projectId}
+      `)[0]?.count,
+      0,
+    );
+    assert.equal(
+      (yield* sql<{ readonly count: number }>`
+        SELECT COUNT(*) AS count FROM civilization_messages WHERE project_id = ${projectId}
       `)[0]?.count,
       0,
     );

@@ -51,6 +51,12 @@ const expectedCitizenRevisionFlag = Flag.Int("expected-citizen-revision").pipe(
 const expectedEnvironmentRevisionFlag = Flag.Int("expected-environment-revision").pipe(
   Flag.withDescription("Expected effective environment configuration revision."),
 );
+const optionalExpectedEnvironmentRevisionFlag = Flag.Int("expected-environment-revision").pipe(
+  Flag.withDescription(
+    "Expected environment configuration revision, required when setting a project override.",
+  ),
+  Flag.optional,
+);
 const expectedProjectRevisionFlag = Flag.Int("expected-project-revision").pipe(
   Flag.withDescription("Expected effective project configuration revision."),
 );
@@ -282,22 +288,46 @@ const configSetCommand = Command.make("set", {
   project: projectFlag,
   file: fileFlag,
   expectedRevision: expectedRevisionFlag,
+  expectedEnvironmentRevision: optionalExpectedEnvironmentRevisionFlag,
 }).pipe(
   Command.withDescription("Commit a Civilization override at an expected revision."),
   Command.withHandler((flags) =>
     withOverrideFile(flags.file, (override) =>
-      withCivilizationClient(flags, (client, token) =>
-        client.civilization
-          .configSet({
-            headers: authorization(token),
-            payload: {
-              projectId: toProjectId(flags.project),
-              expectedRevision: flags.expectedRevision,
-              override,
-            },
-          })
-          .pipe(Effect.flatMap(printJson), Effect.catch(failCli)),
-      ),
+      Effect.gen(function* () {
+        const projectId = toProjectId(flags.project);
+        if (projectId === undefined) {
+          return yield* withCivilizationClient(flags, (client, token) =>
+            client.civilization
+              .configSet({
+                headers: authorization(token),
+                payload: {
+                  expectedRevision: flags.expectedRevision,
+                  override,
+                },
+              })
+              .pipe(Effect.flatMap(printJson), Effect.catch(failCli)),
+          );
+        }
+        if (Option.isNone(flags.expectedEnvironmentRevision)) {
+          return yield* failCliMessage(
+            "--expected-environment-revision is required when --project is supplied to `t3 civilization config set`.",
+          );
+        }
+        const expectedEnvironmentRevision = flags.expectedEnvironmentRevision.value;
+        return yield* withCivilizationClient(flags, (client, token) =>
+          client.civilization
+            .configSet({
+              headers: authorization(token),
+              payload: {
+                projectId,
+                expectedRevision: flags.expectedRevision,
+                expectedEnvironmentRevision,
+                override,
+              },
+            })
+            .pipe(Effect.flatMap(printJson), Effect.catch(failCli)),
+        );
+      }),
     ),
   ),
 );

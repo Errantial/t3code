@@ -1,9 +1,15 @@
 import { threadPullRequestSearchTerms } from "@t3tools/shared/threadPullRequests";
 import type { CommandPaletteLinkedThreads } from "../commandPaletteBus";
 import {
+  CIVILIZATION_CITIZEN_SEARCH_MAX_QUERY_BYTES,
+  CIVILIZATION_CITIZEN_SEARCH_MAX_QUERY_CHARACTERS,
+  CIVILIZATION_CITIZEN_SEARCH_MIN_QUERY_CHARACTERS,
+  type CivilizationCitizenSearchResult,
   type EnvironmentId,
   type FilesystemBrowseEntry,
   type KeybindingCommand,
+  type ProjectId,
+  type ThreadId,
   THREAD_JUMP_KEYBINDING_COMMANDS,
 } from "@t3tools/contracts";
 import { filterFilesystemBrowseEntries } from "@t3tools/client-runtime/state/filesystem";
@@ -19,6 +25,164 @@ import { type Project, type SidebarThreadSummary, type Thread } from "../types";
 export const RECENT_THREAD_LIMIT = 12;
 export const ITEM_ICON_CLASS = "size-4 text-icon-muted";
 export const ADDON_ICON_CLASS = "size-4";
+
+export function normalizeCommandPaletteCitizenSearchQuery(query: string): string | null {
+  const trimmed = query.trim();
+  const characters = [...trimmed].length;
+  if (
+    characters < CIVILIZATION_CITIZEN_SEARCH_MIN_QUERY_CHARACTERS ||
+    characters > CIVILIZATION_CITIZEN_SEARCH_MAX_QUERY_CHARACTERS ||
+    new TextEncoder().encode(trimmed).byteLength > CIVILIZATION_CITIZEN_SEARCH_MAX_QUERY_BYTES
+  ) {
+    return null;
+  }
+  return trimmed;
+}
+
+export function commandPaletteCitizenSearchInput(input: {
+  readonly query: string;
+  readonly isActionsOnly: boolean;
+  readonly hasExactTarget: boolean;
+}): string | null {
+  if (input.isActionsOnly || !input.hasExactTarget) return null;
+  return normalizeCommandPaletteCitizenSearchQuery(input.query);
+}
+
+export function getCitizenSearchEmptyStateMessage(input: {
+  readonly dedicated: boolean;
+  readonly targetLabel: string | null;
+  readonly accessAllowed: boolean;
+  readonly hasValidQuery: boolean;
+  readonly isPending: boolean;
+  readonly error: string | null;
+  readonly isSuccess: boolean;
+  readonly rootSearchActive: boolean;
+  readonly threadSearchPending: boolean;
+}): string | null {
+  if (input.dedicated) {
+    if (input.targetLabel === null) {
+      return "Choose one exact project checkout before searching citizens.";
+    }
+    if (!input.accessAllowed) {
+      return "Citizen search unavailable: orchestration:read access is required.";
+    }
+    if (!input.hasValidQuery) {
+      return "Enter 2–200 characters to search citizens in this checkout.";
+    }
+    if (input.isPending) return "Searching citizens…";
+    if (input.error !== null) return `Citizen search unavailable: ${input.error}`;
+    if (input.isSuccess) return `No matching citizens in ${input.targetLabel}.`;
+    return "Searching citizens…";
+  }
+  if (!input.rootSearchActive) return null;
+  if (!input.accessAllowed) {
+    return "Citizen search unavailable: orchestration:read access is required.";
+  }
+  if (input.isPending) {
+    return input.threadSearchPending ? "Searching citizens and threads…" : "Searching citizens…";
+  }
+  if (input.error !== null) return `Citizen search unavailable: ${input.error}`;
+  return null;
+}
+
+function normalizeCitizenIdentitySearchText(value: string): string {
+  return value.trim().normalize("NFKC").toLocaleLowerCase("en-US");
+}
+
+export function citizenNameCausedSearchMatch(displayName: string, query: string): boolean {
+  const normalizedQuery = normalizeCitizenIdentitySearchText(query);
+  return (
+    normalizedQuery.length > 0 &&
+    normalizeCitizenIdentitySearchText(displayName).startsWith(normalizedQuery)
+  );
+}
+
+export function buildCitizenSearchActionItems(input: {
+  readonly environmentId: EnvironmentId;
+  readonly results: ReadonlyArray<CivilizationCitizenSearchResult>;
+  readonly icon: ReactNode;
+  readonly renderDescription?: (result: CivilizationCitizenSearchResult) => ReactNode;
+  readonly runCitizen: (result: CivilizationCitizenSearchResult) => Promise<void>;
+}): CommandPaletteActionItem[] {
+  return input.results.map((result) => ({
+    kind: "action",
+    value: `citizen:${input.environmentId}:${result.threadId}`,
+    title: result.displayName,
+    searchTerms: [
+      result.displayName,
+      result.threadTitle,
+      result.profileLabel,
+      result.lifecycleState,
+      result.threadId,
+    ],
+    description: input.renderDescription?.(result),
+    icon: input.icon,
+    run: () => input.runCitizen(result),
+  }));
+}
+
+export function mergeCitizenSearchGroup(input: {
+  readonly groups: ReadonlyArray<CommandPaletteGroup>;
+  readonly items: ReadonlyArray<CommandPaletteActionItem>;
+  readonly results: ReadonlyArray<CivilizationCitizenSearchResult>;
+  readonly environmentId: EnvironmentId;
+  readonly query: string;
+}): CommandPaletteGroup[] {
+  if (input.items.length === 0) return [...input.groups];
+
+  const citizenNameThreadIds = new Set(
+    input.results
+      .filter((result) => citizenNameCausedSearchMatch(result.displayName, input.query))
+      .map((result) => result.threadId),
+  );
+  const groups = input.groups.map((group) =>
+    group.value !== "threads-search"
+      ? group
+      : {
+          ...group,
+          items: group.items.filter((item) => {
+            for (const threadId of citizenNameThreadIds) {
+              if (
+                item.value === `thread:${threadId}` ||
+                item.value === `thread:${input.environmentId}:${threadId}`
+              ) {
+                return false;
+              }
+            }
+            return true;
+          }),
+        },
+  );
+  const compactGroups = groups.filter((group) => group.items.length > 0);
+  const threadGroupIndex = compactGroups.findIndex((group) => group.value === "threads-search");
+  const citizenGroup = { value: "citizens-search", label: "Citizens", items: input.items };
+  if (threadGroupIndex === -1) return [...compactGroups, citizenGroup];
+  return [
+    ...compactGroups.slice(0, threadGroupIndex),
+    citizenGroup,
+    ...compactGroups.slice(threadGroupIndex),
+  ];
+}
+
+export function isExactCitizenNavigationTargetAvailable(input: {
+  readonly environmentId: EnvironmentId;
+  readonly projectId: ProjectId;
+  readonly threadId: ThreadId;
+  readonly project: { readonly environmentId: EnvironmentId; readonly id: ProjectId } | null;
+  readonly thread: {
+    readonly environmentId: EnvironmentId;
+    readonly id: ThreadId;
+    readonly projectId: ProjectId;
+  } | null;
+}): boolean {
+  return (
+    input.project?.environmentId === input.environmentId &&
+    input.project.id === input.projectId &&
+    input.thread?.environmentId === input.environmentId &&
+    input.thread.id === input.threadId &&
+    input.thread.projectId === input.projectId
+  );
+}
 
 export function buildLinkedThreadActionItems(
   input: CommandPaletteLinkedThreads & {
@@ -586,7 +750,7 @@ export function buildRootGroups(input: {
 export function getCommandPaletteInputPlaceholder(mode: CommandPaletteMode): string {
   switch (mode) {
     case "root":
-      return "Search commands, projects, and threads...";
+      return "Search commands, projects, threads, and citizens...";
     case "root-browse":
       return "Enter project path (e.g. ~/projects/my-app)";
     case "submenu":

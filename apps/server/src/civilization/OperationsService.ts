@@ -1,6 +1,9 @@
 // @effect-diagnostics nodeBuiltinImport:off preferSchemaOverJson:off -- export snapshots and preview hashes are deliberate JSON boundaries.
 import {
   CIVILIZATION_EXPORT_SCHEMA_VERSION,
+  CivilizationPassiveHandoffPayloadV1,
+  type CivilizationMailContentKind,
+  type CivilizationPassiveHandoffPayloadV1 as CivilizationPassiveHandoffPayloadV1Type,
   type CivilizationProjectBriefContentV1,
   type CivilizationProjectBriefDetail,
   CivilizationPurgeConflictError,
@@ -15,6 +18,7 @@ import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as NodeCrypto from "node:crypto";
 
@@ -61,6 +65,39 @@ type ProjectBriefRow = {
 };
 type ProjectBriefContentV1 = CivilizationProjectBriefContentV1;
 type ProjectBriefExport = CivilizationProjectBriefDetail;
+type MailExportRow = {
+  readonly message_id: string;
+  readonly project_id: ProjectId;
+  readonly content_kind: CivilizationMailContentKind;
+  readonly sender_thread_id: string;
+  readonly sender_name_at_send: string;
+  readonly sender_citizen_epoch: number;
+  readonly sender_run_id: string;
+  readonly recipient_thread_id: string;
+  readonly recipient_delivery_epoch: number;
+  readonly reply_to_message_id: string | null;
+  readonly body: string;
+  readonly body_bytes: number;
+  readonly accepted_runtime_mode: string;
+  readonly accepted_interaction_mode: string;
+  readonly accepted_environment_revision: number;
+  readonly accepted_project_revision: number;
+  readonly accepted_at: string;
+  readonly expires_at: string;
+  readonly terminal_retention_days: number;
+  readonly first_offered_at: string | null;
+  readonly last_offered_at: string | null;
+  readonly offer_count: number;
+  readonly acknowledged_at: string | null;
+  readonly terminal_at: string | null;
+  readonly terminal_reason: string | null;
+};
+type LegacyTextMailExport = Omit<MailExportRow, "content_kind">;
+type StructuredHandoffMailExport = LegacyTextMailExport & {
+  readonly contentKind: "handoff_v1";
+  readonly handoff: CivilizationPassiveHandoffPayloadV1Type;
+};
+type MailExport = LegacyTextMailExport | StructuredHandoffMailExport;
 type ProjectDataExportWithBrief = CivilizationProjectDataExport & {
   readonly projectBrief: ProjectBriefExport | null;
 };
@@ -95,6 +132,13 @@ const briefCorrupt = () =>
     code: "civilization_unavailable",
     reason: "corrupt_state",
     message: "Stored Civilization Project Brief is corrupt.",
+  });
+
+const handoffCorrupt = () =>
+  new CivilizationUnavailableError({
+    code: "civilization_unavailable",
+    reason: "corrupt_state",
+    message: "Stored structured Civilization handoff content is corrupt.",
   });
 
 const isStringArray = (value: unknown): value is ReadonlyArray<string> =>
@@ -158,6 +202,38 @@ const decodeProjectBriefRow = (row: ProjectBriefRow) => {
         }) satisfies ProjectBriefExport,
     ),
   );
+};
+
+const decodePassiveHandoffPayload = Schema.decodeUnknownSync(CivilizationPassiveHandoffPayloadV1);
+
+const canonicalHandoffBody = (handoff: CivilizationPassiveHandoffPayloadV1Type) =>
+  JSON.stringify({
+    version: 1,
+    summary: handoff.summary,
+    completed: [...handoff.completed],
+    decisions: [...handoff.decisions],
+    nextActions: [...handoff.nextActions],
+    blockersOrQuestions: [...handoff.blockersOrQuestions],
+    references: handoff.references.map(({ kind, reference }) => ({ kind, reference })),
+  });
+
+const exportMailRow = (row: MailExportRow) => {
+  const { content_kind: contentKind, ...legacy } = row;
+  if (contentKind === "text") return Effect.succeed<MailExport>(legacy);
+  return Effect.try({
+    try: () => {
+      if (Buffer.byteLength(row.body, "utf8") !== row.body_bytes)
+        throw new Error("body byte mismatch");
+      const handoff = decodePassiveHandoffPayload(JSON.parse(row.body));
+      if (canonicalHandoffBody(handoff) !== row.body) throw new Error("non-canonical handoff body");
+      return {
+        ...legacy,
+        contentKind: "handoff_v1",
+        handoff,
+      } satisfies StructuredHandoffMailExport;
+    },
+    catch: handoffCorrupt,
+  });
 };
 
 const make = Effect.gen(function* () {
@@ -508,8 +584,8 @@ const make = Effect.gen(function* () {
           WHERE project_id = ${projectId}
           ORDER BY note_id ASC
         `;
-        const mail = yield* sql<Record<string, unknown>>`
-          SELECT message_id, project_id, sender_thread_id, sender_name_at_send, sender_citizen_epoch,
+        const mailRows = yield* sql<MailExportRow>`
+          SELECT message_id, project_id, content_kind, sender_thread_id, sender_name_at_send, sender_citizen_epoch,
                  sender_run_id, recipient_thread_id, recipient_delivery_epoch, reply_to_message_id,
                  body, body_bytes, accepted_runtime_mode, accepted_interaction_mode,
                  accepted_environment_revision, accepted_project_revision, accepted_at, expires_at,
@@ -519,6 +595,7 @@ const make = Effect.gen(function* () {
           WHERE project_id = ${projectId}
           ORDER BY message_id ASC
         `;
+        const mail = yield* Effect.forEach(mailRows, exportMailRow);
         const chronicle = yield* sql<Record<string, unknown>>`
           SELECT entry_id, project_id, kind, primary_thread_id, secondary_thread_id,
                  citizen_epoch, citizen_revision, source_kind, source_id, source_sequence,

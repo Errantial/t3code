@@ -4,6 +4,8 @@ import type { Project, Thread } from "../types";
 import { makeThreadFixture } from "../test-fixtures";
 import {
   buildBrowseGroups,
+  buildCitizenSearchActionItems,
+  commandPaletteCitizenSearchInput,
   buildCommandPaletteProjectMetadata,
   buildCommandPaletteRows,
   buildProjectActionItems,
@@ -13,10 +15,226 @@ import {
   filterPinnedBrowseEntries,
   filterCommandPaletteGroups,
   findHighlightedCommandPaletteItem,
+  getCitizenSearchEmptyStateMessage,
+  isExactCitizenNavigationTargetAvailable,
+  mergeCitizenSearchGroup,
+  normalizeCommandPaletteCitizenSearchQuery,
   reduceCommandPaletteUiState,
   type CommandPaletteActionItem,
   type CommandPaletteGroup,
 } from "./CommandPalette.logic";
+
+describe("bounded citizen command-palette search", () => {
+  const environmentId = EnvironmentId.make("environment-citizen-search");
+  const projectId = ProjectId.make("project-citizen-search");
+  const adaThreadId = ThreadId.make("thread-ada");
+  const titleThreadId = ThreadId.make("thread-title-match");
+  const results = [
+    {
+      projectId,
+      threadId: adaThreadId,
+      displayName: "Ada Builder",
+      profileLabel: "Calm",
+      generation: 1,
+      lifecycleState: "open" as const,
+      observedOnly: false,
+      threadTitle: "Implement search",
+    },
+    {
+      projectId,
+      threadId: titleThreadId,
+      displayName: "Grace",
+      profileLabel: "Analyst",
+      generation: 2,
+      lifecycleState: "settled" as const,
+      observedOnly: false,
+      threadTitle: "Ada migration notes",
+    },
+  ];
+
+  it("enforces the same bounded Unicode query envelope before issuing a request", () => {
+    expect(normalizeCommandPaletteCitizenSearchQuery("  Ada  ")).toBe("Ada");
+    expect(normalizeCommandPaletteCitizenSearchQuery("a")).toBeNull();
+    expect(normalizeCommandPaletteCitizenSearchQuery("x".repeat(201))).toBeNull();
+    expect(normalizeCommandPaletteCitizenSearchQuery("界".repeat(171))).toBeNull();
+    expect(
+      commandPaletteCitizenSearchInput({ query: "Ada", isActionsOnly: true, hasExactTarget: true }),
+    ).toBeNull();
+    expect(
+      commandPaletteCitizenSearchInput({
+        query: "Ada",
+        isActionsOnly: false,
+        hasExactTarget: false,
+      }),
+    ).toBeNull();
+    expect(
+      commandPaletteCitizenSearchInput({
+        query: " Ada ",
+        isActionsOnly: false,
+        hasExactTarget: true,
+      }),
+    ).toBe("Ada");
+  });
+
+  it("describes loading, error, empty, and exact-project chooser states without broadening", () => {
+    expect(
+      getCitizenSearchEmptyStateMessage({
+        dedicated: true,
+        targetLabel: null,
+        accessAllowed: true,
+        hasValidQuery: false,
+        isPending: false,
+        error: null,
+        isSuccess: false,
+        rootSearchActive: false,
+        threadSearchPending: false,
+      }),
+    ).toContain("exact project checkout");
+    expect(
+      getCitizenSearchEmptyStateMessage({
+        dedicated: true,
+        targetLabel: "T3 Code",
+        accessAllowed: true,
+        hasValidQuery: true,
+        isPending: true,
+        error: null,
+        isSuccess: false,
+        rootSearchActive: false,
+        threadSearchPending: false,
+      }),
+    ).toBe("Searching citizens…");
+    expect(
+      getCitizenSearchEmptyStateMessage({
+        dedicated: true,
+        targetLabel: "T3 Code",
+        accessAllowed: true,
+        hasValidQuery: true,
+        isPending: false,
+        error: "Permission denied",
+        isSuccess: false,
+        rootSearchActive: false,
+        threadSearchPending: false,
+      }),
+    ).toBe("Citizen search unavailable: Permission denied");
+    expect(
+      getCitizenSearchEmptyStateMessage({
+        dedicated: true,
+        targetLabel: "T3 Code",
+        accessAllowed: true,
+        hasValidQuery: true,
+        isPending: false,
+        error: null,
+        isSuccess: true,
+        rootSearchActive: false,
+        threadSearchPending: false,
+      }),
+    ).toBe("No matching citizens in T3 Code.");
+    expect(
+      getCitizenSearchEmptyStateMessage({
+        dedicated: true,
+        targetLabel: "T3 Code",
+        accessAllowed: false,
+        hasValidQuery: true,
+        isPending: false,
+        error: null,
+        isSuccess: false,
+        rootSearchActive: false,
+        threadSearchPending: false,
+      }),
+    ).toContain("orchestration:read");
+  });
+
+  it("preserves server order and de-duplicates a normal thread only for a citizen-name match", () => {
+    const items = buildCitizenSearchActionItems({
+      environmentId,
+      results,
+      icon: null,
+      runCitizen: async () => undefined,
+    });
+    const groups = mergeCitizenSearchGroup({
+      groups: [
+        {
+          value: "threads-search",
+          label: "Threads",
+          items: [
+            {
+              kind: "action",
+              value: `thread:${adaThreadId}`,
+              title: "Implement search",
+              searchTerms: ["Ada"],
+              icon: null,
+              run: async () => undefined,
+            },
+            {
+              kind: "action",
+              value: `thread:${titleThreadId}`,
+              title: "Ada migration notes",
+              searchTerms: ["Ada"],
+              icon: null,
+              run: async () => undefined,
+            },
+          ],
+        },
+      ],
+      items,
+      results,
+      environmentId,
+      query: "ada",
+    });
+
+    expect(groups.map((group) => group.label)).toEqual(["Citizens", "Threads"]);
+    expect(groups[0]?.items.map((item) => item.title)).toEqual(["Ada Builder", "Grace"]);
+    expect(groups[1]?.items.map((item) => item.value)).toEqual([`thread:${titleThreadId}`]);
+  });
+
+  it("fails closed when either exact checkout or exact thread no longer matches", () => {
+    const project = { environmentId, id: projectId };
+    const thread = { environmentId, id: adaThreadId, projectId };
+    expect(
+      isExactCitizenNavigationTargetAvailable({
+        environmentId,
+        projectId,
+        threadId: adaThreadId,
+        project,
+        thread,
+      }),
+    ).toBe(true);
+    expect(
+      isExactCitizenNavigationTargetAvailable({
+        environmentId,
+        projectId,
+        threadId: adaThreadId,
+        project: null,
+        thread,
+      }),
+    ).toBe(false);
+    expect(
+      isExactCitizenNavigationTargetAvailable({
+        environmentId,
+        projectId,
+        threadId: adaThreadId,
+        project,
+        thread: { ...thread, projectId: ProjectId.make("foreign-project") },
+      }),
+    ).toBe(false);
+  });
+
+  it("executes the highlighted citizen result directly for keyboard selection", async () => {
+    const runCitizen = vi.fn(async () => undefined);
+    const items = buildCitizenSearchActionItems({
+      environmentId,
+      results: [results[0]!],
+      icon: null,
+      runCitizen,
+    });
+    const groups = [{ value: "citizens-search", label: "Citizens", items }];
+    const highlighted = findHighlightedCommandPaletteItem(groups, items[0]!.value);
+    expect(highlighted?.value).toBe(`citizen:${environmentId}:${adaThreadId}`);
+    if (highlighted?.kind !== "action") throw new Error("Expected citizen action");
+    await highlighted.run();
+    expect(runCitizen).toHaveBeenCalledWith(results[0]);
+  });
+});
 
 describe("linked pull request thread navigation", () => {
   it("keeps archived relations searchable and routes them through the PR environment", async () => {

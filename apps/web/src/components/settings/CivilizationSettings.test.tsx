@@ -16,12 +16,26 @@ const state = vi.hoisted(() => ({
   writable: new Set<string>(),
   targets: [] as Array<{ environmentId: string; label: string; projectId: string | null }>,
   overviewCalls: [] as Array<readonly [string | null, string | null]>,
+  attentionCalls: [] as Array<readonly [string, string]>,
+  attentionItems: [] as Array<{
+    readonly key: string;
+    readonly kind: string;
+    readonly severity: "info" | "warning" | "error";
+    readonly target: "overview" | "configuration" | "context_analytics";
+    readonly title: string;
+    readonly detail: string;
+  }>,
+  attentionError: null as string | null,
+  attentionPending: false,
+  attentionSuccess: true,
+  attentionRefreshCalls: 0,
   configActionCalls: [] as unknown[],
   configActionResults: [] as Array<
     | { readonly kind: "resolve"; readonly value: unknown }
     | { readonly kind: "reject"; readonly error: unknown }
   >,
   refreshCalls: 0,
+  singleEffective: null as CivilizationEffectiveConfig | null,
   multiEffectiveByEnvironment: new Map<string, CivilizationEffectiveConfig>(),
   scopeKind: null as "all" | "environment" | "project" | "checkout" | "unavailable" | null,
   searchTargetId: null as string | null,
@@ -29,6 +43,7 @@ const state = vi.hoisted(() => ({
   scrollResult: false,
   projectInspectionProps: [] as Array<Record<string, unknown>>,
   projectBriefProps: [] as Array<Record<string, unknown>>,
+  onboardingProps: [] as Array<Record<string, unknown>>,
   contextAnalyticsProps: [] as Array<Record<string, unknown>>,
   contextInspectorProps: [] as Array<Record<string, unknown>>,
 }));
@@ -143,6 +158,13 @@ vi.mock("./CivilizationProjectBrief", () => ({
   },
 }));
 
+vi.mock("./CivilizationOnboardingDialog", () => ({
+  CivilizationOnboardingDialog: (props: Record<string, unknown>) => {
+    state.onboardingProps.push(props);
+    return <div data-testid="civilization-onboarding-dialog">Onboarding wizard</div>;
+  },
+}));
+
 const EFFECTIVE = {
   config: CivilizationDefaultConfig,
   environmentRevision: 7,
@@ -203,11 +225,41 @@ vi.mock("../../state/civilization", () => ({
       };
     }
     return {
-      data: OVERVIEW,
+      data: {
+        ...OVERVIEW,
+        effective: state.singleEffective ?? EFFECTIVE,
+      },
       error: null,
       isPending: false,
       refresh: () => {
         state.refreshCalls += 1;
+      },
+    };
+  },
+  useCivilizationAttention: (environmentId: string | null, projectId: string | null) => {
+    if (environmentId === null || projectId === null) {
+      return {
+        data: null,
+        error: null,
+        failure: null,
+        isPending: false,
+        isSuccess: false,
+        refresh: vi.fn(),
+      };
+    }
+    state.attentionCalls.push([environmentId, projectId]);
+    return {
+      data: {
+        projectId,
+        generatedAt: "2026-10-18T12:00:00.000Z",
+        items: state.attentionItems,
+      },
+      error: state.attentionError,
+      failure: state.attentionError === null ? null : new Error(state.attentionError),
+      isPending: state.attentionPending,
+      isSuccess: state.attentionSuccess,
+      refresh: () => {
+        state.attentionRefreshCalls += 1;
       },
     };
   },
@@ -378,9 +430,16 @@ beforeEach(() => {
   state.writable.clear();
   state.targets = [];
   state.overviewCalls = [];
+  state.attentionCalls = [];
+  state.attentionItems = [];
+  state.attentionError = null;
+  state.attentionPending = false;
+  state.attentionSuccess = true;
+  state.attentionRefreshCalls = 0;
   state.configActionCalls = [];
   state.configActionResults = [];
   state.refreshCalls = 0;
+  state.singleEffective = null;
   state.multiEffectiveByEnvironment.clear();
   state.scopeKind = null;
   state.searchTargetId = null;
@@ -388,6 +447,7 @@ beforeEach(() => {
   state.scrollResult = false;
   state.projectInspectionProps = [];
   state.projectBriefProps = [];
+  state.onboardingProps = [];
   state.contextAnalyticsProps = [];
   state.contextInspectorProps = [];
 });
@@ -454,6 +514,179 @@ describe("Civilization settings read-only shell", () => {
   });
 });
 
+describe("Civilization Needs attention", () => {
+  const exactReadableTarget = () => {
+    const environmentId = EnvironmentId.make("environment-attention");
+    const projectId = ProjectId.make("project-attention");
+    state.readable.add(environmentId);
+    state.targets = [{ environmentId, label: "Attention machine", projectId }];
+    state.scopeKind = "checkout";
+    return { environmentId, projectId };
+  };
+
+  it("queries one exact project and routes every attention target into an existing task", async () => {
+    const { environmentId, projectId } = exactReadableTarget();
+    state.attentionItems = [
+      {
+        key: "degraded",
+        kind: "civilization_degraded",
+        severity: "error",
+        target: "overview",
+        title: "Civilization is degraded",
+        detail: "One provider adapter is currently unavailable.",
+      },
+      {
+        key: "support",
+        kind: "provider_support_limited",
+        severity: "warning",
+        target: "configuration",
+        title: "Provider support is limited",
+        detail: "One provider is limited to Civilization metadata.",
+      },
+      {
+        key: "context",
+        kind: "context_provider_start_failures",
+        severity: "warning",
+        target: "context_analytics",
+        title: "Recent provider-start failures",
+        detail: "Two provider-start failures were recorded recently.",
+      },
+    ];
+    const onNavigate = vi.fn();
+
+    await act(() => {
+      renderer = create(
+        <CivilizationSettingsPanel search={{ view: "overview" }} onNavigate={onNavigate} />,
+      );
+    });
+
+    expect(state.attentionCalls).toEqual([[environmentId, projectId]]);
+    expect(text()).toContain("Needs attention");
+    expect(text()).toContain("Civilization is degraded");
+    expect(text()).toContain("Error · One provider adapter is currently unavailable.");
+
+    await act(() =>
+      renderer!.root.findByProps({ "aria-label": "Open Civilization is degraded" }).props.onClick(),
+    );
+    expect(onNavigate).toHaveBeenLastCalledWith({ view: "overview" });
+    expect(state.scrollTargets.at(-1)).toBe("civilization-status");
+
+    await act(() =>
+      renderer!.root
+        .findByProps({ "aria-label": "Open Provider support is limited" })
+        .props.onClick(),
+    );
+    expect(onNavigate).toHaveBeenLastCalledWith({ view: "configuration" });
+    expect(state.scrollTargets.at(-1)).toBe("civilization-config");
+
+    await act(() =>
+      renderer!.root
+        .findByProps({ "aria-label": "Open Recent provider-start failures" })
+        .props.onClick(),
+    );
+    expect(onNavigate).toHaveBeenLastCalledWith({ view: "context", contextMode: "analytics" });
+    expect(state.scrollTargets.at(-1)).toBe("civilization-context-analytics");
+  });
+
+  it("hides a successful empty result", async () => {
+    const { environmentId, projectId } = exactReadableTarget();
+
+    await act(() => {
+      renderer = create(<CivilizationSettingsPanel search={{ view: "overview" }} />);
+    });
+
+    expect(state.attentionCalls).toEqual([[environmentId, projectId]]);
+    expect(text()).not.toContain("Needs attention");
+  });
+
+  it("shows an RPC failure even when the query still exposes a cached empty result", async () => {
+    exactReadableTarget();
+    state.attentionError = "Attention RPC is temporarily unavailable.";
+    state.attentionSuccess = false;
+
+    await act(() => {
+      renderer = create(<CivilizationSettingsPanel search={{ view: "overview" }} />);
+    });
+
+    expect(text()).toContain("Needs attention");
+    expect(text()).toContain("Attention RPC is temporarily unavailable.");
+    expect(text()).toContain("Unavailable");
+  });
+
+  it("shows checking while the exact-project read has not succeeded", async () => {
+    exactReadableTarget();
+    state.attentionPending = true;
+    state.attentionSuccess = false;
+
+    await act(() => {
+      renderer = create(<CivilizationSettingsPanel search={{ view: "overview" }} />);
+    });
+
+    expect(text()).toContain("Needs attention");
+    expect(text()).toContain("Checking…");
+  });
+
+  it("stops querying and renders unavailable when orchestration:read is lost", async () => {
+    const { environmentId, projectId } = exactReadableTarget();
+
+    await act(() => {
+      renderer = create(<CivilizationSettingsPanel search={{ view: "overview" }} />);
+    });
+    expect(state.attentionCalls).toEqual([[environmentId, projectId]]);
+    expect(text()).not.toContain("Needs attention");
+
+    state.readable.delete(environmentId);
+    await act(() => {
+      renderer!.update(<CivilizationSettingsPanel search={{ view: "overview" }} />);
+    });
+
+    expect(state.attentionCalls).toEqual([[environmentId, projectId]]);
+    expect(text()).toContain("Needs attention");
+    expect(text()).toContain("orchestration:read permission is required to check this project.");
+    expect(text()).toContain("Unavailable");
+  });
+
+  it("never queries attention for zero, environment-only, or multi-target Overview scope", async () => {
+    await act(() => {
+      renderer = create(<CivilizationSettingsPanel search={{ view: "overview" }} />);
+    });
+    expect(state.attentionCalls).toEqual([]);
+
+    const environmentOnly = EnvironmentId.make("environment-attention-only");
+    state.readable.add(environmentOnly);
+    state.targets = [
+      { environmentId: environmentOnly, label: "Environment only", projectId: null },
+    ];
+    state.scopeKind = "environment";
+    await act(() => {
+      renderer!.update(<CivilizationSettingsPanel search={{ view: "overview" }} />);
+    });
+    expect(state.attentionCalls).toEqual([]);
+
+    const environmentA = EnvironmentId.make("environment-attention-a");
+    const environmentB = EnvironmentId.make("environment-attention-b");
+    state.readable.add(environmentA);
+    state.readable.add(environmentB);
+    state.targets = [
+      {
+        environmentId: environmentA,
+        label: "Checkout A",
+        projectId: ProjectId.make("project-attention-a"),
+      },
+      {
+        environmentId: environmentB,
+        label: "Checkout B",
+        projectId: ProjectId.make("project-attention-b"),
+      },
+    ];
+    state.scopeKind = "project";
+    await act(() => {
+      renderer!.update(<CivilizationSettingsPanel search={{ view: "overview" }} />);
+    });
+    expect(state.attentionCalls).toEqual([]);
+  });
+});
+
 describe("Civilization settings participation editor", () => {
   const writableTarget = () => {
     const environmentId = EnvironmentId.make("environment-write");
@@ -493,6 +726,54 @@ describe("Civilization settings participation editor", () => {
       renderer!.update(<CivilizationSettingsPanel search={{ view: "overview" }} />);
     });
     expect(state.projectBriefProps).toHaveLength(0);
+  });
+
+  it("offers onboarding only for one exact project Configuration target", async () => {
+    const { environmentId, projectId } = writableTarget();
+    const onNavigate = vi.fn();
+
+    await act(() => {
+      renderer = create(
+        <CivilizationSettingsPanel search={{ view: "configuration" }} onNavigate={onNavigate} />,
+      );
+    });
+    expect(state.onboardingProps).toHaveLength(0);
+    expect(text()).toContain("Guided setup");
+
+    const open = renderer!.root
+      .findAllByType("button")
+      .find((button) => button.props.children === "Set up…");
+    expect(open).toBeDefined();
+    await act(() => open!.props.onClick());
+    expect(onNavigate).toHaveBeenCalledWith(
+      { view: "configuration", onboarding: "target" },
+      { hash: "civilization-onboarding" },
+    );
+
+    await act(() => {
+      renderer!.update(
+        <CivilizationSettingsPanel
+          search={{ view: "configuration", onboarding: "target" }}
+          onNavigate={onNavigate}
+        />,
+      );
+    });
+    expect(state.onboardingProps.at(-1)).toMatchObject({
+      environmentId,
+      projectId,
+      targetLabel: "Writable machine",
+      canRead: true,
+      canWrite: true,
+      search: { view: "configuration", onboarding: "target" },
+    });
+
+    state.targets = [{ environmentId, label: "Environment only", projectId: null }];
+    state.onboardingProps = [];
+    await act(() => {
+      renderer!.update(<CivilizationSettingsPanel search={{ view: "configuration" }} />);
+    });
+    expect(state.onboardingProps).toHaveLength(0);
+    expect(text()).not.toContain("Guided setup");
   });
 
   it("stages a scalar locally, validates, re-checks permission, and commits the captured project revision", async () => {
@@ -538,6 +819,7 @@ describe("Civilization settings participation editor", () => {
         projectId,
         type: "set",
         expectedRevision: 4,
+        expectedEnvironmentRevision: 7,
         override: {
           version: CIVILIZATION_CONFIG_VERSION,
           participation: { enabled: true },
@@ -614,6 +896,72 @@ describe("Civilization settings participation editor", () => {
       renderer!.root.findByProps({ "aria-label": "Enable Civilization on Writable machine" }).props
         .checked,
     ).toBe(true);
+  });
+
+  it("reviews environment-only drift before retrying a project-scoped draft with the refreshed authority revision", async () => {
+    const { environmentId, projectId } = writableTarget();
+    state.configActionResults = [
+      { kind: "resolve", value: { valid: true, effective: EFFECTIVE } },
+      {
+        kind: "reject",
+        error: {
+          _tag: "CivilizationConfigConflictError",
+          code: "civilization_conflict",
+          scope: "environment",
+          expectedRevision: 7,
+          currentRevision: 8,
+        },
+      },
+      {
+        kind: "resolve",
+        value: { valid: true, effective: { ...EFFECTIVE, environmentRevision: 8 } },
+      },
+      {
+        kind: "resolve",
+        value: {
+          revision: 5,
+          effective: { ...EFFECTIVE, environmentRevision: 8, projectRevision: 5 },
+        },
+      },
+    ];
+
+    await act(() => {
+      renderer = create(<CivilizationSettingsPanel search={{ view: "configuration" }} />);
+    });
+    const enabled = renderer!.root.findByProps({
+      "aria-label": "Enable Civilization on Writable machine",
+    });
+    await act(() => enabled.props.onCheckedChange(true));
+    let save = renderer!.root
+      .findAllByType("button")
+      .find((button) => button.props.children === "Save");
+    await act(async () => {
+      save!.props.onClick();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    state.singleEffective = { ...EFFECTIVE, environmentRevision: 8 };
+    await act(() => {
+      renderer!.update(<CivilizationSettingsPanel search={{ view: "configuration" }} />);
+    });
+    save = renderer!.root
+      .findAllByType("button")
+      .find((button) => button.props.children === "Save");
+    expect(save?.props.disabled).toBe(false);
+    await act(async () => {
+      save!.props.onClick();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(state.configActionCalls.at(-1)).toMatchObject({
+      environmentId,
+      projectId,
+      type: "set",
+      expectedRevision: 4,
+      expectedEnvironmentRevision: 8,
+    });
   });
 
   it("uses the captured environment revision and preserves the draft on an environment conflict", async () => {
@@ -710,6 +1058,7 @@ describe("Civilization settings participation editor", () => {
         projectId,
         type: "set",
         expectedRevision: 4,
+        expectedEnvironmentRevision: 7,
         override: {
           version: CIVILIZATION_CONFIG_VERSION,
           participation: { adoption: "all_existing" },
@@ -782,6 +1131,7 @@ describe("Civilization settings participation editor", () => {
         projectId,
         type: "set",
         expectedRevision: 4,
+        expectedEnvironmentRevision: 7,
         override: {
           version: CIVILIZATION_CONFIG_VERSION,
           names: {},
@@ -936,12 +1286,14 @@ describe("Civilization settings mixed selection", () => {
       projectId: projectA,
       type: "set",
       expectedRevision: 4,
+      expectedEnvironmentRevision: 7,
     });
     expect(state.configActionCalls[3]).toMatchObject({
       environmentId: environmentB,
       projectId: projectB,
       type: "set",
       expectedRevision: 9,
+      expectedEnvironmentRevision: 7,
     });
     expect(JSON.stringify(state.configActionCalls)).not.toContain(environmentC);
     expect(text()).toContain("Saved on Machine A");

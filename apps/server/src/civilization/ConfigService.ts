@@ -875,12 +875,21 @@ const validateCandidate = Effect.fn("CivilizationConfig.validateCandidate")(func
   });
 });
 
-const setOverride = Effect.fn("CivilizationConfig.setOverride")(function* (input: {
-  readonly projectId?: ProjectId | undefined;
-  readonly expectedRevision: number;
-  readonly expectedEnvironmentRevision?: number | undefined;
-  readonly override: CivilizationConfigOverride;
-}) {
+const setOverride = Effect.fn("CivilizationConfig.setOverride")(function* (
+  input:
+    | {
+        readonly projectId?: undefined;
+        readonly expectedRevision: number;
+        readonly expectedEnvironmentRevision?: undefined;
+        readonly override: CivilizationConfigOverride;
+      }
+    | {
+        readonly projectId: ProjectId;
+        readonly expectedRevision: number;
+        readonly expectedEnvironmentRevision: number;
+        readonly override: CivilizationConfigOverride;
+      },
+) {
   const sql = yield* SqlClient.SqlClient;
   const override = yield* parseOverride(input.override);
   return yield* sql.withTransaction(
@@ -926,10 +935,7 @@ const setOverride = Effect.fn("CivilizationConfig.setOverride")(function* (input
           WHERE singleton = 1
           LIMIT 1
         `)[0]?.revision ?? 0;
-      if (
-        input.expectedEnvironmentRevision !== undefined &&
-        currentEnvironmentRevision !== input.expectedEnvironmentRevision
-      ) {
+      if (currentEnvironmentRevision !== input.expectedEnvironmentRevision) {
         return yield* Effect.fail(
           new CivilizationConfigConflictError({
             code: "civilization_conflict",
@@ -954,6 +960,45 @@ const setOverride = Effect.fn("CivilizationConfig.setOverride")(function* (input
     }),
   );
 });
+
+const importProjectOverride = Effect.fn("CivilizationConfig.importProjectOverride")(
+  function* (input: {
+    readonly projectId: ProjectId;
+    readonly expectedRevision: number;
+    readonly override: CivilizationConfigOverride;
+  }) {
+    const sql = yield* SqlClient.SqlClient;
+    const override = yield* parseOverride(input.override);
+    return yield* sql.withTransaction(
+      Effect.gen(function* () {
+        yield* ensureProjectExists(input.projectId);
+        const current = yield* readCivilizationProjectConfig(input.projectId);
+        if (current.revision !== input.expectedRevision) {
+          return yield* Effect.fail(
+            new CivilizationConfigConflictError({
+              code: "civilization_conflict",
+              scope: "project",
+              expectedRevision: input.expectedRevision,
+              currentRevision: current.revision,
+            }),
+          );
+        }
+        const environment = yield* readCivilizationEnvironmentConfig();
+        yield* validateConfig(resolveCivilizationConfigUnsafe(environment.override, override));
+        const revision = current.revision + 1;
+        yield* sql`
+        INSERT INTO civilization_project_config (project_id, revision, override_json, updated_at)
+        VALUES (${input.projectId}, ${revision}, ${JSON.stringify(override)}, datetime('now'))
+        ON CONFLICT(project_id) DO UPDATE SET
+          revision = excluded.revision,
+          override_json = excluded.override_json,
+          updated_at = excluded.updated_at
+      `;
+        return { revision, effective: yield* getEffectiveCivilizationConfig(input.projectId) };
+      }),
+    );
+  },
+);
 
 const resetOverride = Effect.fn("CivilizationConfig.resetOverride")(function* (input: {
   readonly projectId?: ProjectId | undefined;
@@ -1041,7 +1086,13 @@ const importOverride = Effect.fn("CivilizationConfig.importOverride")(function* 
     catch: () => invalid("invalid_json", "Configuration import is not valid JSON."),
   });
   const override = yield* parseOverride(value);
-  return yield* setOverride({ ...input, override });
+  return input.projectId === undefined
+    ? yield* setOverride({ expectedRevision: input.expectedRevision, override })
+    : yield* importProjectOverride({
+        projectId: input.projectId,
+        expectedRevision: input.expectedRevision,
+        override,
+      });
 });
 
 const exportOverride = Effect.fn("CivilizationConfig.exportOverride")(function* (

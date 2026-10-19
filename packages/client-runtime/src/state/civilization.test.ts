@@ -1,4 +1,5 @@
 import {
+  CIVILIZATION_ATTENTION_MAX_ITEMS,
   CIVILIZATION_CONFIG_VERSION,
   CivilizationContextInspectionId,
   CivilizationMessageId,
@@ -6,6 +7,7 @@ import {
   CivilizationConfigConflictError,
   CivilizationDefaultConfig,
   CivilizationConfigDescription,
+  CivilizationOnboardingPreviewUnavailableError,
   CivilizationProjectBriefConflictError,
   EnvironmentId,
   ProjectId,
@@ -14,6 +16,7 @@ import {
   RunId,
   ThreadId,
   type CivilizationCapabilitiesResult,
+  type CivilizationAttentionResult,
   type CivilizationCitizenDetail,
   type CivilizationContextAnalyticsResult,
   type CivilizationEffectiveConfig,
@@ -40,18 +43,21 @@ import {
   exportEnvironmentCivilizationProjectData,
   exportEnvironmentCivilizationConfig,
   fetchEnvironmentCivilizationAchievementPage,
+  fetchEnvironmentCivilizationAttention,
   fetchEnvironmentCivilizationCensusPage,
   fetchEnvironmentCivilizationCitizenDetail,
   fetchEnvironmentCivilizationChroniclePage,
   fetchEnvironmentCivilizationCorrespondencePage,
   fetchEnvironmentCivilizationCorrespondenceThread,
   fetchEnvironmentCivilizationLineageNeighborhood,
+  fetchEnvironmentCivilizationOnboardingPresets,
   fetchEnvironmentCivilizationCapabilities,
   fetchEnvironmentCivilizationConfig,
   fetchEnvironmentCivilizationConfigDescription,
   fetchEnvironmentCivilizationProjectBriefDetail,
   fetchEnvironmentCivilizationProjectBriefMetadata,
   fetchCurrentEnvironmentCivilizationContextAnalytics,
+  fetchCurrentEnvironmentCivilizationAttention,
   fetchCurrentEnvironmentCivilizationCitizenDetail,
   fetchEnvironmentCivilizationContextAnalytics,
   fetchEnvironmentCivilizationContextInspectionDetail,
@@ -65,6 +71,8 @@ import {
   fetchEnvironmentCivilizationStatus,
   importEnvironmentCivilizationConfig,
   previewEnvironmentCivilizationCitizenReassignment,
+  previewEnvironmentCivilizationOnboarding,
+  previewEnvironmentCivilizationOnboardingContent,
   previewEnvironmentCivilizationPurge,
   previewEnvironmentCivilizationRetentionReduction,
   reclaimEnvironmentCivilizationCitizenTitle,
@@ -142,6 +150,18 @@ const CONTEXT_ANALYTICS = {
   appliedDiagnosticRetentionDays: 7,
   buckets: [],
 } satisfies CivilizationContextAnalyticsResult;
+const ATTENTION = {
+  projectId: PROJECT_ID,
+  generatedAt: "2026-10-18T12:00:00.000Z",
+  items: Array.from({ length: CIVILIZATION_ATTENTION_MAX_ITEMS }, (_, index) => ({
+    key: `${PROJECT_ID}:attention:${index}`,
+    kind: "provider_support_limited" as const,
+    severity: "warning" as const,
+    target: "configuration" as const,
+    title: `Attention ${index}`,
+    detail: `Metadata-only attention detail ${index}.`,
+  })),
+} satisfies CivilizationAttentionResult;
 const CITIZEN_DETAIL = {
   threadId: ThreadId.make("thread:civilization-ui:detail"),
   projectId: PROJECT_ID,
@@ -313,6 +333,77 @@ describe("Civilization environment HTTP reads", () => {
     }),
   );
 
+  it.effect("fetches bounded body-free attention for one exact project", () =>
+    Effect.gen(function* () {
+      const calls: string[] = [];
+      const fetchFn: typeof fetch = async (request) => {
+        const url = String(request);
+        calls.push(url);
+        return new URL(url).pathname === "/api/civilization/attention"
+          ? Response.json(ATTENTION)
+          : new Response("not found", { status: 404 });
+      };
+      const result = yield* fetchEnvironmentCivilizationAttention({
+        prepared: PREPARED,
+        signer: Option.none(),
+        remoteAuthorization: Option.none(),
+        projectId: PROJECT_ID,
+      }).pipe(Effect.provide(RpcHttp.layerRemoteHttpClient(fetchFn)));
+
+      expect(result).toEqual(ATTENTION);
+      expect(result.items).toHaveLength(CIVILIZATION_ATTENTION_MAX_ITEMS);
+      expect(calls).toHaveLength(1);
+      const url = new URL(calls[0]!);
+      expect(url.pathname).toBe("/api/civilization/attention");
+      expect([...url.searchParams.keys()]).toEqual(["projectId"]);
+      expect(url.searchParams.get("projectId")).toBe(PROJECT_ID);
+      expect(Object.keys(result).sort()).toEqual(["generatedAt", "items", "projectId"]);
+      for (const item of result.items) {
+        expect(Object.keys(item).sort()).toEqual([
+          "detail",
+          "key",
+          "kind",
+          "severity",
+          "target",
+          "title",
+        ]);
+      }
+
+      const current = yield* fetchCurrentEnvironmentCivilizationAttention({
+        prepared: PREPARED,
+        projectId: PROJECT_ID,
+      }).pipe(Effect.provide(RpcHttp.layerRemoteHttpClient(fetchFn)));
+      expect(current).toEqual(ATTENTION);
+      expect(calls).toHaveLength(2);
+      const currentUrl = new URL(calls[1]!);
+      expect(currentUrl.pathname).toBe("/api/civilization/attention");
+      expect([...currentUrl.searchParams.keys()]).toEqual(["projectId"]);
+      expect(currentUrl.searchParams.get("projectId")).toBe(PROJECT_ID);
+    }),
+  );
+
+  it.effect(
+    "preserves transient attention transport failures instead of returning successful-empty",
+    () =>
+      Effect.gen(function* () {
+        let calls = 0;
+        const fetchFn: typeof fetch = async () => {
+          calls += 1;
+          throw new Error("transient attention transport failure");
+        };
+        const error = yield* fetchEnvironmentCivilizationAttention({
+          prepared: PREPARED,
+          signer: Option.none(),
+          remoteAuthorization: Option.none(),
+          projectId: PROJECT_ID,
+        }).pipe(Effect.provide(RpcHttp.layerRemoteHttpClient(fetchFn)), Effect.flip);
+
+        expect(error).toBeInstanceOf(RpcHttp.RemoteEnvironmentAuthFetchError);
+        expect(error).toMatchObject({ _tag: "RemoteEnvironmentAuthFetchError" });
+        expect(calls).toBe(1);
+      }),
+  );
+
   it.effect(
     "maps only bounded context analytics metadata filters for direct and current reads",
     () =>
@@ -440,6 +531,7 @@ describe("Civilization environment HTTP reads", () => {
             counterpartyThreadId,
             senderThreadId,
             recipientThreadId,
+            contentKind: "handoff_v1",
             replyRelation: "replies_to",
             replyToMessageId: parentId,
             acknowledged: false,
@@ -457,6 +549,7 @@ describe("Civilization environment HTTP reads", () => {
         expect(historyUrl.searchParams.get("counterpartyThreadId")).toBe(counterpartyThreadId);
         expect(historyUrl.searchParams.get("senderThreadId")).toBe(senderThreadId);
         expect(historyUrl.searchParams.get("recipientThreadId")).toBe(recipientThreadId);
+        expect(historyUrl.searchParams.get("contentKind")).toBe("handoff_v1");
         expect(historyUrl.searchParams.get("replyRelation")).toBe("replies_to");
         expect(historyUrl.searchParams.get("replyToMessageId")).toBe(parentId);
         expect(historyUrl.searchParams.get("acknowledged")).toBe("false");
@@ -866,6 +959,7 @@ describe("Civilization environment config commands", () => {
         remoteAuthorization: Option.none(),
         projectId: PROJECT_ID,
         expectedRevision: 3,
+        expectedEnvironmentRevision: 2,
         override: {
           version: CIVILIZATION_CONFIG_VERSION,
           participation: { enabled: true },
@@ -877,6 +971,185 @@ describe("Civilization environment config commands", () => {
         scope: "project",
         expectedRevision: 3,
         currentRevision: 4,
+      });
+      expect(calls).toBe(1);
+    }),
+  );
+});
+
+describe("Civilization onboarding HTTP helpers", () => {
+  const BUDGET = {
+    limitBytes: 4096,
+    packetBytes: 0,
+    requiredBytes: 0,
+    briefBytes: 0,
+    rosterBytes: 0,
+    noteBytes: 0,
+    inboxBytes: 0,
+    unusedBytes: 4096,
+  } as const;
+  const COMPOSITION = {
+    brief: { candidates: 0, included: 0, omitted: 0 },
+    roster: { candidates: 0, included: 0, omitted: 0 },
+    notes: { candidates: 0, included: 0, omitted: 0 },
+    inbox: { candidates: 0, included: 0, omitted: 0 },
+  } as const;
+
+  it.effect(
+    "uses separate preset, redacted-preview, and explicit content-preview contract paths",
+    () =>
+      Effect.gen(function* () {
+        const calls: Array<{ readonly url: string; readonly init: RequestInit }> = [];
+        const threadId = ThreadId.make("thread:civilization-ui:onboarding");
+        const fetchFn: typeof fetch = async (request, init) => {
+          const url = String(request);
+          calls.push({ url, init: init ?? {} });
+          switch (new URL(url).pathname) {
+            case "/api/civilization/onboarding/presets":
+              return Response.json({
+                projectId: PROJECT_ID,
+                environmentRevision: 2,
+                projectRevision: 3,
+                presets: [
+                  {
+                    id: "minimal",
+                    label: "Minimal",
+                    description: "Minimal bounded context.",
+                    candidateOverride: { version: CIVILIZATION_CONFIG_VERSION },
+                    changes: [],
+                  },
+                ],
+              });
+            case "/api/civilization/onboarding/preview":
+              return Response.json({
+                projectId: PROJECT_ID,
+                previewKind: "configuration_only",
+                effectiveConfig: EFFECTIVE,
+                environmentRevision: 2,
+                projectRevision: 3,
+                changes: [],
+                capabilities: [CAPABILITY],
+                selectedCapability: CAPABILITY,
+                budget: BUDGET,
+                composition: COMPOSITION,
+                eligibility: {
+                  brief: true,
+                  roster: true,
+                  notes: true,
+                  inbox: true,
+                  exactContent: false,
+                },
+                warnings: ["No identity is reserved."],
+              });
+            case "/api/civilization/onboarding/preview/content":
+              return Response.json({
+                projectId: PROJECT_ID,
+                threadId,
+                effectiveConfig: EFFECTIVE,
+                environmentRevision: 2,
+                projectRevision: 3,
+                capability: CAPABILITY,
+                authority: {
+                  runId: RunId.make("run:civilization-ui:onboarding"),
+                  providerInstanceId: CAPABILITY.providerInstanceId,
+                  runtimeMode: "full-access",
+                  interactionMode: "default",
+                },
+                budget: BUDGET,
+                composition: COMPOSITION,
+                packet: null,
+                warnings: [],
+              });
+            default:
+              return new Response("not found", { status: 404 });
+          }
+        };
+        const auth = {
+          prepared: PREPARED,
+          signer: Option.none(),
+          remoteAuthorization: Option.none(),
+        };
+        const provide = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
+          effect.pipe(Effect.provide(RpcHttp.layerRemoteHttpClient(fetchFn)));
+
+        const presets = yield* provide(
+          fetchEnvironmentCivilizationOnboardingPresets({ ...auth, projectId: PROJECT_ID }),
+        );
+        expect(presets.presets.map((preset) => preset.id)).toEqual(["minimal"]);
+        yield* provide(
+          previewEnvironmentCivilizationOnboarding({
+            ...auth,
+            preview: {
+              previewKind: "configuration_only",
+              projectId: PROJECT_ID,
+              providerInstanceId: CAPABILITY.providerInstanceId,
+              candidateOverride: { version: CIVILIZATION_CONFIG_VERSION },
+            },
+          }),
+        );
+        yield* provide(
+          previewEnvironmentCivilizationOnboardingContent({
+            ...auth,
+            preview: {
+              projectId: PROJECT_ID,
+              threadId,
+              candidateOverride: { version: CIVILIZATION_CONFIG_VERSION },
+            },
+          }),
+        );
+
+        expect(calls.map((call) => new URL(call.url).pathname)).toEqual([
+          "/api/civilization/onboarding/presets",
+          "/api/civilization/onboarding/preview",
+          "/api/civilization/onboarding/preview/content",
+        ]);
+        expect(calls.map((call) => call.init.method)).toEqual(["GET", "POST", "POST"]);
+        expect(new URL(calls[0]!.url).searchParams.get("projectId")).toBe(PROJECT_ID);
+        expect(JSON.parse(String(calls[1]!.init.body))).toEqual({
+          previewKind: "configuration_only",
+          projectId: PROJECT_ID,
+          providerInstanceId: CAPABILITY.providerInstanceId,
+          candidateOverride: { version: CIVILIZATION_CONFIG_VERSION },
+        });
+        expect(JSON.parse(String(calls[2]!.init.body))).toEqual({
+          projectId: PROJECT_ID,
+          threadId,
+          candidateOverride: { version: CIVILIZATION_CONFIG_VERSION },
+        });
+        expect(JSON.parse(String(calls[2]!.init.body))).not.toHaveProperty("runId");
+        expect(JSON.parse(String(calls[2]!.init.body))).not.toHaveProperty("providerInstanceId");
+      }),
+  );
+
+  it.effect("preserves typed onboarding preview-unavailable errors without retrying", () =>
+    Effect.gen(function* () {
+      let calls = 0;
+      const fetchFn: typeof fetch = async () => {
+        calls += 1;
+        return Response.json(
+          {
+            _tag: "CivilizationOnboardingPreviewUnavailableError",
+            code: "civilization_onboarding_preview_unavailable",
+            reason: "authority_unavailable",
+            message: "The selected citizen has no live run.",
+          },
+          { status: 409 },
+        );
+      };
+      const error = yield* previewEnvironmentCivilizationOnboardingContent({
+        prepared: PREPARED,
+        signer: Option.none(),
+        remoteAuthorization: Option.none(),
+        preview: {
+          projectId: PROJECT_ID,
+          threadId: ThreadId.make("thread:civilization-ui:onboarding:no-live"),
+        },
+      }).pipe(Effect.provide(RpcHttp.layerRemoteHttpClient(fetchFn)), Effect.flip);
+
+      expect(error).toBeInstanceOf(CivilizationOnboardingPreviewUnavailableError);
+      expect(error).toMatchObject({
+        reason: "authority_unavailable",
+        message: "The selected citizen has no live run.",
       });
       expect(calls).toBe(1);
     }),
@@ -1059,6 +1332,7 @@ describe("Civilization project inspection and citizen administration", () => {
         } as const;
         const mail = {
           messageId,
+          contentKind: "text" as const,
           senderThreadId: threadId,
           senderNameAtSend: "Ada",
           senderCitizenEpoch: 2,

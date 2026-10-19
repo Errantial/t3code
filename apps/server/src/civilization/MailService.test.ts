@@ -1,3 +1,4 @@
+// @effect-diagnostics nodeBuiltinImport:off -- Receipt compatibility fixtures assert the exact stored SHA-256 wire hash.
 import { assert, it } from "@effect/vitest";
 import {
   CIVILIZATION_CONFIG_VERSION,
@@ -12,6 +13,7 @@ import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAda
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as SqlClient from "effect/sql/SqlClient";
+import * as NodeCrypto from "node:crypto";
 
 import * as ProviderAdapterRegistry from "../orchestration-v2/ProviderAdapterRegistry.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
@@ -231,20 +233,23 @@ const insertRetainedMessage = Effect.fn("MailService.test.insertRetainedMessage"
     readonly acknowledgedAt?: string | null;
     readonly terminalAt?: string | null;
     readonly terminalReason?: "recipient_settled" | null;
+    readonly contentKind?: "text" | "handoff_v1" | undefined;
+    readonly body?: string | undefined;
   }) {
     const sql = yield* SqlClient.SqlClient;
+    const body = input.body ?? "retained-history-body";
     yield* sql`
     INSERT INTO civilization_messages (
-      message_id, project_id, sender_thread_id, sender_name_at_send,
+      message_id, project_id, content_kind, sender_thread_id, sender_name_at_send,
       sender_citizen_epoch, sender_run_id, recipient_thread_id, recipient_delivery_epoch,
       reply_to_message_id, body, body_bytes, accepted_runtime_mode, accepted_interaction_mode,
       accepted_environment_revision, accepted_project_revision, accepted_at, expires_at,
       terminal_retention_days, first_offered_at, last_offered_at, offer_count,
       acknowledged_at, terminal_at, terminal_reason
     ) VALUES (
-      ${input.messageId}, ${input.projectId}, ${input.senderThreadId}, ${`Sender ${input.senderThreadId}`},
+      ${input.messageId}, ${input.projectId}, ${input.contentKind ?? "text"}, ${input.senderThreadId}, ${`Sender ${input.senderThreadId}`},
       0, ${`run:${input.messageId}`}, ${input.recipientThreadId}, ${input.recipientDeliveryEpoch ?? 0},
-      ${input.replyToMessageId ?? null}, 'retained-history-body', 21, 'full-access', 'default',
+      ${input.replyToMessageId ?? null}, ${body}, ${Buffer.byteLength(body, "utf8")}, 'full-access', 'default',
       0, 0, ${input.acceptedAt}, '2026-11-17T12:00:00.000Z', 30,
       NULL, NULL, 0, ${input.acknowledgedAt ?? null}, ${input.terminalAt ?? null},
       ${input.terminalReason ?? null}
@@ -255,6 +260,8 @@ const insertRetainedMessage = Effect.fn("MailService.test.insertRetainedMessage"
 
 const errorTag = (value: unknown) => (value as { readonly _tag?: string })._tag;
 const errorReason = (value: unknown) => (value as { readonly reason?: string }).reason;
+const payloadHash = (value: unknown) =>
+  `sha256:${NodeCrypto.createHash("sha256").update(JSON.stringify(value), "utf8").digest("hex")}`;
 
 it.effect("lists correspondence with revision-bound filters without reading bodies", () => {
   const calls: FakeProviderCalls = { get: 0, unexpectedProviderWork: 0 };
@@ -405,6 +412,101 @@ it.effect("lists correspondence with revision-bound filters without reading bodi
       .listCorrespondenceHistory({ projectId, replyRelation: "replies_to", limit: 10 })
       .pipe(Effect.flip);
     assert.equal(errorReason(invalidReply), "invalid_cursor");
+    assert.equal(calls.unexpectedProviderWork, 0);
+  }).pipe(Effect.provide(Layer.fresh(makeLayer(calls))));
+});
+
+it.effect("filters correspondence content kind before paging and binds it into cursors", () => {
+  const calls: FakeProviderCalls = { get: 0, unexpectedProviderWork: 0 };
+  return Effect.gen(function* () {
+    const service = yield* MailService.CivilizationMailService;
+    const projectId = ProjectId.make("project:mail:correspondence-content-kind");
+    const sender = ThreadId.make("thread:mail:content-kind:sender");
+    const recipient = ThreadId.make("thread:mail:content-kind:recipient");
+    yield* seedProject(projectId);
+    yield* enableFeature();
+    yield* seedActor(projectId, {
+      threadId: sender,
+      runId: RunId.make("run:correspondence-content-kind:sender"),
+    });
+    yield* seedActor(projectId, {
+      threadId: recipient,
+      runId: RunId.make("run:correspondence-content-kind:recipient"),
+    });
+    yield* insertRetainedMessage({
+      messageId: "mail:content-kind:handoff-old",
+      projectId,
+      senderThreadId: sender,
+      recipientThreadId: recipient,
+      acceptedAt: "2026-10-17T10:00:00.000Z",
+      contentKind: "handoff_v1",
+      body: JSON.stringify({
+        version: 1,
+        summary: "Older handoff",
+        completed: [],
+        decisions: [],
+        nextActions: [],
+        blockersOrQuestions: [],
+        references: [],
+      }),
+    });
+    yield* insertRetainedMessage({
+      messageId: "mail:content-kind:handoff-new",
+      projectId,
+      senderThreadId: sender,
+      recipientThreadId: recipient,
+      acceptedAt: "2026-10-17T10:02:00.000Z",
+      contentKind: "handoff_v1",
+      body: JSON.stringify({
+        version: 1,
+        summary: "Newer handoff",
+        completed: [],
+        decisions: [],
+        nextActions: [],
+        blockersOrQuestions: [],
+        references: [],
+      }),
+    });
+    yield* insertRetainedMessage({
+      messageId: "mail:content-kind:text-newest",
+      projectId,
+      senderThreadId: sender,
+      recipientThreadId: recipient,
+      acceptedAt: "2026-10-17T10:03:00.000Z",
+    });
+
+    const first = yield* service.listCorrespondenceHistory({
+      projectId,
+      contentKind: "handoff_v1",
+      limit: 1,
+    });
+    assert.deepEqual(
+      first.messages.map((message) => [message.messageId, message.contentKind]),
+      [["mail:content-kind:handoff-new", "handoff_v1"]],
+      "content-kind selection must happen in SQL before LIMIT",
+    );
+    assert.isNotNull(first.nextCursor);
+
+    const second = yield* service.listCorrespondenceHistory({
+      projectId,
+      contentKind: "handoff_v1",
+      cursor: first.nextCursor!,
+      limit: 1,
+    });
+    assert.deepEqual(
+      second.messages.map((message) => message.messageId),
+      ["mail:content-kind:handoff-old"],
+    );
+
+    const mismatchedCursor = yield* service
+      .listCorrespondenceHistory({
+        projectId,
+        contentKind: "text",
+        cursor: first.nextCursor!,
+        limit: 1,
+      })
+      .pipe(Effect.flip);
+    assert.equal(errorReason(mismatchedCursor), "invalid_cursor");
     assert.equal(calls.unexpectedProviderWork, 0);
   }).pipe(Effect.provide(Layer.fresh(makeLayer(calls))));
 });
@@ -825,6 +927,364 @@ it.effect(
         0,
       );
       assert.equal(calls.unexpectedProviderWork, 0);
+    }).pipe(Effect.provide(Layer.fresh(makeLayer(calls))));
+  },
+);
+
+it.effect(
+  "sends canonical structured handoffs through the passive mail transaction and renders them deterministically",
+  () => {
+    const calls: FakeProviderCalls = { get: 0, unexpectedProviderWork: 0 };
+    return Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const service = yield* MailService.CivilizationMailService;
+      const projectId = ProjectId.make("project:mail:handoff");
+      const sender: ActorSeed = {
+        threadId: ThreadId.make("thread:mail:handoff:from"),
+        runId: RunId.make("run:mail:handoff:from"),
+      };
+      const recipient: ActorSeed = {
+        threadId: ThreadId.make("thread:mail:handoff:to"),
+        runId: RunId.make("run:mail:handoff:to"),
+      };
+      yield* seedProject(projectId);
+      yield* enableFeature();
+      yield* seedActor(projectId, sender);
+      yield* seedActor(projectId, recipient);
+      const senderCaller = yield* service.authoritativeCaller(callerInput(projectId, sender));
+      const recipientCaller = yield* service.authoritativeCaller(callerInput(projectId, recipient));
+      const runsBefore =
+        (yield* sql<{ readonly count: number }>`
+          SELECT COUNT(*) AS count FROM orchestration_v2_projection_runs
+          WHERE thread_id = ${recipient.threadId}
+        `)[0]?.count ?? 0;
+      const handoff = {
+        version: 1,
+        summary: "Core handoff is ready.",
+        completed: ["Added durable storage."],
+        decisions: ["Keep delivery passive."],
+        nextActions: ["Wire the existing consumer."],
+        blockersOrQuestions: ["Confirm final presentation copy."],
+        references: [{ kind: "thread", reference: String(recipient.threadId) }],
+      } as const;
+      const canonicalBody = JSON.stringify({
+        version: 1,
+        summary: handoff.summary,
+        completed: [...handoff.completed],
+        decisions: [...handoff.decisions],
+        nextActions: [...handoff.nextActions],
+        blockersOrQuestions: [...handoff.blockersOrQuestions],
+        references: handoff.references.map(({ kind, reference }) => ({ kind, reference })),
+      });
+      const input = {
+        caller: senderCaller,
+        targetThreadId: recipient.threadId,
+        clientRequestId: "handoff:send",
+        handoff,
+      } as const;
+
+      const first = yield* service.sendHandoff(input);
+      const replay = yield* service.sendHandoff(input);
+      assert.equal(replay.message.messageId, first.message.messageId);
+      assert.equal(first.message.contentKind, "handoff_v1");
+      assert.equal(first.message.bodyBytes, Buffer.byteLength(canonicalBody, "utf8"));
+
+      const stored = (yield* sql<{
+        readonly content_kind: string;
+        readonly body: string;
+        readonly body_bytes: number;
+      }>`
+        SELECT content_kind, body, body_bytes FROM civilization_messages
+        WHERE message_id = ${first.message.messageId}
+      `)[0]!;
+      assert.deepStrictEqual(stored, {
+        content_kind: "handoff_v1",
+        body: canonicalBody,
+        body_bytes: Buffer.byteLength(canonicalBody, "utf8"),
+      });
+      assert.deepStrictEqual(
+        (yield* sql<{
+          readonly content_kind: string | null;
+          readonly canonical_payload_hash: string;
+        }>`
+          SELECT content_kind, canonical_payload_hash
+          FROM civilization_mail_operation_receipts
+          WHERE client_request_id = 'handoff:send'
+        `)[0],
+        {
+          content_kind: "handoff_v1",
+          canonical_payload_hash: payloadHash({
+            contentKind: "handoff_v1",
+            targetThreadId: recipient.threadId,
+            body: canonicalBody,
+            replyToMessageId: null,
+          }),
+        },
+      );
+
+      const changed = yield* service
+        .sendHandoff({
+          ...input,
+          handoff: { ...handoff, summary: "Changed under the same request id." },
+        })
+        .pipe(Effect.flip);
+      assert.equal(errorTag(changed), "CivilizationMailConflictError");
+      assert.equal(errorReason(changed), "idempotency_conflict");
+
+      assert.equal(
+        (yield* sql<{ readonly count: number }>`
+          SELECT COUNT(*) AS count FROM orchestration_v2_projection_runs
+          WHERE thread_id = ${recipient.threadId}
+        `)[0]?.count,
+        runsBefore,
+      );
+      assert.equal(
+        (yield* sql<{ readonly count: number }>`
+          SELECT COUNT(*) AS count FROM orchestration_v2_effect_outbox
+        `)[0]?.count,
+        0,
+      );
+      assert.equal(calls.unexpectedProviderWork, 0);
+
+      const inbox = yield* service.listInbox({ caller: recipientCaller });
+      assert.equal(inbox.messages[0]?.contentKind, "handoff_v1");
+      const received = yield* service.receive({
+        caller: recipientCaller,
+        messageId: first.message.messageId,
+        clientRequestId: "handoff:receive",
+      });
+      assert.equal(received.message.contentKind, "handoff_v1");
+      if (received.message.contentKind === "handoff_v1") {
+        assert.deepStrictEqual(received.message.handoff, handoff);
+        assert.equal(
+          received.message.body,
+          [
+            "Summary:\nCore handoff is ready.",
+            "Completed:\n- Added durable storage.",
+            "Decisions:\n- Keep delivery passive.",
+            "Next actions:\n- Wire the existing consumer.",
+            "Blockers or questions:\n- Confirm final presentation copy.",
+            `References:\n- thread: ${recipient.threadId}`,
+          ].join("\n\n"),
+        );
+      }
+    }).pipe(Effect.provide(Layer.fresh(makeLayer(calls))));
+  },
+);
+
+it.effect("replays the exact pre-080 text hash but never a legacy-shaped handoff hash", () => {
+  const calls: FakeProviderCalls = { get: 0, unexpectedProviderWork: 0 };
+  return Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    const service = yield* MailService.CivilizationMailService;
+    const projectId = ProjectId.make("project:mail:legacy-receipt");
+    const sender: ActorSeed = {
+      threadId: ThreadId.make("thread:mail:legacy-receipt:from"),
+      runId: RunId.make("run:mail:legacy-receipt:from"),
+    };
+    const recipient: ActorSeed = {
+      threadId: ThreadId.make("thread:mail:legacy-receipt:to"),
+      runId: RunId.make("run:mail:legacy-receipt:to"),
+    };
+    yield* seedProject(projectId);
+    yield* enableFeature({ pendingPerRecipient: 10, senderPerMinute: 10, projectPerMinute: 10 });
+    yield* seedActor(projectId, sender);
+    yield* seedActor(projectId, recipient);
+    const caller = yield* service.authoritativeCaller(callerInput(projectId, sender));
+
+    const textInput = {
+      caller,
+      targetThreadId: recipient.threadId,
+      clientRequestId: "legacy:text",
+      body: "legacy-compatible text",
+    } as const;
+    const text = yield* service.send(textInput);
+    const legacyTextHash = payloadHash({
+      targetThreadId: recipient.threadId,
+      body: textInput.body,
+      replyToMessageId: null,
+    });
+    yield* sql`
+      UPDATE civilization_mail_operation_receipts
+      SET content_kind = NULL, canonical_payload_hash = ${legacyTextHash}
+      WHERE client_request_id = ${textInput.clientRequestId}
+    `;
+    const legacyReplay = yield* service.send(textInput);
+    assert.equal(legacyReplay.message.messageId, text.message.messageId);
+    assert.equal(legacyReplay.message.contentKind, "text");
+
+    const handoff = {
+      version: 1,
+      summary: "No legacy handoff hash.",
+      completed: [],
+      decisions: [],
+      nextActions: [],
+      blockersOrQuestions: [],
+      references: [],
+    } as const;
+    const handoffInput = {
+      caller,
+      targetThreadId: recipient.threadId,
+      clientRequestId: "legacy:handoff",
+      handoff,
+    } as const;
+    const sentHandoff = yield* service.sendHandoff(handoffInput);
+    const canonicalHandoff = JSON.stringify(handoff);
+    const impossibleLegacyHandoffHash = payloadHash({
+      targetThreadId: recipient.threadId,
+      body: canonicalHandoff,
+      replyToMessageId: null,
+    });
+    yield* sql`
+      UPDATE civilization_mail_operation_receipts
+      SET content_kind = NULL, canonical_payload_hash = ${impossibleLegacyHandoffHash}
+      WHERE client_request_id = ${handoffInput.clientRequestId}
+    `;
+    const rejectedLegacyHandoff = yield* service.sendHandoff(handoffInput).pipe(Effect.flip);
+    assert.equal(errorTag(rejectedLegacyHandoff), "CivilizationMailConflictError");
+    assert.equal(errorReason(rejectedLegacyHandoff), "idempotency_conflict");
+    assert.equal(sentHandoff.message.contentKind, "handoff_v1");
+  }).pipe(Effect.provide(Layer.fresh(makeLayer(calls))));
+});
+
+it.effect(
+  "rejects invalid structured handoff bounds and fails closed on corrupt stored handoffs",
+  () => {
+    const calls: FakeProviderCalls = { get: 0, unexpectedProviderWork: 0 };
+    return Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const service = yield* MailService.CivilizationMailService;
+      const projectId = ProjectId.make("project:mail:handoff-invalid");
+      const sender: ActorSeed = {
+        threadId: ThreadId.make("thread:mail:handoff-invalid:from"),
+        runId: RunId.make("run:mail:handoff-invalid:from"),
+      };
+      const recipient: ActorSeed = {
+        threadId: ThreadId.make("thread:mail:handoff-invalid:to"),
+        runId: RunId.make("run:mail:handoff-invalid:to"),
+      };
+      yield* seedProject(projectId);
+      yield* enableFeature({ pendingPerRecipient: 10, senderPerMinute: 10, projectPerMinute: 10 });
+      yield* seedActor(projectId, sender);
+      yield* seedActor(projectId, recipient);
+      const senderCaller = yield* service.authoritativeCaller(callerInput(projectId, sender));
+      const recipientCaller = yield* service.authoritativeCaller(callerInput(projectId, recipient));
+
+      const base = {
+        version: 1,
+        summary: "Valid summary",
+        completed: [],
+        decisions: [],
+        nextActions: [],
+        blockersOrQuestions: [],
+        references: [],
+      } as const;
+      const tooManyItems = yield* service
+        .sendHandoff({
+          caller: senderCaller,
+          targetThreadId: recipient.threadId,
+          clientRequestId: "invalid:items",
+          handoff: { ...base, completed: Array.from({ length: 9 }, (_, index) => `item ${index}`) },
+        } as never)
+        .pipe(Effect.flip);
+      assert.equal(errorReason(tooManyItems), "invalid_message");
+      const longKind = yield* service
+        .sendHandoff({
+          caller: senderCaller,
+          targetThreadId: recipient.threadId,
+          clientRequestId: "invalid:kind",
+          handoff: { ...base, references: [{ kind: "k".repeat(129), reference: "ref" }] },
+        } as never)
+        .pipe(Effect.flip);
+      assert.equal(errorReason(longKind), "invalid_message");
+      const longReference = yield* service
+        .sendHandoff({
+          caller: senderCaller,
+          targetThreadId: recipient.threadId,
+          clientRequestId: "invalid:reference",
+          handoff: { ...base, references: [{ kind: "kind", reference: "r".repeat(1025) }] },
+        } as never)
+        .pipe(Effect.flip);
+      assert.equal(errorReason(longReference), "invalid_message");
+      const oversizedCanonicalBody = yield* service
+        .sendHandoff({
+          caller: senderCaller,
+          targetThreadId: recipient.threadId,
+          clientRequestId: "invalid:total-bytes",
+          handoff: {
+            ...base,
+            references: Array.from({ length: 4 }, (_, index) => ({
+              kind: `ref-${index}`,
+              reference: "r".repeat(1024),
+            })),
+          },
+        })
+        .pipe(Effect.flip);
+      assert.equal(errorReason(oversizedCanonicalBody), "message_too_large");
+
+      yield* insertRetainedMessage({
+        messageId: "mail:corrupt-handoff",
+        projectId,
+        senderThreadId: sender.threadId,
+        recipientThreadId: recipient.threadId,
+        acceptedAt: "2026-10-18T11:00:00.000Z",
+        contentKind: "handoff_v1",
+        body: '{"version":1,"summary":',
+      });
+      const inbox = yield* service.listInbox({ caller: recipientCaller });
+      assert.equal(inbox.messages[0]?.contentKind, "handoff_v1");
+
+      const receiveError = yield* service
+        .receive({
+          caller: recipientCaller,
+          messageId: "mail:corrupt-handoff" as never,
+          clientRequestId: "corrupt:receive",
+        })
+        .pipe(Effect.flip);
+      assert.equal(errorTag(receiveError), "CivilizationMailInvalidError");
+      assert.equal(errorReason(receiveError), "corrupt_message");
+      assert.deepStrictEqual(
+        (yield* sql<{ readonly offer_count: number }>`
+        SELECT offer_count FROM civilization_messages WHERE message_id = 'mail:corrupt-handoff'
+      `)[0],
+        { offer_count: 0 },
+      );
+      assert.equal(
+        (yield* sql<{ readonly count: number }>`
+        SELECT COUNT(*) AS count FROM civilization_mail_operation_receipts
+        WHERE client_request_id = 'corrupt:receive'
+      `)[0]?.count,
+        0,
+      );
+
+      const adminError = yield* service
+        .readAdminMessage({ projectId, messageId: "mail:corrupt-handoff" as never })
+        .pipe(Effect.flip);
+      assert.equal(errorReason(adminError), "corrupt_message");
+      const contextError = yield* service
+        .selectInboxForContext({ caller: recipientCaller, limit: 5, selection: "recent" })
+        .pipe(Effect.flip);
+      assert.equal(errorReason(contextError), "corrupt_message");
+      const wouldOfferError = yield* service
+        .wouldOfferInboxForContext({
+          caller: recipientCaller,
+          messageIds: ["mail:corrupt-handoff" as never],
+        })
+        .pipe(Effect.flip);
+      assert.equal(errorReason(wouldOfferError), "corrupt_message");
+      const offerError = yield* service
+        .offerInboxForContext({
+          caller: recipientCaller,
+          messageIds: ["mail:corrupt-handoff" as never],
+        })
+        .pipe(Effect.flip);
+      assert.equal(errorReason(offerError), "corrupt_message");
+      assert.deepStrictEqual(
+        (yield* sql<{ readonly offer_count: number }>`
+        SELECT offer_count FROM civilization_messages WHERE message_id = 'mail:corrupt-handoff'
+      `)[0],
+        { offer_count: 0 },
+      );
     }).pipe(Effect.provide(Layer.fresh(makeLayer(calls))));
   },
 );

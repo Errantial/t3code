@@ -50,6 +50,7 @@ import * as ProjectBriefService from "./ProjectBriefService.ts";
 import {
   civilizationProviderCapability,
   resolveCivilizationProviderCapability,
+  resolveCivilizationProviderCapabilityStrict,
 } from "./ProviderCapability.ts";
 
 const PACKET_KEY = "t3_civilization";
@@ -213,6 +214,7 @@ type CivilizationContextExecutionPolicy = {
   readonly inbox: "offer" | "simulate" | "omit";
   readonly persistence: "runtime" | "reference" | "none";
   readonly suppressNonActionableTurn: boolean;
+  readonly strictProviderCapability: boolean;
 };
 
 export class CivilizationContextInspectionInvalidError extends Schema.TaggedError<CivilizationContextInspectionInvalidError>()(
@@ -1146,11 +1148,22 @@ const make = Effect.gen(function* () {
         LIMIT 1
       `)[0];
     const adapter = yield* adapters.get(input.providerInstanceId);
-    const resolvedCapability = yield* resolveCivilizationProviderCapability({
+    const capabilityInput = {
       adapter,
       providerInstanceId: input.providerInstanceId,
       observedOnly: citizen?.observed_only === 1,
-    });
+    } as const;
+    const resolvedCapability = yield* policy.strictProviderCapability
+      ? resolveCivilizationProviderCapabilityStrict(capabilityInput).pipe(
+          Effect.mapError(
+            (cause) =>
+              new ProviderAdapterRegistry.ProviderAdapterRegistryMetadataError({
+                instanceId: input.providerInstanceId,
+                cause,
+              }),
+          ),
+        )
+      : resolveCivilizationProviderCapability(capabilityInput);
     const capability = resolvedCapability.capability;
     const diagnosticsMode = effective.config.operations.diagnostics;
     const packetBudget = effective.config.context.packetBytes;
@@ -1555,6 +1568,7 @@ const make = Effect.gen(function* () {
           ? [
               "civilization_inbox_list",
               "civilization_mail_send",
+              "civilization_handoff_send",
               "civilization_mail_receive",
               "civilization_mail_acknowledge",
             ]
@@ -2016,16 +2030,19 @@ const make = Effect.gen(function* () {
     inbox: "offer",
     persistence: "runtime",
     suppressNonActionableTurn: true,
+    strictProviderCapability: false,
   } as const satisfies CivilizationContextExecutionPolicy;
   const explicitReadExecutionPolicy = {
     inbox: "omit",
     persistence: "reference",
     suppressNonActionableTurn: false,
+    strictProviderCapability: false,
   } as const satisfies CivilizationContextExecutionPolicy;
   const previewExecutionPolicy = {
     inbox: "simulate",
     persistence: "none",
     suppressNonActionableTurn: false,
+    strictProviderCapability: true,
   } as const satisfies CivilizationContextExecutionPolicy;
 
   const forTurn = Effect.fn("CivilizationContextService.forTurn")(

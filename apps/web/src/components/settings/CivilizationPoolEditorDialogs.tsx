@@ -155,6 +155,9 @@ export function CivilizationNamePoolEditorDialog({
   const [expectedRevision, setExpectedRevision] = useState<number>(() =>
     civilizationConfigExpectedRevision(effective, projectId),
   );
+  const [expectedEnvironmentRevision, setExpectedEnvironmentRevision] = useState<number | null>(
+    () => (projectId === null ? null : effective.environmentRevision),
+  );
   const [previewEffective, setPreviewEffective] = useState<CivilizationEffectiveConfig | null>(
     null,
   );
@@ -165,7 +168,11 @@ export function CivilizationNamePoolEditorDialog({
   const [messageRole, setMessageRole] = useState<"status" | "alert">("status");
   const [conflictReview, setConflictReview] = useState(false);
   const currentRevision = civilizationConfigExpectedRevision(effective, projectId);
-  const conflictRefreshPending = conflictReview && expectedRevision === currentRevision;
+  const currentEnvironmentRevision = projectId === null ? null : effective.environmentRevision;
+  const conflictRefreshPending =
+    conflictReview &&
+    expectedRevision === currentRevision &&
+    expectedEnvironmentRevision === currentEnvironmentRevision;
 
   const activePool = draft.find((pool) => pool.id === activePoolId) ?? null;
   const probabilityEffective = previewEffective ?? effective;
@@ -194,8 +201,13 @@ export function CivilizationNamePoolEditorDialog({
 
   const preview = () => {
     if (previewing || saving || conflictRefreshPending) return;
-    if (conflictReview && expectedRevision !== currentRevision) {
+    if (
+      conflictReview &&
+      (expectedRevision !== currentRevision ||
+        expectedEnvironmentRevision !== currentEnvironmentRevision)
+    ) {
       setExpectedRevision(currentRevision);
+      setExpectedEnvironmentRevision(currentEnvironmentRevision);
       setConflictReview(false);
     }
     const candidate = override();
@@ -235,6 +247,9 @@ export function CivilizationNamePoolEditorDialog({
       projectId,
       type: "set",
       expectedRevision,
+      ...(projectId === null || expectedEnvironmentRevision === null
+        ? {}
+        : { expectedEnvironmentRevision }),
       override: override(),
     })
       .then(() => {
@@ -528,6 +543,9 @@ export function CivilizationProfilePoolEditorDialog({
   const [expectedRevision, setExpectedRevision] = useState<number>(() =>
     civilizationConfigExpectedRevision(effective, projectId),
   );
+  const [expectedEnvironmentRevision, setExpectedEnvironmentRevision] = useState<number | null>(
+    () => (projectId === null ? null : effective.environmentRevision),
+  );
   const [previewEffective, setPreviewEffective] = useState<CivilizationEffectiveConfig | null>(
     null,
   );
@@ -538,7 +556,11 @@ export function CivilizationProfilePoolEditorDialog({
   const [messageRole, setMessageRole] = useState<"status" | "alert">("status");
   const [conflictReview, setConflictReview] = useState(false);
   const currentRevision = civilizationConfigExpectedRevision(effective, projectId);
-  const conflictRefreshPending = conflictReview && expectedRevision === currentRevision;
+  const currentEnvironmentRevision = projectId === null ? null : effective.environmentRevision;
+  const conflictRefreshPending =
+    conflictReview &&
+    expectedRevision === currentRevision &&
+    expectedEnvironmentRevision === currentEnvironmentRevision;
 
   const activePool = draft.find((pool) => pool.id === activePoolId) ?? null;
   const probabilityEffective = previewEffective ?? effective;
@@ -568,8 +590,13 @@ export function CivilizationProfilePoolEditorDialog({
 
   const preview = () => {
     if (previewing || saving || conflictRefreshPending) return;
-    if (conflictReview && expectedRevision !== currentRevision) {
+    if (
+      conflictReview &&
+      (expectedRevision !== currentRevision ||
+        expectedEnvironmentRevision !== currentEnvironmentRevision)
+    ) {
       setExpectedRevision(currentRevision);
+      setExpectedEnvironmentRevision(currentEnvironmentRevision);
       setConflictReview(false);
     }
     const candidate = override();
@@ -609,6 +636,9 @@ export function CivilizationProfilePoolEditorDialog({
       projectId,
       type: "set",
       expectedRevision,
+      ...(projectId === null || expectedEnvironmentRevision === null
+        ? {}
+        : { expectedEnvironmentRevision }),
       override: override(),
     })
       .then(() => {

@@ -7,6 +7,7 @@ import {
   type CivilizationContextSuppressionReason,
   type CivilizationCorrespondenceCursor,
   type CivilizationCorrespondenceReplyRelation,
+  type CivilizationMailContentKind,
   type CivilizationLineageCursor,
   type CivilizationContextInspectionCursor,
   type CivilizationContextInspectionId,
@@ -25,13 +26,17 @@ import {
   type CivilizationMessageId,
   type CivilizationNoteId,
   type CivilizationNotesCursor,
+  type CivilizationOnboardingContentPreviewRequest,
+  type CivilizationOnboardingPreviewRequest,
   type CivilizationProjectBriefClearRequest,
   type CivilizationProjectBriefSetRequest,
 } from "@t3tools/contracts";
 import {
   clearEnvironmentCivilizationProjectBrief,
+  fetchCurrentEnvironmentCivilizationAttention,
   fetchCurrentEnvironmentCivilizationAchievementPage,
   fetchCurrentEnvironmentCivilizationCitizenDetail,
+  searchCurrentEnvironmentCivilizationCitizens,
   fetchCurrentEnvironmentCivilizationCensusPage,
   fetchCurrentEnvironmentCivilizationChroniclePage,
   fetchCurrentEnvironmentCivilizationContextAnalytics,
@@ -45,8 +50,11 @@ import {
   fetchEnvironmentCivilizationOverview,
   fetchCurrentEnvironmentCivilizationRetainedMailBody,
   fetchCurrentEnvironmentCivilizationRetainedMailPage,
+  fetchEnvironmentCivilizationOnboardingPresets,
   fetchEnvironmentCivilizationProjectBriefDetail,
   fetchEnvironmentCivilizationProjectBriefMetadata,
+  previewEnvironmentCivilizationOnboarding,
+  previewEnvironmentCivilizationOnboardingContent,
   runEnvironmentCivilizationConfigAction,
   runEnvironmentCivilizationCitizenAction,
   runEnvironmentCivilizationDataAction,
@@ -66,6 +74,13 @@ import { useEnvironmentQuery } from "./query";
 export function civilizationOverviewQueryKey(
   environmentId: EnvironmentId,
   projectId: ProjectId | null,
+): string {
+  return JSON.stringify([environmentId, projectId]);
+}
+
+export function civilizationAttentionQueryKey(
+  environmentId: EnvironmentId,
+  projectId: ProjectId,
 ): string {
   return JSON.stringify([environmentId, projectId]);
 }
@@ -147,6 +162,7 @@ export type CivilizationConfigActionInput = CivilizationConfigTarget &
     | {
         readonly type: "set";
         readonly expectedRevision: number;
+        readonly expectedEnvironmentRevision?: number | undefined;
         readonly override: CivilizationConfigOverride;
       }
     | { readonly type: "reset"; readonly expectedRevision: number }
@@ -195,6 +211,122 @@ export function refreshCivilizationOverview(
     civilizationOverviewAtom(civilizationOverviewQueryKey(environmentId, projectId)),
   );
 }
+
+const civilizationAttentionAtom = Atom.family((serializedKey: string) => {
+  const [rawEnvironmentId, rawProjectId] = JSON.parse(serializedKey) as [string, string];
+  const environmentId = rawEnvironmentId as EnvironmentId;
+  const projectId = ProjectId.make(rawProjectId);
+  return connectionAtomRuntime
+    .atom((get) => {
+      const prepared = Option.getOrNull(
+        get(environmentSession.preparedConnectionValueAtom(environmentId)),
+      );
+      if (prepared === null) return Effect.never;
+      return fetchCurrentEnvironmentCivilizationAttention({ prepared, projectId });
+    })
+    .pipe(Atom.setIdleTTL(60_000), Atom.withLabel(`civilization-attention:${serializedKey}`));
+});
+
+export function useCivilizationAttention(
+  environmentId: EnvironmentId | null,
+  projectId: ProjectId | null,
+) {
+  const atom =
+    environmentId === null || projectId === null
+      ? null
+      : civilizationAttentionAtom(civilizationAttentionQueryKey(environmentId, projectId));
+  return useEnvironmentQuery(atom);
+}
+
+export function civilizationOnboardingQueryKey(
+  environmentId: EnvironmentId,
+  projectId: ProjectId,
+): string {
+  return JSON.stringify([environmentId, projectId]);
+}
+
+const civilizationOnboardingPresetsAtom = Atom.family((serializedKey: string) => {
+  const [rawEnvironmentId, rawProjectId] = JSON.parse(serializedKey) as [string, string];
+  const environmentId = rawEnvironmentId as EnvironmentId;
+  const projectId = ProjectId.make(rawProjectId);
+  return connectionAtomRuntime
+    .atom((get) => {
+      const prepared = Option.getOrNull(
+        get(environmentSession.preparedConnectionValueAtom(environmentId)),
+      );
+      if (prepared === null) return Effect.never;
+      return Effect.gen(function* () {
+        const signer = yield* Effect.serviceOption(ManagedRelay.ManagedRelayDpopSigner);
+        return yield* fetchEnvironmentCivilizationOnboardingPresets({
+          prepared,
+          signer,
+          projectId,
+        });
+      });
+    })
+    .pipe(
+      Atom.setIdleTTL(60_000),
+      Atom.withLabel(`civilization-onboarding-presets:${serializedKey}`),
+    );
+});
+
+export function useCivilizationOnboardingPresets(
+  environmentId: EnvironmentId | null,
+  projectId: ProjectId | null,
+) {
+  const atom =
+    environmentId === null || projectId === null
+      ? null
+      : civilizationOnboardingPresetsAtom(civilizationOnboardingQueryKey(environmentId, projectId));
+  return useEnvironmentQuery(atom);
+}
+
+export function refreshCivilizationOnboardingPresets(
+  environmentId: EnvironmentId,
+  projectId: ProjectId,
+): void {
+  appAtomRegistry.refresh(
+    civilizationOnboardingPresetsAtom(civilizationOnboardingQueryKey(environmentId, projectId)),
+  );
+}
+
+export type CivilizationOnboardingActionInput = {
+  readonly environmentId: EnvironmentId;
+} & (
+  | { readonly type: "preview"; readonly preview: CivilizationOnboardingPreviewRequest }
+  | {
+      readonly type: "reveal";
+      readonly preview: CivilizationOnboardingContentPreviewRequest;
+    }
+);
+
+export const civilizationOnboardingAction =
+  connectionAtomRuntime.fn<CivilizationOnboardingActionInput>()(
+    (input, get) =>
+      Effect.gen(function* () {
+        const prepared = Option.getOrNull(
+          get(environmentSession.preparedConnectionValueAtom(input.environmentId)),
+        );
+        if (prepared === null) {
+          return yield* new CivilizationEnvironmentDisconnectedError({
+            environmentId: input.environmentId,
+          });
+        }
+        const signer = yield* Effect.serviceOption(ManagedRelay.ManagedRelayDpopSigner);
+        return input.type === "preview"
+          ? yield* previewEnvironmentCivilizationOnboarding({
+              prepared,
+              signer,
+              preview: input.preview,
+            })
+          : yield* previewEnvironmentCivilizationOnboardingContent({
+              prepared,
+              signer,
+              preview: input.preview,
+            });
+      }),
+    { concurrent: false },
+  );
 
 export function civilizationProjectBriefQueryKey(
   environmentId: EnvironmentId,
@@ -427,6 +559,50 @@ function civilizationProjectPageKey(
   parts: ReadonlyArray<string | number | boolean | null>,
 ): string {
   return JSON.stringify(parts);
+}
+
+export function civilizationCitizenSearchQueryKey(
+  environmentId: EnvironmentId,
+  projectId: ProjectId,
+  query: string,
+  limit: number,
+): string {
+  return civilizationProjectPageKey([environmentId, projectId, query, limit]);
+}
+
+const civilizationCitizenSearchAtom = Atom.family((serializedKey: string) => {
+  const [rawEnvironmentId, rawProjectId, query, limit] = JSON.parse(serializedKey) as [
+    string,
+    string,
+    string,
+    number,
+  ];
+  const environmentId = rawEnvironmentId as EnvironmentId;
+  const projectId = ProjectId.make(rawProjectId);
+  return connectionAtomRuntime
+    .atom((get) => {
+      const prepared = Option.getOrNull(
+        get(environmentSession.preparedConnectionValueAtom(environmentId)),
+      );
+      if (prepared === null) return Effect.never;
+      return searchCurrentEnvironmentCivilizationCitizens({ prepared, projectId, query, limit });
+    })
+    .pipe(Atom.setIdleTTL(60_000), Atom.withLabel(`civilization-citizen-search:${serializedKey}`));
+});
+
+export function useCivilizationCitizenSearch(
+  environmentId: EnvironmentId | null,
+  projectId: ProjectId | null,
+  query: string | null,
+  limit: number,
+) {
+  const atom =
+    environmentId === null || projectId === null || query === null
+      ? null
+      : civilizationCitizenSearchAtom(
+          civilizationCitizenSearchQueryKey(environmentId, projectId, query, limit),
+        );
+  return useEnvironmentQuery(atom);
 }
 
 const civilizationCensusPageAtom = Atom.family((serializedKey: string) => {
@@ -920,6 +1096,7 @@ export interface CivilizationCorrespondenceFilters {
   readonly counterpartyThreadId?: ThreadId | undefined;
   readonly senderThreadId?: ThreadId | undefined;
   readonly recipientThreadId?: ThreadId | undefined;
+  readonly contentKind?: CivilizationMailContentKind | undefined;
   readonly replyRelation?: CivilizationCorrespondenceReplyRelation | undefined;
   readonly replyToMessageId?: CivilizationMessageId | undefined;
   readonly acknowledged?: boolean | undefined;
@@ -937,6 +1114,7 @@ const civilizationCorrespondencePageAtom = Atom.family((serializedKey: string) =
     rawCounterpartyThreadId,
     rawSenderThreadId,
     rawRecipientThreadId,
+    rawContentKind,
     rawReplyRelation,
     rawReplyToMessageId,
     rawAcknowledged,
@@ -953,6 +1131,7 @@ const civilizationCorrespondencePageAtom = Atom.family((serializedKey: string) =
     string | null,
     string | null,
     string | null,
+    CivilizationMailContentKind | null,
     CivilizationCorrespondenceReplyRelation | null,
     string | null,
     boolean | null,
@@ -984,6 +1163,7 @@ const civilizationCorrespondencePageAtom = Atom.family((serializedKey: string) =
         ...(rawRecipientThreadId === null
           ? {}
           : { recipientThreadId: ThreadId.make(rawRecipientThreadId) }),
+        ...(rawContentKind === null ? {} : { contentKind: rawContentKind }),
         ...(rawReplyRelation === null ? {} : { replyRelation: rawReplyRelation }),
         ...(rawReplyToMessageId === null
           ? {}
@@ -1018,6 +1198,7 @@ export function useCivilizationCorrespondencePage(
             filters.counterpartyThreadId ?? null,
             filters.senderThreadId ?? null,
             filters.recipientThreadId ?? null,
+            filters.contentKind ?? null,
             filters.replyRelation ?? null,
             filters.replyToMessageId ?? null,
             filters.acknowledged ?? null,

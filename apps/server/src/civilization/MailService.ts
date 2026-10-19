@@ -14,6 +14,7 @@ import {
   type CivilizationMailAcknowledgeResult,
   type CivilizationMailBody,
   CivilizationMailCapacityError,
+  type CivilizationMailContentKind,
   CivilizationMailConflictError,
   CivilizationMailInvalidError,
   CivilizationMailNotFoundError,
@@ -24,6 +25,8 @@ import {
   type CivilizationMailSendResult,
   type CivilizationMailSummary,
   CivilizationMessageId,
+  CivilizationPassiveHandoffPayloadV1,
+  type CivilizationPassiveHandoffPayloadV1 as CivilizationPassiveHandoffPayloadV1Type,
   type CivilizationMessageId as CivilizationMessageIdType,
   type ProjectId,
   type ProviderInstanceId,
@@ -126,6 +129,7 @@ type ProjectStateRow = {
 type MessageRow = {
   readonly message_id: string;
   readonly project_id: ProjectId;
+  readonly content_kind: CivilizationMailContentKind;
   readonly sender_thread_id: ThreadId;
   readonly sender_name_at_send: string;
   readonly sender_citizen_epoch: number;
@@ -162,6 +166,7 @@ type ReceiptRow = {
   readonly actor_citizen_epoch: number;
   readonly operation_kind: "send" | "receive" | "acknowledge";
   readonly client_request_id: string;
+  readonly content_kind: CivilizationMailContentKind | null;
   readonly canonical_payload_hash: string;
   readonly result_message_id: string;
   readonly created_at: string;
@@ -204,6 +209,7 @@ interface CorrespondenceCursorPayload {
   readonly counterpartyThreadId: ThreadId | null;
   readonly senderThreadId: ThreadId | null;
   readonly recipientThreadId: ThreadId | null;
+  readonly contentKind: CivilizationMailContentKind | null;
   readonly replyRelation: CivilizationCorrespondenceReplyRelation;
   readonly replyToMessageId: string | null;
   readonly acknowledged: boolean | null;
@@ -221,6 +227,7 @@ export interface CorrespondenceHistoryInput {
   readonly counterpartyThreadId?: ThreadId | undefined;
   readonly senderThreadId?: ThreadId | undefined;
   readonly recipientThreadId?: ThreadId | undefined;
+  readonly contentKind?: CivilizationMailContentKind | undefined;
   readonly replyRelation?: CivilizationCorrespondenceReplyRelation | undefined;
   readonly replyToMessageId?: CivilizationMessageIdType | undefined;
   readonly acknowledged?: boolean | undefined;
@@ -337,6 +344,62 @@ const validateBody = (body: string, configuredBytes: number) => {
   return bytes;
 };
 
+const decodePassiveHandoffPayload = Schema.decodeUnknownSync(CivilizationPassiveHandoffPayloadV1);
+
+const canonicalHandoffBody = (handoff: CivilizationPassiveHandoffPayloadV1Type) =>
+  JSON.stringify({
+    version: 1,
+    summary: handoff.summary,
+    completed: [...handoff.completed],
+    decisions: [...handoff.decisions],
+    nextActions: [...handoff.nextActions],
+    blockersOrQuestions: [...handoff.blockersOrQuestions],
+    references: handoff.references.map(({ kind, reference }) => ({ kind, reference })),
+  });
+
+const validateHandoff = (value: unknown): CivilizationPassiveHandoffPayloadV1Type => {
+  try {
+    return decodePassiveHandoffPayload(value);
+  } catch {
+    throw invalid("invalid_message", "The structured Civilization handoff payload is invalid.");
+  }
+};
+
+const decodeStoredHandoff = (body: string): CivilizationPassiveHandoffPayloadV1Type => {
+  try {
+    const handoff = decodePassiveHandoffPayload(JSON.parse(body));
+    if (canonicalHandoffBody(handoff) !== body) {
+      throw new Error("non-canonical handoff body");
+    }
+    return handoff;
+  } catch {
+    throw invalid(
+      "corrupt_message",
+      "Stored structured Civilization handoff content is invalid or non-canonical.",
+    );
+  }
+};
+
+const renderHandoff = (handoff: CivilizationPassiveHandoffPayloadV1Type) => {
+  const sections = [`Summary:\n${handoff.summary}`];
+  const appendList = (label: string, values: ReadonlyArray<string>) => {
+    if (values.length > 0)
+      sections.push(`${label}:\n${values.map((value) => `- ${value}`).join("\n")}`);
+  };
+  appendList("Completed", handoff.completed);
+  appendList("Decisions", handoff.decisions);
+  appendList("Next actions", handoff.nextActions);
+  appendList("Blockers or questions", handoff.blockersOrQuestions);
+  if (handoff.references.length > 0) {
+    sections.push(
+      `References:\n${handoff.references
+        .map(({ kind, reference }) => `- ${kind}: ${reference}`)
+        .join("\n")}`,
+    );
+  }
+  return sections.join("\n\n");
+};
+
 const payloadHash = (value: unknown) =>
   `sha256:${NodeCrypto.createHash("sha256").update(JSON.stringify(value), "utf8").digest("hex")}`;
 
@@ -344,6 +407,7 @@ const newMessageId = () => CivilizationMessageId.make(`mail:${NodeCrypto.randomU
 
 const messageSummary = (row: MessageSummaryRow): CivilizationMailSummary => ({
   messageId: CivilizationMessageId.make(row.message_id),
+  contentKind: row.content_kind,
   senderThreadId: row.sender_thread_id,
   senderNameAtSend: row.sender_name_at_send,
   senderCitizenEpoch: row.sender_citizen_epoch,
@@ -368,10 +432,19 @@ const messageSummary = (row: MessageSummaryRow): CivilizationMailSummary => ({
   terminalReason: row.terminal_reason,
 });
 
-const messageBody = (row: MessageRow): CivilizationMailBody => ({
-  ...messageSummary(row),
-  body: row.body,
-});
+const messageBody = (row: MessageRow) =>
+  mailSync((): CivilizationMailBody => {
+    if (row.content_kind === "text") {
+      return { ...messageSummary(row), contentKind: "text", body: row.body };
+    }
+    const handoff = decodeStoredHandoff(row.body);
+    return {
+      ...messageSummary(row),
+      contentKind: "handoff_v1",
+      body: renderHandoff(handoff),
+      handoff,
+    };
+  });
 
 const encodeInboxCursor = (payload: Omit<InboxCursorPayload, "v" | "kind">) =>
   CivilizationInboxCursor.make(
@@ -471,6 +544,7 @@ const correspondenceFilterIdentity = (input: CorrespondenceHistoryInput) => ({
   counterpartyThreadId: correspondencePair(input)?.[1] ?? null,
   senderThreadId: input.senderThreadId ?? null,
   recipientThreadId: input.recipientThreadId ?? null,
+  contentKind: input.contentKind ?? null,
   replyRelation: input.replyRelation ?? "any",
   replyToMessageId: input.replyToMessageId ?? null,
   acknowledged: input.acknowledged ?? null,
@@ -500,6 +574,7 @@ const decodeCorrespondenceCursor = (
       parsed.counterpartyThreadId !== filters.counterpartyThreadId ||
       parsed.senderThreadId !== filters.senderThreadId ||
       parsed.recipientThreadId !== filters.recipientThreadId ||
+      parsed.contentKind !== filters.contentKind ||
       parsed.replyRelation !== filters.replyRelation ||
       parsed.replyToMessageId !== filters.replyToMessageId ||
       parsed.acknowledged !== filters.acknowledged ||
@@ -584,7 +659,7 @@ const currentQuotaTime = Effect.gen(function* () {
 const selectMessage = (sql: SqlClient.SqlClient, projectId: ProjectId, messageId: string) =>
   Effect.gen(function* () {
     return (yield* sql<MessageRow>`
-        SELECT message_id, project_id, sender_thread_id, sender_name_at_send,
+        SELECT message_id, project_id, content_kind, sender_thread_id, sender_name_at_send,
                sender_citizen_epoch, sender_run_id, recipient_thread_id, recipient_delivery_epoch,
                reply_to_message_id, body, body_bytes, accepted_runtime_mode,
                accepted_interaction_mode, accepted_environment_revision, accepted_project_revision,
@@ -739,7 +814,8 @@ const make = Effect.gen(function* () {
   }) {
     return (yield* sql<ReceiptRow>`
         SELECT project_id, actor_thread_id, actor_citizen_epoch, operation_kind,
-               client_request_id, canonical_payload_hash, result_message_id, created_at, expires_at
+               client_request_id, content_kind, canonical_payload_hash,
+               result_message_id, created_at, expires_at
         FROM civilization_mail_operation_receipts
         WHERE project_id = ${input.projectId}
           AND actor_thread_id = ${input.actorThreadId}
@@ -752,11 +828,42 @@ const make = Effect.gen(function* () {
     readonly receipt: ReceiptRow;
     readonly operationKind: ReceiptRow["operation_kind"];
     readonly payloadHash: string;
+    readonly contentKind?: CivilizationMailContentKind | undefined;
   }) {
     if (
       input.receipt.operation_kind !== input.operationKind ||
-      input.receipt.canonical_payload_hash !== input.payloadHash
+      input.receipt.canonical_payload_hash !== input.payloadHash ||
+      (input.contentKind !== undefined &&
+        input.receipt.content_kind !== null &&
+        input.receipt.content_kind !== input.contentKind)
     ) {
+      return yield* new CivilizationMailConflictError({
+        code: "civilization_mail_conflict",
+        reason: "idempotency_conflict",
+        message:
+          "This Civilization mail clientRequestId was already used for a different mutation.",
+      });
+    }
+    return CivilizationMessageId.make(input.receipt.result_message_id);
+  });
+
+  const resolveSendReceipt = Effect.fn("CivilizationMail.resolveSendReceipt")(function* (input: {
+    readonly receipt: ReceiptRow;
+    readonly contentKind: CivilizationMailContentKind;
+    readonly payloadHash: string;
+    readonly legacyTextPayloadHash?: string | undefined;
+  }) {
+    const currentMatch =
+      input.receipt.operation_kind === "send" &&
+      input.receipt.content_kind === input.contentKind &&
+      input.receipt.canonical_payload_hash === input.payloadHash;
+    const legacyTextMatch =
+      input.contentKind === "text" &&
+      input.receipt.operation_kind === "send" &&
+      input.receipt.content_kind === null &&
+      input.legacyTextPayloadHash !== undefined &&
+      input.receipt.canonical_payload_hash === input.legacyTextPayloadHash;
+    if (!currentMatch && !legacyTextMatch) {
       return yield* new CivilizationMailConflictError({
         code: "civilization_mail_conflict",
         reason: "idempotency_conflict",
@@ -900,6 +1007,7 @@ const make = Effect.gen(function* () {
     readonly caller: CivilizationMailCaller;
     readonly kind: ReceiptRow["operation_kind"];
     readonly clientRequestId: string;
+    readonly contentKind: CivilizationMailContentKind;
     readonly canonicalPayloadHash: string;
     readonly resultMessageId: CivilizationMessageIdType;
     readonly now: string;
@@ -908,11 +1016,11 @@ const make = Effect.gen(function* () {
     yield* sql`
       INSERT INTO civilization_mail_operation_receipts (
         project_id, actor_thread_id, actor_citizen_epoch, operation_kind,
-        client_request_id, canonical_payload_hash, result_message_id,
+        client_request_id, content_kind, canonical_payload_hash, result_message_id,
         created_at, expires_at
       ) VALUES (
         ${input.caller.projectId}, ${input.caller.threadId}, ${input.caller.citizenEpoch}, ${input.kind},
-        ${input.clientRequestId}, ${input.canonicalPayloadHash}, ${input.resultMessageId},
+        ${input.clientRequestId}, ${input.contentKind}, ${input.canonicalPayloadHash}, ${input.resultMessageId},
         ${input.now}, strftime('%Y-%m-%dT%H:%M:%fZ', ${input.now}, ${receiptExpiry(input.retentionDays)})
       )
     `;
@@ -956,20 +1064,30 @@ const make = Effect.gen(function* () {
     `;
   });
 
-  const send = Effect.fn("CivilizationMail.send")(function* (input: {
+  const acceptSend = Effect.fn("CivilizationMail.acceptSend")(function* (input: {
     readonly caller: CivilizationMailCaller;
     readonly targetThreadId: ThreadId;
     readonly clientRequestId: string;
-    readonly body: string;
+    readonly contentKind: CivilizationMailContentKind;
+    readonly storedBody: string;
     readonly replyToMessageId?: CivilizationMessageIdType;
   }) {
     const validated = yield* mailSync(() => ({
       clientRequestId: validateClientRequestId(input.clientRequestId),
       canonicalPayloadHash: payloadHash({
+        contentKind: input.contentKind,
         targetThreadId: input.targetThreadId,
-        body: input.body,
+        body: input.storedBody,
         replyToMessageId: input.replyToMessageId ?? null,
       }),
+      legacyTextPayloadHash:
+        input.contentKind === "text"
+          ? payloadHash({
+              targetThreadId: input.targetThreadId,
+              body: input.storedBody,
+              replyToMessageId: input.replyToMessageId ?? null,
+            })
+          : undefined,
     }));
 
     // An accepted operation may be reconciled after lifecycle/provider changes.
@@ -982,10 +1100,11 @@ const make = Effect.gen(function* () {
       clientRequestId: validated.clientRequestId,
     });
     if (prior !== undefined) {
-      const messageId = yield* resolveReceipt({
+      const messageId = yield* resolveSendReceipt({
         receipt: prior,
-        operationKind: "send",
+        contentKind: input.contentKind,
         payloadHash: validated.canonicalPayloadHash,
+        legacyTextPayloadHash: validated.legacyTextPayloadHash,
       });
       const row = yield* selectMessage(sql, input.caller.projectId, messageId);
       if (row === undefined) {
@@ -1045,10 +1164,11 @@ const make = Effect.gen(function* () {
             clientRequestId: validated.clientRequestId,
           });
           if (concurrentReceipt !== undefined) {
-            const existingMessageId = yield* resolveReceipt({
+            const existingMessageId = yield* resolveSendReceipt({
               receipt: concurrentReceipt,
-              operationKind: "send",
+              contentKind: input.contentKind,
               payloadHash: validated.canonicalPayloadHash,
+              legacyTextPayloadHash: validated.legacyTextPayloadHash,
             });
             const existing = yield* selectMessage(sql, input.caller.projectId, existingMessageId);
             if (existing === undefined) {
@@ -1065,7 +1185,7 @@ const make = Effect.gen(function* () {
           );
           const freshCaller = yield* assertFreshCaller(input.caller, effective);
           const bodyBytes = yield* mailSync(() =>
-            validateBody(input.body, effective.config.messaging.messageBytes),
+            validateBody(input.storedBody, effective.config.messaging.messageBytes),
           );
           const targetCitizen = yield* readCitizen(input.caller.projectId, input.targetThreadId);
           const targetThread = yield* readThread(input.caller.projectId, input.targetThreadId);
@@ -1247,7 +1367,7 @@ const make = Effect.gen(function* () {
           const ttlModifier = `+${effective.config.messaging.unreadTtlDays} days`;
           yield* sql`
           INSERT INTO civilization_messages (
-            message_id, project_id, sender_thread_id, sender_name_at_send,
+            message_id, project_id, content_kind, sender_thread_id, sender_name_at_send,
             sender_citizen_epoch, sender_run_id, recipient_thread_id, recipient_delivery_epoch,
             reply_to_message_id, body, body_bytes,
             accepted_runtime_mode, accepted_interaction_mode,
@@ -1256,9 +1376,9 @@ const make = Effect.gen(function* () {
             first_offered_at, last_offered_at, offer_count,
             acknowledged_at, terminal_at, terminal_reason
           ) VALUES (
-            ${messageId}, ${input.caller.projectId}, ${input.caller.threadId}, ${freshCaller.citizen.name_display},
+            ${messageId}, ${input.caller.projectId}, ${input.contentKind}, ${input.caller.threadId}, ${freshCaller.citizen.name_display},
             ${input.caller.citizenEpoch}, ${input.caller.runId}, ${input.targetThreadId}, ${targetCitizen.delivery_epoch},
-            ${input.replyToMessageId ?? null}, ${input.body}, ${bodyBytes},
+            ${input.replyToMessageId ?? null}, ${input.storedBody}, ${bodyBytes},
             ${freshCaller.runtimeMode}, ${freshCaller.interactionMode},
             ${effective.environmentRevision}, ${effective.projectRevision},
             ${time.now}, strftime('%Y-%m-%dT%H:%M:%fZ', ${time.now}, ${ttlModifier}),
@@ -1270,6 +1390,7 @@ const make = Effect.gen(function* () {
             caller: input.caller,
             kind: "send",
             clientRequestId: validated.clientRequestId,
+            contentKind: input.contentKind,
             canonicalPayloadHash: validated.canonicalPayloadHash,
             resultMessageId: messageId,
             now: time.now,
@@ -1292,7 +1413,7 @@ const make = Effect.gen(function* () {
                 fields: {
                   threadId: input.caller.threadId,
                   runId: input.caller.runId,
-                  bytes: utf8Length(input.body),
+                  bytes: utf8Length(input.storedBody),
                   rejectionCode: "storage",
                 },
               });
@@ -1300,6 +1421,41 @@ const make = Effect.gen(function* () {
             }),
         }),
       );
+  });
+
+  const send = Effect.fn("CivilizationMail.send")(function* (input: {
+    readonly caller: CivilizationMailCaller;
+    readonly targetThreadId: ThreadId;
+    readonly clientRequestId: string;
+    readonly body: string;
+    readonly replyToMessageId?: CivilizationMessageIdType;
+  }) {
+    return yield* acceptSend({
+      caller: input.caller,
+      targetThreadId: input.targetThreadId,
+      clientRequestId: input.clientRequestId,
+      contentKind: "text",
+      storedBody: input.body,
+      ...(input.replyToMessageId === undefined ? {} : { replyToMessageId: input.replyToMessageId }),
+    });
+  });
+
+  const sendHandoff = Effect.fn("CivilizationMail.sendHandoff")(function* (input: {
+    readonly caller: CivilizationMailCaller;
+    readonly targetThreadId: ThreadId;
+    readonly clientRequestId: string;
+    readonly handoff: CivilizationPassiveHandoffPayloadV1Type;
+    readonly replyToMessageId?: CivilizationMessageIdType;
+  }) {
+    const handoff = yield* mailSync(() => validateHandoff(input.handoff));
+    return yield* acceptSend({
+      caller: input.caller,
+      targetThreadId: input.targetThreadId,
+      clientRequestId: input.clientRequestId,
+      contentKind: "handoff_v1",
+      storedBody: canonicalHandoffBody(handoff),
+      ...(input.replyToMessageId === undefined ? {} : { replyToMessageId: input.replyToMessageId }),
+    });
   });
 
   const listInbox = Effect.fn("CivilizationMail.listInbox")(function* (input: {
@@ -1340,7 +1496,7 @@ const make = Effect.gen(function* () {
     );
     const time = yield* currentTime(sql);
     const rows = yield* sql<MessageSummaryRow>`
-      SELECT message_id, project_id, sender_thread_id, sender_name_at_send,
+      SELECT message_id, project_id, content_kind, sender_thread_id, sender_name_at_send,
              sender_citizen_epoch, sender_run_id, recipient_thread_id, recipient_delivery_epoch,
              reply_to_message_id, body_bytes, accepted_runtime_mode,
              accepted_interaction_mode, accepted_environment_revision, accepted_project_revision,
@@ -1499,6 +1655,7 @@ const make = Effect.gen(function* () {
             receipt,
             operationKind: "receive",
             payloadHash: validated.canonicalPayloadHash,
+            contentKind: row.content_kind,
           });
         } else {
           yield* sql`
@@ -1512,6 +1669,7 @@ const make = Effect.gen(function* () {
             caller: input.caller,
             kind: "receive",
             clientRequestId: validated.clientRequestId,
+            contentKind: row.content_kind,
             canonicalPayloadHash: validated.canonicalPayloadHash,
             resultMessageId: input.messageId,
             now: time.now,
@@ -1525,11 +1683,12 @@ const make = Effect.gen(function* () {
             SELECT mail_revision FROM civilization_project_state
             WHERE project_id = ${input.caller.projectId} LIMIT 1
           `)[0]?.mail_revision ?? 0;
+        const decodedMessage = yield* messageBody(updated);
         return {
           revision,
           deliveryEpoch: input.caller.deliveryEpoch,
           offeredAt: updated.last_offered_at ?? time.now,
-          message: messageBody(updated),
+          message: decodedMessage,
         } satisfies CivilizationMailReceiveResult;
       }),
     );
@@ -1583,6 +1742,7 @@ const make = Effect.gen(function* () {
             receipt,
             operationKind: "acknowledge",
             payloadHash: validated.canonicalPayloadHash,
+            contentKind: row.content_kind,
           });
         } else {
           if (row.acknowledged_at === null) {
@@ -1596,6 +1756,7 @@ const make = Effect.gen(function* () {
             caller: input.caller,
             kind: "acknowledge",
             clientRequestId: validated.clientRequestId,
+            contentKind: row.content_kind,
             canonicalPayloadHash: validated.canonicalPayloadHash,
             resultMessageId: input.messageId,
             now: time.now,
@@ -1632,7 +1793,7 @@ const make = Effect.gen(function* () {
       const rows =
         input.selection === "recent"
           ? yield* sql<MessageRow>`
-          SELECT message_id, project_id, sender_thread_id, sender_name_at_send,
+          SELECT message_id, project_id, content_kind, sender_thread_id, sender_name_at_send,
                  sender_citizen_epoch, sender_run_id, recipient_thread_id, recipient_delivery_epoch,
                  reply_to_message_id, body, body_bytes, accepted_runtime_mode,
                  accepted_interaction_mode, accepted_environment_revision, accepted_project_revision,
@@ -1647,7 +1808,7 @@ const make = Effect.gen(function* () {
           LIMIT ${scanLimit}
         `
           : yield* sql<MessageRow>`
-          SELECT message_id, project_id, sender_thread_id, sender_name_at_send,
+          SELECT message_id, project_id, content_kind, sender_thread_id, sender_name_at_send,
                  sender_citizen_epoch, sender_run_id, recipient_thread_id, recipient_delivery_epoch,
                  reply_to_message_id, body, body_bytes, accepted_runtime_mode,
                  accepted_interaction_mode, accepted_environment_revision, accepted_project_revision,
@@ -1665,7 +1826,7 @@ const make = Effect.gen(function* () {
         runtimeMode: fresh.runtimeMode,
         interactionMode: fresh.interactionMode,
       };
-      return rows
+      const selected = rows
         .filter(
           (row) =>
             exceededDispatchModeLimit(
@@ -1676,8 +1837,12 @@ const make = Effect.gen(function* () {
               current,
             ) === undefined,
         )
-        .slice(0, input.limit)
-        .map((row) => ({ message: messageBody(row) }) satisfies CivilizationMailContextCandidate);
+        .slice(0, input.limit);
+      return yield* Effect.forEach(selected, (row) =>
+        messageBody(row).pipe(
+          Effect.map((message) => ({ message }) satisfies CivilizationMailContextCandidate),
+        ),
+      );
     },
   );
 
@@ -1697,7 +1862,7 @@ const make = Effect.gen(function* () {
     const rows =
       input.selection === "recent"
         ? yield* sql<MessageRow>`
-            SELECT message_id, project_id, sender_thread_id, sender_name_at_send,
+            SELECT message_id, project_id, content_kind, sender_thread_id, sender_name_at_send,
                    sender_citizen_epoch, sender_run_id, recipient_thread_id, recipient_delivery_epoch,
                    reply_to_message_id, body, body_bytes, accepted_runtime_mode,
                    accepted_interaction_mode, accepted_environment_revision, accepted_project_revision,
@@ -1712,7 +1877,7 @@ const make = Effect.gen(function* () {
             LIMIT ${scanLimit}
           `
         : yield* sql<MessageRow>`
-            SELECT message_id, project_id, sender_thread_id, sender_name_at_send,
+            SELECT message_id, project_id, content_kind, sender_thread_id, sender_name_at_send,
                    sender_citizen_epoch, sender_run_id, recipient_thread_id, recipient_delivery_epoch,
                    reply_to_message_id, body, body_bytes, accepted_runtime_mode,
                    accepted_interaction_mode, accepted_environment_revision, accepted_project_revision,
@@ -1726,7 +1891,7 @@ const make = Effect.gen(function* () {
             ORDER BY message_id ASC
             LIMIT ${scanLimit}
           `;
-    return rows
+    const selected = rows
       .filter(
         (row) =>
           exceededDispatchModeLimit(
@@ -1740,8 +1905,12 @@ const make = Effect.gen(function* () {
             },
           ) === undefined,
       )
-      .slice(0, input.limit)
-      .map((row) => ({ message: messageBody(row) }) satisfies CivilizationMailContextCandidate);
+      .slice(0, input.limit);
+    return yield* Effect.forEach(selected, (row) =>
+      messageBody(row).pipe(
+        Effect.map((message) => ({ message }) satisfies CivilizationMailContextCandidate),
+      ),
+    );
   });
 
   const contextOfferEligibility = Effect.fn("CivilizationMail.contextOfferEligibility")(
@@ -1764,7 +1933,7 @@ const make = Effect.gen(function* () {
         messageIds.length === 0
           ? []
           : yield* sql<MessageRow>`
-              SELECT message_id, project_id, sender_thread_id, sender_name_at_send,
+              SELECT message_id, project_id, content_kind, sender_thread_id, sender_name_at_send,
                      sender_citizen_epoch, sender_run_id, recipient_thread_id, recipient_delivery_epoch,
                      reply_to_message_id, body, body_bytes, accepted_runtime_mode,
                      accepted_interaction_mode, accepted_environment_revision, accepted_project_revision,
@@ -1811,10 +1980,11 @@ const make = Effect.gen(function* () {
           SELECT mail_revision FROM civilization_project_state
           WHERE project_id = ${input.caller.projectId} LIMIT 1
         `)[0]?.mail_revision ?? 0;
+      const messages = yield* Effect.forEach(eligible.eligible, messageBody);
       return {
         revision,
         offeredAt: eligible.offeredAt,
-        messages: eligible.eligible.map(messageBody),
+        messages,
       } as const;
     },
   );
@@ -1835,10 +2005,11 @@ const make = Effect.gen(function* () {
         SELECT mail_revision FROM civilization_project_state
         WHERE project_id = ${input.caller.projectId} LIMIT 1
       `)[0]?.mail_revision ?? 0;
+    const messages = yield* Effect.forEach(eligible.eligible, messageBody);
     return {
       revision,
       offeredAt: eligible.offeredAt,
-      messages: eligible.eligible.map(messageBody),
+      messages,
     } as const;
   });
 
@@ -1863,7 +2034,7 @@ const make = Effect.gen(function* () {
                     AND recipient_thread_id = ${input.caller.threadId}
                     AND recipient_delivery_epoch = ${input.caller.deliveryEpoch}
                     AND terminal_at IS NULL AND acknowledged_at IS NULL AND expires_at > ${eligible.offeredAt}
-                  RETURNING message_id, project_id, sender_thread_id, sender_name_at_send,
+                  RETURNING message_id, project_id, content_kind, sender_thread_id, sender_name_at_send,
                             sender_citizen_epoch, sender_run_id, recipient_thread_id, recipient_delivery_epoch,
                             reply_to_message_id, body, body_bytes, accepted_runtime_mode,
                             accepted_interaction_mode, accepted_environment_revision, accepted_project_revision,
@@ -1880,10 +2051,11 @@ const make = Effect.gen(function* () {
             SELECT mail_revision FROM civilization_project_state
             WHERE project_id = ${input.caller.projectId} LIMIT 1
           `)[0]?.mail_revision ?? 0;
+          const messages = yield* Effect.forEach(offered, messageBody);
           return {
             revision,
             offeredAt: eligible.offeredAt,
-            messages: offered.map(messageBody),
+            messages,
           } as const;
         }),
       );
@@ -1901,7 +2073,8 @@ const make = Effect.gen(function* () {
         messageId: input.messageId,
       });
     }
-    return { projectId: input.projectId, ...messageBody(row) } as const;
+    const message = yield* messageBody(row);
+    return { projectId: input.projectId, ...message } as const;
   });
 
   const listAdminMail = Effect.fn("CivilizationMail.listAdminMail")(function* (input: {
@@ -1935,7 +2108,7 @@ const make = Effect.gen(function* () {
       }),
     );
     const rows = yield* sql<MessageRow>`
-      SELECT message_id, project_id, sender_thread_id, sender_name_at_send,
+      SELECT message_id, project_id, content_kind, sender_thread_id, sender_name_at_send,
              sender_citizen_epoch, sender_run_id, recipient_thread_id, recipient_delivery_epoch,
              reply_to_message_id, body, body_bytes, accepted_runtime_mode,
              accepted_interaction_mode, accepted_environment_revision, accepted_project_revision,
@@ -2123,6 +2296,10 @@ const make = Effect.gen(function* () {
               clauses.push("recipient_thread_id = ?");
               params.push(normalized.recipientThreadId);
             }
+            if (normalized.contentKind !== undefined) {
+              clauses.push("content_kind = ?");
+              params.push(normalized.contentKind);
+            }
             if (normalized.replyRelation === "root") {
               clauses.push("reply_to_message_id IS NULL");
             } else if (normalized.replyRelation === "replies_to") {
@@ -2155,7 +2332,7 @@ const make = Effect.gen(function* () {
             }
             params.push(queryLimit);
             return yield* sql.unsafe<MessageSummaryRow>(
-              `SELECT message_id, project_id, sender_thread_id, sender_name_at_send,
+              `SELECT message_id, project_id, content_kind, sender_thread_id, sender_name_at_send,
                       sender_citizen_epoch, sender_run_id, recipient_thread_id,
                       recipient_delivery_epoch, reply_to_message_id, body_bytes,
                       accepted_runtime_mode, accepted_interaction_mode,
@@ -2285,7 +2462,7 @@ const make = Effect.gen(function* () {
             WHERE project_id = ${input.projectId} LIMIT 1
           `)[0] ?? { mail_history_revision: 0 };
           const selected = (yield* sql<MessageSummaryRow>`
-            SELECT message_id, project_id, sender_thread_id, sender_name_at_send,
+            SELECT message_id, project_id, content_kind, sender_thread_id, sender_name_at_send,
                    sender_citizen_epoch, sender_run_id, recipient_thread_id,
                    recipient_delivery_epoch, reply_to_message_id, body_bytes,
                    accepted_runtime_mode, accepted_interaction_mode,
@@ -2310,7 +2487,7 @@ const make = Effect.gen(function* () {
           };
           const ancestors = yield* sql.unsafe<TraversalRow>(
             `WITH RECURSIVE ancestors AS (
-               SELECT message_id, project_id, sender_thread_id, sender_name_at_send,
+               SELECT message_id, project_id, content_kind, sender_thread_id, sender_name_at_send,
                       sender_citizen_epoch, sender_run_id, recipient_thread_id,
                       recipient_delivery_epoch, reply_to_message_id, body_bytes,
                       accepted_runtime_mode, accepted_interaction_mode,
@@ -2321,7 +2498,7 @@ const make = Effect.gen(function* () {
                FROM civilization_messages
                WHERE project_id = ? AND message_id = ?
                UNION ALL
-               SELECT p.message_id, p.project_id, p.sender_thread_id, p.sender_name_at_send,
+               SELECT p.message_id, p.project_id, p.content_kind, p.sender_thread_id, p.sender_name_at_send,
                       p.sender_citizen_epoch, p.sender_run_id, p.recipient_thread_id,
                       p.recipient_delivery_epoch, p.reply_to_message_id, p.body_bytes,
                       p.accepted_runtime_mode, p.accepted_interaction_mode,
@@ -2373,7 +2550,7 @@ const make = Effect.gen(function* () {
 
           const descendants = yield* sql.unsafe<TraversalRow & { readonly sort_path: string }>(
             `WITH RECURSIVE descendants AS (
-               SELECT m.message_id, m.project_id, m.sender_thread_id, m.sender_name_at_send,
+               SELECT m.message_id, m.project_id, m.content_kind, m.sender_thread_id, m.sender_name_at_send,
                       m.sender_citizen_epoch, m.sender_run_id, m.recipient_thread_id,
                       m.recipient_delivery_epoch, m.reply_to_message_id, m.body_bytes,
                       m.accepted_runtime_mode, m.accepted_interaction_mode,
@@ -2386,7 +2563,7 @@ const make = Effect.gen(function* () {
                FROM civilization_messages m
                WHERE m.project_id = ? AND m.reply_to_message_id = ?
                UNION ALL
-               SELECT m.message_id, m.project_id, m.sender_thread_id, m.sender_name_at_send,
+               SELECT m.message_id, m.project_id, m.content_kind, m.sender_thread_id, m.sender_name_at_send,
                       m.sender_citizen_epoch, m.sender_run_id, m.recipient_thread_id,
                       m.recipient_delivery_epoch, m.reply_to_message_id, m.body_bytes,
                       m.accepted_runtime_mode, m.accepted_interaction_mode,
@@ -2535,6 +2712,7 @@ const make = Effect.gen(function* () {
     authoritativeCaller,
     authoritativeCallerAgainstEffective,
     send,
+    sendHandoff,
     listInbox,
     receive,
     acknowledge,
@@ -2558,6 +2736,7 @@ const unavailableService = {
   authoritativeCaller: () => unavailable(),
   authoritativeCallerAgainstEffective: () => unavailable(),
   send: () => unavailable(),
+  sendHandoff: () => unavailable(),
   listInbox: () => unavailable(),
   receive: () => unavailable(),
   acknowledge: () => unavailable(),

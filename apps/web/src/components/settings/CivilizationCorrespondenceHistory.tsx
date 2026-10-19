@@ -5,6 +5,7 @@ import {
   type CivilizationCorrespondenceCursor,
   type CivilizationCorrespondenceReplyRelation,
   type CivilizationCitizenSummary,
+  type CivilizationMailContentKind,
   type CivilizationMailSummary,
   type CivilizationMessageId,
   type EnvironmentId,
@@ -51,6 +52,7 @@ interface CivilizationCorrespondenceHistoryProps {
 }
 
 type BooleanFilter = "any" | "yes" | "no";
+type ContentKindFilter = "any" | CivilizationMailContentKind;
 const EMPTY_CITIZEN_OPTIONS: ReadonlyArray<CivilizationCitizenSummary> = [];
 
 const formatDate = (value: string | null): string =>
@@ -58,6 +60,44 @@ const formatDate = (value: string | null): string =>
 
 const triState = (value: BooleanFilter): boolean | undefined =>
   value === "any" ? undefined : value === "yes";
+
+const contentKindLabel = (contentKind: CivilizationMailContentKind): string =>
+  contentKind === "handoff_v1" ? "Structured handoff" : "Text message";
+
+const withOccurrenceKeys = <T,>(values: readonly T[], keyOf: (value: T) => string) => {
+  const occurrences = new Map<string, number>();
+  return values.map((value) => {
+    const base = keyOf(value);
+    const occurrence = (occurrences.get(base) ?? 0) + 1;
+    occurrences.set(base, occurrence);
+    return { key: `${base}:${occurrence}`, value } as const;
+  });
+};
+
+function HandoffList({
+  label,
+  values,
+}: {
+  readonly label: string;
+  readonly values: readonly string[];
+}) {
+  return (
+    <section className="space-y-1">
+      <h4 className="font-medium text-sm">{label}</h4>
+      {values.length === 0 ? (
+        <div className="text-sm text-muted-foreground">None</div>
+      ) : (
+        <ul className="list-disc space-y-1 pl-5 text-sm">
+          {withOccurrenceKeys(values, (value) => value).map(({ key, value }) => (
+            <li key={key} className="whitespace-pre-wrap wrap-anywhere">
+              {value}
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
+  );
+}
 
 function MessageFacts({
   message,
@@ -99,7 +139,8 @@ function MessageFacts({
         )}
       </div>
       <div>
-        {formatDate(message.acceptedAt)} · {message.bodyBytes} bytes
+        {contentKindLabel(message.contentKind)} · {formatDate(message.acceptedAt)} ·{" "}
+        {message.bodyBytes} bytes
       </div>
       <div>
         Delivery epoch {message.recipientDeliveryEpoch} · Offered {message.offerCount}× ·{" "}
@@ -134,6 +175,7 @@ export function CivilizationCorrespondenceHistory({
   const [counterpartyDraft, setCounterpartyDraft] = useState("");
   const [senderDraft, setSenderDraft] = useState("");
   const [recipientDraft, setRecipientDraft] = useState("");
+  const [contentKind, setContentKind] = useState<ContentKindFilter>("any");
   const [replyRelation, setReplyRelation] =
     useState<CivilizationCorrespondenceReplyRelation>("any");
   const [replyToDraft, setReplyToDraft] = useState("");
@@ -218,6 +260,7 @@ export function CivilizationCorrespondenceHistory({
       ...(counterparty === "" ? {} : { counterpartyThreadId: ThreadId.make(counterparty) }),
       ...(sender === "" ? {} : { senderThreadId: ThreadId.make(sender) }),
       ...(recipient === "" ? {} : { recipientThreadId: ThreadId.make(recipient) }),
+      ...(contentKind === "any" ? {} : { contentKind }),
       replyRelation,
       ...(replyRelation === "replies_to"
         ? { replyToMessageId: replyTo as CivilizationMessageId }
@@ -382,6 +425,22 @@ export function CivilizationCorrespondenceHistory({
                   value={recipientDraft}
                   onChange={(event) => setRecipientDraft(event.currentTarget.value)}
                 />
+              </label>
+              <label className="space-y-1 text-xs text-muted-foreground">
+                <span>Content type</span>
+                <Select
+                  value={contentKind}
+                  onValueChange={(value) => setContentKind(value as ContentKindFilter)}
+                >
+                  <SelectTrigger aria-label="Correspondence content type">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="any">Any content type</SelectItem>
+                    <SelectItem value="text">Text messages</SelectItem>
+                    <SelectItem value="handoff_v1">Structured handoffs</SelectItem>
+                  </SelectContent>
+                </Select>
               </label>
               <label className="space-y-1 text-xs text-muted-foreground">
                 <span>Reply relationship</span>
@@ -662,16 +721,58 @@ export function CivilizationCorrespondenceHistory({
       >
         <DialogPopup>
           <DialogHeader>
-            <DialogTitle>Retained mail body</DialogTitle>
+            <DialogTitle>
+              {body?.contentKind === "handoff_v1" ? "Structured handoff" : "Retained mail body"}
+            </DialogTitle>
             <DialogDescription>
               Sensitive administrative inspection only. Body text is not added to filters, URLs,
               search, or notifications.
             </DialogDescription>
           </DialogHeader>
           <DialogPanel>
-            <pre className="max-h-96 overflow-auto whitespace-pre-wrap wrap-anywhere text-sm">
-              {body?.body}
-            </pre>
+            {body?.contentKind === "handoff_v1" ? (
+              <div className="max-h-96 space-y-4 overflow-auto">
+                <div className="text-xs text-muted-foreground">Handoff v{body.handoff.version}</div>
+                <section className="space-y-1">
+                  <h4 className="font-medium text-sm">Summary</h4>
+                  <div className="whitespace-pre-wrap wrap-anywhere text-sm">
+                    {body.handoff.summary}
+                  </div>
+                </section>
+                <HandoffList label="Completed" values={body.handoff.completed} />
+                <HandoffList label="Decisions" values={body.handoff.decisions} />
+                <HandoffList label="Next actions" values={body.handoff.nextActions} />
+                <HandoffList
+                  label="Blockers or questions"
+                  values={body.handoff.blockersOrQuestions}
+                />
+                <section className="space-y-1">
+                  <h4 className="font-medium text-sm">References</h4>
+                  {body.handoff.references.length === 0 ? (
+                    <div className="text-sm text-muted-foreground">None</div>
+                  ) : (
+                    <ul className="list-disc space-y-1 pl-5 text-sm">
+                      {withOccurrenceKeys(
+                        body.handoff.references,
+                        ({ kind, reference }) => `${kind}:${reference}`,
+                      ).map(({ key, value: { kind, reference } }) => (
+                        <li key={key} className="whitespace-pre-wrap wrap-anywhere">
+                          <span className="font-medium">{kind}:</span> {reference}
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </section>
+                <section className="space-y-1">
+                  <h4 className="font-medium text-sm">Rendered body</h4>
+                  <pre className="whitespace-pre-wrap wrap-anywhere text-sm">{body.body}</pre>
+                </section>
+              </div>
+            ) : (
+              <pre className="max-h-96 overflow-auto whitespace-pre-wrap wrap-anywhere text-sm">
+                {body?.body}
+              </pre>
+            )}
           </DialogPanel>
         </DialogPopup>
       </Dialog>

@@ -26,8 +26,11 @@ const v2TableCount = Effect.gen(function* () {
 });
 
 describe("runMigrations", () => {
-  it("keeps Project Brief at the post-upstream migration id", () => {
-    assert.deepStrictEqual(migrationManifest.at(-1), [79, "CivilizationProjectBrief"]);
+  it("keeps v1.5 migrations after the upstream migration ids", () => {
+    assert.deepStrictEqual(migrationManifest.slice(-2), [
+      [79, "CivilizationProjectBrief"],
+      [80, "CivilizationMailContentKind"],
+    ]);
   });
 
   it.effect("migrates a fresh database through the whole manifest", () =>
@@ -42,6 +45,20 @@ describe("runMigrations", () => {
           WHERE type = 'table' AND name = 'civilization_project_brief'
         `,
         [{ name: "civilization_project_brief" }],
+      );
+      const messageColumns = yield* sql<{ readonly name: string }>`
+        PRAGMA table_info(civilization_messages)
+      `;
+      assert.include(
+        messageColumns.map((column) => column.name),
+        "content_kind",
+      );
+      const receiptColumns = yield* sql<{ readonly name: string }>`
+        PRAGMA table_info(civilization_mail_operation_receipts)
+      `;
+      assert.include(
+        receiptColumns.map((column) => column.name),
+        "content_kind",
       );
       for (const table of ["civilization_context_references", "civilization_context_inspections"]) {
         const columns = yield* sql.unsafe<{ readonly name: string }>(`PRAGMA table_info(${table})`);

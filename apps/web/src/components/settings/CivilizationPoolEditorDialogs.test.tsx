@@ -227,10 +227,167 @@ describe("Civilization pool editor validation", () => {
       environmentId,
       projectId,
       expectedRevision: 4,
+      expectedEnvironmentRevision: 7,
       type: "set",
     });
     expect(onOpenChange).toHaveBeenCalledWith(false);
     expect(refresh).toHaveBeenCalledTimes(1);
+  });
+
+  it("omits the environment CAS revision for environment-tier pool saves", async () => {
+    const environmentId = EnvironmentId.make("environment-tier-pools");
+    const runConfigAction = vi
+      .fn()
+      .mockResolvedValueOnce({ valid: true, effective: EFFECTIVE })
+      .mockResolvedValueOnce({ changes: [{ path: "names.pools" }], effective: EFFECTIVE })
+      .mockResolvedValueOnce({ revision: 8, effective: { ...EFFECTIVE, environmentRevision: 8 } });
+
+    await act(() => {
+      renderer = create(
+        <CivilizationNamePoolEditorDialog
+          open
+          onOpenChange={vi.fn()}
+          environmentId={environmentId}
+          projectId={null}
+          targetLabel="Environment pools"
+          effective={EFFECTIVE}
+          runConfigAction={runConfigAction}
+          refresh={vi.fn()}
+        />,
+      );
+    });
+    const preview = renderer!.root
+      .findAllByType("button")
+      .find((button) => button.props.children === "Validate & preview");
+    await act(async () => {
+      preview!.props.onClick();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    const save = renderer!.root
+      .findAllByType("button")
+      .find((button) => button.props.children === "Save pools");
+    await act(async () => {
+      save!.props.onClick();
+      await Promise.resolve();
+    });
+
+    const setInput = runConfigAction.mock.calls[2]?.[0];
+    expect(setInput).toMatchObject({
+      environmentId,
+      projectId: null,
+      expectedRevision: 7,
+      type: "set",
+    });
+    expect(setInput).not.toHaveProperty("expectedEnvironmentRevision");
+  });
+
+  it("re-reviews after an environment-only project conflict and captures the refreshed environment revision", async () => {
+    const environmentId = EnvironmentId.make("environment-pools-env-conflict");
+    const projectId = ProjectId.make("project-pools-env-conflict");
+    const refreshedEffective = { ...EFFECTIVE, environmentRevision: 8 };
+    const onOpenChange = vi.fn();
+    const refresh = vi.fn();
+    const runConfigAction = vi
+      .fn()
+      .mockResolvedValueOnce({ valid: true, effective: EFFECTIVE })
+      .mockResolvedValueOnce({ changes: [{ path: "names.pools" }], effective: EFFECTIVE })
+      .mockRejectedValueOnce({
+        _tag: "CivilizationConfigConflictError",
+        code: "civilization_conflict",
+        scope: "environment",
+        expectedRevision: 7,
+        currentRevision: 8,
+      })
+      .mockResolvedValueOnce({ valid: true, effective: refreshedEffective })
+      .mockResolvedValueOnce({
+        changes: [{ path: "names.pools" }],
+        effective: refreshedEffective,
+      })
+      .mockResolvedValueOnce({
+        revision: 5,
+        effective: { ...refreshedEffective, projectRevision: 5 },
+      });
+
+    await act(() => {
+      renderer = create(
+        <CivilizationNamePoolEditorDialog
+          open
+          onOpenChange={onOpenChange}
+          environmentId={environmentId}
+          projectId={projectId}
+          targetLabel="Pool machine"
+          effective={EFFECTIVE}
+          runConfigAction={runConfigAction}
+          refresh={refresh}
+        />,
+      );
+    });
+    let preview = renderer!.root
+      .findAllByType("button")
+      .find((button) => button.props.children === "Validate & preview");
+    await act(async () => {
+      preview!.props.onClick();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    let save = renderer!.root
+      .findAllByType("button")
+      .find((button) => button.props.children === "Save pools");
+    await act(async () => {
+      save!.props.onClick();
+      await Promise.resolve();
+    });
+
+    expect(runConfigAction.mock.calls[2]?.[0]).toMatchObject({
+      type: "set",
+      expectedRevision: 4,
+      expectedEnvironmentRevision: 7,
+    });
+    expect(refresh).toHaveBeenCalledTimes(1);
+    expect(
+      renderer!.root
+        .findAllByType("button")
+        .find((button) => button.props.children === "Refreshing…")?.props.disabled,
+    ).toBe(true);
+
+    await act(() => {
+      renderer!.update(
+        <CivilizationNamePoolEditorDialog
+          open
+          onOpenChange={onOpenChange}
+          environmentId={environmentId}
+          projectId={projectId}
+          targetLabel="Pool machine"
+          effective={refreshedEffective}
+          runConfigAction={runConfigAction}
+          refresh={refresh}
+        />,
+      );
+    });
+    preview = renderer!.root
+      .findAllByType("button")
+      .find((button) => button.props.children === "Validate & preview");
+    expect(preview?.props.disabled).toBe(false);
+    await act(async () => {
+      preview!.props.onClick();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    save = renderer!.root
+      .findAllByType("button")
+      .find((button) => button.props.children === "Save pools");
+    await act(async () => {
+      save!.props.onClick();
+      await Promise.resolve();
+    });
+
+    expect(runConfigAction.mock.calls[5]?.[0]).toMatchObject({
+      type: "set",
+      expectedRevision: 4,
+      expectedEnvironmentRevision: 8,
+    });
+    expect(onOpenChange).toHaveBeenCalledWith(false);
   });
 
   it("keeps one stable profile entry paired with complete mild and rich variants", async () => {
@@ -239,7 +396,8 @@ describe("Civilization pool editor validation", () => {
     const runConfigAction = vi
       .fn()
       .mockResolvedValueOnce({ valid: true, effective: EFFECTIVE })
-      .mockResolvedValueOnce({ changes: [{ path: "personalities.pools" }], effective: EFFECTIVE });
+      .mockResolvedValueOnce({ changes: [{ path: "personalities.pools" }], effective: EFFECTIVE })
+      .mockResolvedValueOnce({ revision: 5, effective: { ...EFFECTIVE, projectRevision: 5 } });
 
     await act(() => {
       renderer = create(
@@ -286,6 +444,19 @@ describe("Civilization pool editor validation", () => {
       axiom: "Rich edited axiom.",
     });
     expect(firstEntry.rich.traits).toEqual(["deliberate", "composed", "structural"]);
+
+    const save = renderer!.root
+      .findAllByType("button")
+      .find((button) => button.props.children === "Save pools");
+    await act(async () => {
+      save!.props.onClick();
+      await Promise.resolve();
+    });
+    expect(runConfigAction.mock.calls[2]?.[0]).toMatchObject({
+      type: "set",
+      expectedRevision: 4,
+      expectedEnvironmentRevision: 7,
+    });
   });
 
   it("creates a new profile with a complete rich variant before validation", async () => {

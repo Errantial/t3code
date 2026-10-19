@@ -32,6 +32,7 @@ const mutations = [
   "civilization_note_update",
   "civilization_note_resolve",
   "civilization_mail_send",
+  "civilization_handoff_send",
   "civilization_mail_receive",
   "civilization_mail_acknowledge",
 ] as const;
@@ -89,6 +90,7 @@ describe("Civilization MCP toolkit", () => {
   it("requires idempotency ids for every Civilization mail mutation", () => {
     for (const name of [
       "civilization_mail_send",
+      "civilization_handoff_send",
       "civilization_mail_receive",
       "civilization_mail_acknowledge",
     ] as const) {
@@ -97,6 +99,8 @@ describe("Civilization MCP toolkit", () => {
       expect(schema.required, name).toContain("clientRequestId");
     }
     expect(jsonSchema("civilization_mail_send").required).toContain("targetThreadId");
+    expect(jsonSchema("civilization_handoff_send").required).toContain("targetThreadId");
+    expect(jsonSchema("civilization_handoff_send").required).toContain("handoff");
     expect(jsonSchema("civilization_mail_receive").required).toContain("messageId");
     expect(jsonSchema("civilization_mail_acknowledge").required).toContain("messageId");
   });

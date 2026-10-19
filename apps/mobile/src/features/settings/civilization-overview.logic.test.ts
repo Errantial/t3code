@@ -2,7 +2,9 @@ import { EnvironmentId, ProjectId } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
+  mobileCivilizationAttentionMessage,
   mobileCivilizationPermissionMessage,
+  resolveMobileCivilizationAttentionTarget,
   resolveMobileCivilizationTargets,
 } from "./civilization-overview.logic";
 
@@ -53,6 +55,37 @@ describe("resolveMobileCivilizationTargets", () => {
   });
 });
 
+describe("resolveMobileCivilizationAttentionTarget", () => {
+  const environmentId = EnvironmentId.make("environment-a");
+  const secondEnvironmentId = EnvironmentId.make("environment-b");
+  const projectId = ProjectId.make("project-a");
+
+  it("returns only one exact project checkout and never broadens other selections", () => {
+    const exact = { environmentId, label: "A", projectId } as const;
+    expect(resolveMobileCivilizationAttentionTarget([exact])).toEqual(exact);
+    expect(resolveMobileCivilizationAttentionTarget([])).toBeNull();
+    expect(
+      resolveMobileCivilizationAttentionTarget([
+        { environmentId, label: "A", projectId: null },
+        { environmentId: secondEnvironmentId, label: "B", projectId: null },
+      ]),
+    ).toBeNull();
+    expect(
+      resolveMobileCivilizationAttentionTarget([{ environmentId, label: "A", projectId: null }]),
+    ).toBeNull();
+    expect(
+      resolveMobileCivilizationAttentionTarget([
+        exact,
+        {
+          environmentId: secondEnvironmentId,
+          label: "B",
+          projectId: ProjectId.make("project-b"),
+        },
+      ]),
+    ).toBeNull();
+  });
+});
+
 describe("mobileCivilizationPermissionMessage", () => {
   it("distinguishes permission checking, lookup failure, denial, and access", () => {
     expect(
@@ -83,5 +116,55 @@ describe("mobileCivilizationPermissionMessage", () => {
         sessionFailed: false,
       }),
     ).toBeNull();
+  });
+});
+
+describe("mobileCivilizationAttentionMessage", () => {
+  it("keeps permission and request failures visible instead of presenting stale empty state", () => {
+    expect(
+      mobileCivilizationAttentionMessage({
+        permissionMessage: "Unavailable · orchestration:read required",
+        isPending: false,
+        error: null,
+        hasData: true,
+        itemCount: 0,
+      }),
+    ).toBe("Unavailable · orchestration:read required");
+    expect(
+      mobileCivilizationAttentionMessage({
+        permissionMessage: null,
+        isPending: true,
+        error: null,
+        hasData: true,
+        itemCount: 0,
+      }),
+    ).toBe("Checking attention…");
+    expect(
+      mobileCivilizationAttentionMessage({
+        permissionMessage: null,
+        isPending: false,
+        error: "The environment request failed.",
+        hasData: true,
+        itemCount: 0,
+      }),
+    ).toBe("Unavailable · The environment request failed.");
+    expect(
+      mobileCivilizationAttentionMessage({
+        permissionMessage: null,
+        isPending: false,
+        error: null,
+        hasData: false,
+        itemCount: 0,
+      }),
+    ).toBe("Unavailable · This environment did not return attention data.");
+    expect(
+      mobileCivilizationAttentionMessage({
+        permissionMessage: null,
+        isPending: false,
+        error: null,
+        hasData: true,
+        itemCount: 0,
+      }),
+    ).toBe("Nothing needs attention.");
   });
 });

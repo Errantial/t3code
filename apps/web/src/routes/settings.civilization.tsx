@@ -15,11 +15,18 @@ import {
   CIVILIZATION_CONTEXT_MODES,
   CIVILIZATION_CONTEXT_OUTCOMES,
   CIVILIZATION_CONTEXT_SUPPRESSION_REASONS,
+  CIVILIZATION_ONBOARDING_ADOPTIONS,
+  CIVILIZATION_ONBOARDING_PRESETS,
+  CIVILIZATION_ONBOARDING_STAGES,
+  CIVILIZATION_ONBOARDING_TITLE_POLICIES,
   CIVILIZATION_SETTINGS_VIEWS,
   type CivilizationActivityMode,
   type CivilizationContextMode,
   type CivilizationHistoricalContextSearch,
   type CivilizationNavigationSearch,
+  type CivilizationOnboardingAdoption,
+  type CivilizationOnboardingStage,
+  type CivilizationOnboardingTitlePolicy,
   type CivilizationSettingsView,
   mergeCivilizationNavigationSearch,
 } from "../components/settings/civilizationNavigation";
@@ -116,6 +123,28 @@ export function validateCivilizationSettingsSearch(
     view === "context" && contextMode === "inspector"
       ? stringValue(raw.contextFilterTo)
       : undefined;
+  const onboarding =
+    view === "configuration"
+      ? enumValue<CivilizationOnboardingStage>(raw.onboarding, CIVILIZATION_ONBOARDING_STAGES)
+      : undefined;
+  const onboardingPreset =
+    onboarding === undefined
+      ? undefined
+      : enumValue(raw.onboardingPreset, CIVILIZATION_ONBOARDING_PRESETS);
+  const onboardingAdoption =
+    onboarding === undefined
+      ? undefined
+      : enumValue<CivilizationOnboardingAdoption>(
+          raw.onboardingAdoption,
+          CIVILIZATION_ONBOARDING_ADOPTIONS,
+        );
+  const onboardingTitlePolicy =
+    onboarding === undefined
+      ? undefined
+      : enumValue<CivilizationOnboardingTitlePolicy>(
+          raw.onboardingTitlePolicy,
+          CIVILIZATION_ONBOARDING_TITLE_POLICIES,
+        );
   const historicalContext = parseCivilizationHistoricalContextSearch(raw);
   return {
     ...(view === undefined ? {} : { view }),
@@ -138,6 +167,10 @@ export function validateCivilizationSettingsSearch(
     ...(contextFilterSuppression === undefined ? {} : { contextFilterSuppression }),
     ...(contextFilterFrom === undefined ? {} : { contextFilterFrom }),
     ...(contextFilterTo === undefined ? {} : { contextFilterTo }),
+    ...(onboarding === undefined ? {} : { onboarding }),
+    ...(onboardingPreset === undefined ? {} : { onboardingPreset }),
+    ...(onboardingAdoption === undefined ? {} : { onboardingAdoption }),
+    ...(onboardingTitlePolicy === undefined ? {} : { onboardingTitlePolicy }),
     ...historicalContext,
   };
 }

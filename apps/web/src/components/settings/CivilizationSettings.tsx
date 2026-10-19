@@ -2,6 +2,7 @@ import {
   AuthOrchestrationReadScope,
   AuthSettingsWriteScope,
   CIVILIZATION_CONFIG_VERSION,
+  type CivilizationAttentionItem,
   type CivilizationConfigOverride,
   type CivilizationEffectiveConfig,
   type CivilizationProviderCapability,
@@ -21,6 +22,7 @@ import {
   prepareCivilizationImportPreview,
   refreshCivilizationOverview,
   type CivilizationConfigActionInput,
+  useCivilizationAttention,
   useCivilizationConfigTargets,
   useCivilizationOverview,
 } from "../../state/civilization";
@@ -57,8 +59,13 @@ import {
 } from "./CivilizationPoolEditorDialogs";
 import { CivilizationContextAnalytics } from "./CivilizationContextAnalytics";
 import { CivilizationContextInspector } from "./CivilizationContextInspector";
+import { CivilizationOnboardingDialog } from "./CivilizationOnboardingDialog";
 import { CivilizationProjectBrief } from "./CivilizationProjectBrief";
 import { CivilizationProjectInspection } from "./CivilizationProjectInspection";
+import {
+  CIVILIZATION_ONBOARDING_TARGET_ID,
+  civilizationOnboardingSafeSearch,
+} from "./civilizationOnboarding.logic";
 import {
   SettingsPageContainer,
   SettingsRow,
@@ -234,12 +241,23 @@ function useCivilizationSectionEditor<T>(input: {
       ? null
       : civilizationConfigExpectedRevision(input.effective, input.target.projectId),
   );
+  const [capturedEnvironmentRevisionState, setCapturedEnvironmentRevisionState] = useState<
+    number | null
+  >(() =>
+    input.effective === null || input.target.projectId === null
+      ? null
+      : input.effective.environmentRevision,
+  );
   const [awaitingRevision, setAwaitingRevision] = useState<number | null>(null);
   const serverDraft = input.effective === null ? null : input.select(input.effective);
   const currentRevision =
     input.effective === null
       ? null
       : civilizationConfigExpectedRevision(input.effective, input.target.projectId);
+  const currentEnvironmentRevision =
+    input.effective === null || input.target.projectId === null
+      ? null
+      : input.effective.environmentRevision;
   const waitingForCommittedRefresh =
     awaitingRevision !== null && currentRevision !== null && currentRevision < awaitingRevision;
   const settledServerDraft = waitingForCommittedRefresh ? draftState : serverDraft;
@@ -252,17 +270,29 @@ function useCivilizationSectionEditor<T>(input: {
     currentRevision !== capturedRevisionState
       ? currentRevision
       : null;
+  const refreshedConflictEnvironmentRevision =
+    conflictReviewRequired &&
+    currentEnvironmentRevision !== null &&
+    capturedEnvironmentRevisionState !== null &&
+    currentEnvironmentRevision !== capturedEnvironmentRevisionState
+      ? currentEnvironmentRevision
+      : null;
   const capturedRevision = dirty
     ? (refreshedConflictRevision ?? capturedRevisionState)
     : waitingForCommittedRefresh
       ? awaitingRevision
       : currentRevision;
+  const capturedEnvironmentRevision =
+    input.target.projectId === null
+      ? null
+      : dirty
+        ? (refreshedConflictEnvironmentRevision ?? capturedEnvironmentRevisionState)
+        : currentEnvironmentRevision;
 
   const conflictRefreshPending =
     conflictReviewRequired &&
-    currentRevision !== null &&
-    capturedRevisionState !== null &&
-    capturedRevisionState === currentRevision;
+    refreshedConflictRevision === null &&
+    refreshedConflictEnvironmentRevision === null;
 
   const update = (updater: (current: T) => T) => {
     const current = draft ?? (input.effective === null ? null : input.select(input.effective));
@@ -270,6 +300,7 @@ function useCivilizationSectionEditor<T>(input: {
     if (!dirty) {
       setBaselineState(current);
       setCapturedRevisionState(capturedRevision);
+      setCapturedEnvironmentRevisionState(capturedEnvironmentRevision);
     }
     setDraftState(updater(current));
     setDirty(true);
@@ -312,6 +343,9 @@ function useCivilizationSectionEditor<T>(input: {
           projectId: input.target.projectId,
           type: "set",
           expectedRevision: capturedRevision,
+          ...(input.target.projectId === null || capturedEnvironmentRevision === null
+            ? {}
+            : { expectedEnvironmentRevision: capturedEnvironmentRevision }),
           override,
         });
         const nextRevision = civilizationConfigExpectedRevision(
@@ -323,6 +357,9 @@ function useCivilizationSectionEditor<T>(input: {
         setDraftState(committedDraft);
         setBaselineState(committedDraft);
         setCapturedRevisionState(nextRevision);
+        setCapturedEnvironmentRevisionState(
+          input.target.projectId === null ? null : committed.effective.environmentRevision,
+        );
         setAwaitingRevision(nextRevision);
         setDirty(false);
         setConflictReviewRequired(false);
@@ -421,6 +458,11 @@ type MultiParticipationDraft = {
   readonly adoption: ParticipationDraft["adoption"] | null;
 };
 
+type CapturedConfigBinding = {
+  readonly expectedRevision: number;
+  readonly expectedEnvironmentRevision?: number | undefined;
+};
+
 const civilizationTargetKey = (target: {
   readonly environmentId: EnvironmentId;
   readonly projectId: ProjectId | null;
@@ -445,7 +487,9 @@ function CivilizationMultiTargetParticipation({
     adoption: null,
   });
   const [dirty, setDirty] = useState(false);
-  const [capturedRevisions, setCapturedRevisions] = useState<Record<string, number>>({});
+  const [capturedRevisions, setCapturedRevisions] = useState<Record<string, CapturedConfigBinding>>(
+    {},
+  );
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [reviewRequired, setReviewRequired] = useState(false);
@@ -466,21 +510,30 @@ function CivilizationMultiTargetParticipation({
   })();
   const draft = dirty ? draftState : resolvedDraft;
   const currentRevisions = (() => {
-    const next: Record<string, number> = {};
+    const next: Record<string, CapturedConfigBinding> = {};
     for (const entry of overview.data ?? []) {
-      next[civilizationTargetKey(entry)] = civilizationConfigExpectedRevision(
-        entry.overview.effective,
-        entry.projectId,
-      );
+      next[civilizationTargetKey(entry)] = {
+        expectedRevision: civilizationConfigExpectedRevision(
+          entry.overview.effective,
+          entry.projectId,
+        ),
+        ...(entry.projectId === null
+          ? {}
+          : { expectedEnvironmentRevision: entry.overview.effective.environmentRevision }),
+      };
     }
     return next;
   })();
   const conflictRefreshComplete =
     reviewRequired &&
-    Object.entries(capturedRevisions).some(
-      ([key, revision]) =>
-        currentRevisions[key] !== undefined && currentRevisions[key] !== revision,
-    );
+    Object.entries(capturedRevisions).some(([key, revision]) => {
+      const current = currentRevisions[key];
+      return (
+        current !== undefined &&
+        (current.expectedRevision !== revision.expectedRevision ||
+          current.expectedEnvironmentRevision !== revision.expectedEnvironmentRevision)
+      );
+    });
   const conflictRefreshPending = reviewRequired && !conflictRefreshComplete;
   const effectiveCapturedRevisions = conflictRefreshComplete ? currentRevisions : capturedRevisions;
 
@@ -496,12 +549,17 @@ function CivilizationMultiTargetParticipation({
 
   const captureCurrentRevisions = () => {
     if (overview.data === null) return;
-    const next: Record<string, number> = {};
+    const next: Record<string, CapturedConfigBinding> = {};
     for (const entry of overview.data) {
-      next[civilizationTargetKey(entry)] = civilizationConfigExpectedRevision(
-        entry.overview.effective,
-        entry.projectId,
-      );
+      next[civilizationTargetKey(entry)] = {
+        expectedRevision: civilizationConfigExpectedRevision(
+          entry.overview.effective,
+          entry.projectId,
+        ),
+        ...(entry.projectId === null
+          ? {}
+          : { expectedEnvironmentRevision: entry.overview.effective.environmentRevision }),
+      };
     }
     setCapturedRevisions(next);
   };
@@ -527,15 +585,21 @@ function CivilizationMultiTargetParticipation({
       label: labelByKey.get(civilizationTargetKey(entry)) ?? entry.environmentId,
       value: {
         projectId: entry.projectId,
-        expectedRevision:
-          effectiveCapturedRevisions[civilizationTargetKey(entry)] ??
-          civilizationConfigExpectedRevision(entry.overview.effective, entry.projectId),
+        ...(effectiveCapturedRevisions[civilizationTargetKey(entry)] ?? {
+          expectedRevision: civilizationConfigExpectedRevision(
+            entry.overview.effective,
+            entry.projectId,
+          ),
+          ...(entry.projectId === null
+            ? {}
+            : { expectedEnvironmentRevision: entry.overview.effective.environmentRevision }),
+        }),
       },
     }));
     setSaving(true);
     setMessage(null);
     void applyCivilizationConfigFanout<
-      { readonly projectId: ProjectId | null; readonly expectedRevision: number },
+      { readonly projectId: ProjectId | null } & CapturedConfigBinding,
       unknown
     >(fanoutTargets, async (fanoutTarget) => {
       await runConfigAction({
@@ -552,6 +616,9 @@ function CivilizationMultiTargetParticipation({
         projectId: fanoutTarget.value.projectId,
         type: "set",
         expectedRevision: fanoutTarget.value.expectedRevision,
+        ...(fanoutTarget.value.expectedEnvironmentRevision === undefined
+          ? {}
+          : { expectedEnvironmentRevision: fanoutTarget.value.expectedEnvironmentRevision }),
         override,
       });
     }).then((result) => {
@@ -712,6 +779,139 @@ function CivilizationMultiTargetStatus({
   );
 }
 
+const civilizationAttentionDestination = (
+  target: CivilizationAttentionItem["target"],
+): { readonly search: CivilizationNavigationSearch; readonly targetId: string } => {
+  switch (target) {
+    case "overview":
+      return { search: { view: "overview" }, targetId: "civilization-status" };
+    case "configuration":
+      return { search: { view: "configuration" }, targetId: "civilization-config" };
+    case "context_analytics":
+      return {
+        search: { view: "context", contextMode: "analytics" },
+        targetId: "civilization-context-analytics",
+      };
+  }
+};
+
+const civilizationAttentionSeverityLabel = (
+  severity: CivilizationAttentionItem["severity"],
+): string => {
+  switch (severity) {
+    case "info":
+      return "Info";
+    case "warning":
+      return "Warning";
+    case "error":
+      return "Error";
+  }
+};
+
+function CivilizationAttentionSection({
+  environmentId,
+  projectId,
+  targetLabel,
+  canRead,
+  navigate,
+}: {
+  readonly environmentId: EnvironmentId;
+  readonly projectId: ProjectId;
+  readonly targetLabel: string;
+  readonly canRead: boolean;
+  readonly navigate: CivilizationTargetSurfaceNavigation["navigate"];
+}) {
+  const attention = useCivilizationAttention(
+    canRead ? environmentId : null,
+    canRead ? projectId : null,
+  );
+  const headerAction = canRead ? (
+    <Button
+      size="icon-xs"
+      variant="ghost-muted"
+      aria-label={`Refresh attention for ${targetLabel}`}
+      onClick={attention.refresh}
+    >
+      <RefreshCwIcon className="size-3.5" />
+    </Button>
+  ) : undefined;
+
+  if (!canRead) {
+    return (
+      <SettingsSection title="Needs attention" id="civilization-attention">
+        <SettingsRow
+          title="Attention status"
+          description="orchestration:read permission is required to check this project."
+          control={<ReadOnlyValue>Unavailable</ReadOnlyValue>}
+        />
+      </SettingsSection>
+    );
+  }
+
+  if (attention.error !== null) {
+    return (
+      <SettingsSection
+        title="Needs attention"
+        id="civilization-attention"
+        headerAction={headerAction}
+      >
+        <SettingsRow
+          title="Attention status"
+          description={attention.error}
+          control={<ReadOnlyValue>Unavailable</ReadOnlyValue>}
+        />
+      </SettingsSection>
+    );
+  }
+
+  if (!attention.isSuccess) {
+    return (
+      <SettingsSection
+        title="Needs attention"
+        id="civilization-attention"
+        headerAction={headerAction}
+      >
+        <SettingsRow
+          title="Attention status"
+          description="Checking current server-owned operational metadata for this project."
+          control={<ReadOnlyValue>Checking…</ReadOnlyValue>}
+        />
+      </SettingsSection>
+    );
+  }
+
+  if (attention.data === null || attention.data.items.length === 0) return null;
+
+  return (
+    <SettingsSection
+      title="Needs attention"
+      id="civilization-attention"
+      headerAction={headerAction}
+    >
+      {attention.data.items.map((item) => {
+        const destination = civilizationAttentionDestination(item.target);
+        return (
+          <SettingsRow
+            key={item.key}
+            title={item.title}
+            description={`${civilizationAttentionSeverityLabel(item.severity)} · ${item.detail}`}
+            control={
+              <Button
+                size="sm"
+                variant="outline"
+                aria-label={`Open ${item.title}`}
+                onClick={() => navigate(destination.search, destination.targetId)}
+              >
+                Open
+              </Button>
+            }
+          />
+        );
+      })}
+    </SettingsSection>
+  );
+}
+
 type CivilizationTargetSurface = Exclude<CivilizationSettingsView, "overview"> | "overview";
 
 interface CivilizationTargetSurfaceNavigation {
@@ -719,6 +919,10 @@ interface CivilizationTargetSurfaceNavigation {
   readonly activityMode: CivilizationActivityMode;
   readonly contextMode: CivilizationContextMode;
   readonly navigate: (next: CivilizationNavigationSearch, targetId: string) => void;
+  readonly update: (
+    next: CivilizationNavigationSearch,
+    options?: { readonly replace?: boolean; readonly hash?: string },
+  ) => void;
 }
 
 function CivilizationTargetOverview({
@@ -1015,13 +1219,24 @@ function CivilizationTargetOverview({
 
   if (!canRead) {
     return (
-      <SettingsSection title={target.label} id={surfaceTargetId}>
-        <SettingsRow
-          title="Civilization"
-          description="This client does not have orchestration:read permission for this environment."
-          control={<ReadOnlyValue>Unavailable</ReadOnlyValue>}
-        />
-      </SettingsSection>
+      <div className="space-y-8">
+        <SettingsSection title={target.label} id={surfaceTargetId}>
+          <SettingsRow
+            title="Civilization"
+            description="This client does not have orchestration:read permission for this environment."
+            control={<ReadOnlyValue>Unavailable</ReadOnlyValue>}
+          />
+        </SettingsSection>
+        {surface === "overview" && target.projectId !== null ? (
+          <CivilizationAttentionSection
+            environmentId={target.environmentId}
+            projectId={target.projectId}
+            targetLabel={target.label}
+            canRead={false}
+            navigate={navigation.navigate}
+          />
+        ) : null}
+      </div>
     );
   }
 
@@ -1282,6 +1497,15 @@ function CivilizationTargetOverview({
             }
           />
         </SettingsSection>
+        {target.projectId === null ? null : (
+          <CivilizationAttentionSection
+            environmentId={target.environmentId}
+            projectId={target.projectId}
+            targetLabel={target.label}
+            canRead={canRead}
+            navigate={navigation.navigate}
+          />
+        )}
         <SettingsSection title="Participation" id="civilization-participation">
           <SettingsRow
             title="Enabled"
@@ -1570,6 +1794,44 @@ function CivilizationTargetOverview({
         canRead={canRead}
         canWrite={canWrite}
       />
+
+      {target.projectId === null ? null : (
+        <SettingsSection title="Onboarding" id="civilization-onboarding">
+          <SettingsRow
+            title="Guided setup"
+            description="Choose a server-described preset, preview its exact project effect, and apply once with the reviewed project and environment revisions. Wizard choices and packet content stay in memory only."
+            control={
+              <Button
+                id="civilization-onboarding-open"
+                size="sm"
+                variant="outline"
+                disabled={!canRead}
+                onClick={() =>
+                  navigation.update(civilizationOnboardingSafeSearch({ stage: "target" }), {
+                    hash: CIVILIZATION_ONBOARDING_TARGET_ID,
+                  })
+                }
+              >
+                Set up…
+              </Button>
+            }
+          />
+          {navigation.search.onboarding === undefined ? null : (
+            <CivilizationOnboardingDialog
+              key={`${target.environmentId}:${target.projectId}:${navigation.search.onboardingPreset ?? "none"}:${navigation.search.onboardingAdoption ?? "none"}:${navigation.search.onboardingTitlePolicy ?? "none"}`}
+              environmentId={target.environmentId}
+              projectId={target.projectId}
+              targetLabel={target.label}
+              canRead={canRead}
+              canWrite={canWrite}
+              providers={capabilities.providers}
+              search={navigation.search}
+              onNavigate={navigation.update}
+              onApplied={overview.refresh}
+            />
+          )}
+        </SettingsSection>
+      )}
 
       <SettingsSection title="Identity and personality" id="civilization-names">
         <SettingsRow
@@ -2656,7 +2918,7 @@ function CivilizationTaskShell({
           initialInspectionFilters={initialInspectionFilters}
           surface="overview"
           surfaceTargetId="civilization-status"
-          navigation={{ search, activityMode, contextMode, navigate }}
+          navigation={{ search, activityMode, contextMode, navigate, update: onNavigate }}
         />
       );
     }
@@ -2719,7 +2981,7 @@ function CivilizationTaskShell({
         initialInspectionFilters={initialInspectionFilters}
         surface={view}
         surfaceTargetId={canonicalTargetId}
-        navigation={{ search, activityMode, contextMode, navigate }}
+        navigation={{ search, activityMode, contextMode, navigate, update: onNavigate }}
       />
     );
   })();

@@ -16,20 +16,20 @@ The fork still includes the normal T3 Code web, desktop, mobile, provider, remot
 - **Lineage** — forks and T3-owned child relationships are exposed as bounded, server-authoritative ancestry rather than a second graph system.
 - **Personality rendering** — stable per-citizen profiles can be rendered as `off`, `mild`, or `rich`; personality changes presentation, never permissions or task authority.
 - **Shared context and notes** — citizens can receive bounded current Civilization context and work with explicit shared notes without automatic transcript ingestion or background model calls.
-- **Passive correspondence** — citizens can address durable messages to one another without waking, steering, polling, or automatically replying on behalf of the recipient.
+- **Operator Project Brief** — one bounded, revisioned project Brief can be included as untrusted shared context; body-free metadata is readable separately from the `settings:write`-gated body/editor.
+- **Guided onboarding** — server-described presets, redacted preview, and an explicit exact-packet **Reveal** help review configuration before one conflict-safe apply bound to both project and environment revisions.
+- **Citizen-aware search** — normal navigation can resolve citizens with a bounded, metadata-only query against one exact physical project rather than crawling or fanning out across projects.
+- **Passive correspondence and structured handoffs** — citizens can address durable text mail or typed `handoff_v1` payloads to one another without waking, steering, polling, or automatically replying on behalf of the recipient.
 - **Chronicle and inspection** — bounded history, achievements, correspondence, lineage, context analytics, and historical context inspection are available from the Civilization Settings surface.
+- **Needs attention** — web and mobile can show a bounded, body-free project attention snapshot derived from existing status/provider/context metadata.
 - **Safe operations** — configuration, retention, import/export, reset, purge, adoption, and participation controls stay inside T3's existing server authority and permission model.
-- **Multi-surface UX** — web and desktop expose the full task-oriented Civilization Settings experience; mobile includes a bounded read-only Civilization overview.
+- **Multi-surface UX** — web and desktop expose the full task-oriented Civilization Settings experience; mobile includes a bounded read-only Civilization overview and exact-project attention triage.
 
 Civilization is **off by default**. It is scoped to one T3 environment/project, and a project's worktrees participate in that same civilization. Cross-environment federation is intentionally not part of the current product.
 
-## Current release
+## Civilization experience in this tree
 
-The current public Civilization release is **v1.4 — UI overhaul**.
-
-[View the Civilization v1.4 release](https://github.com/Errantial/t3code/releases/tag/civilization-v1.4)
-
-v1.4 reorganizes Civilization around five user tasks in **Settings → Civilization**:
+Civilization remains organized around five user tasks in **Settings → Civilization**:
 
 1. **Overview** — status, participation, population, and provider-support summary.
 2. **Citizens** — census, citizen details, and lineage.
@@ -38,6 +38,10 @@ v1.4 reorganizes Civilization around five user tasks in **Settings → Civilizat
 5. **Configuration** — identity, personality, context, messaging, provider, retention, and administrative policy.
 
 The task selection is URL-backed, preserves browser history/deep links, integrates with Settings search, and requires an exact project/checkout for rich inspection views. The narrow layout uses the same information architecture without horizontal page overflow.
+
+The current v1.5 scope adds coordination and onboarding without adding a sixth task: Project Brief editing in Configuration; guided setup and preview; bounded citizen search in the command palette; typed structured handoffs inside existing passive correspondence; and bounded **Needs attention** summaries on web/mobile.
+
+Remote Civilization push/notification capability (**V15-5b**) is **deferred and not part of the shipped core v1.5 scope**. The hosted relay deployment/capability is not changed by core v1.5, and passive mail or handoff acceptance does not become a remote notification trigger.
 
 ## Provider support
 
@@ -86,7 +90,6 @@ For the user-facing feature guide, see [Civilization](./docs/user/civilization.m
 Civilization-specific documentation:
 
 - [Civilization user guide](./docs/user/civilization.md)
-- [Civilization v1.4 release](https://github.com/Errantial/t3code/releases/tag/civilization-v1.4)
 
 The rest of [`docs/user`](./docs/user) and [`docs/internals`](./docs/internals) document the underlying T3 Code product and architecture that this fork retains. In particular:
 

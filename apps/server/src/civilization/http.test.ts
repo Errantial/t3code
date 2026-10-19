@@ -5,11 +5,13 @@ import {
   CivilizationCensusCursor,
   CivilizationChronicleCursor,
   CivilizationCorrespondenceCursor,
+  CivilizationDefaultConfig,
   CivilizationLineageCursor,
   CivilizationInboxCursor,
   CivilizationMessageId,
   CivilizationNoteId,
   CivilizationNotesCursor,
+  type CivilizationOnboardingPreviewRequest,
   EnvironmentAuthenticatedAuth,
   EnvironmentAuthenticatedPrincipal,
   EnvironmentHttpApi,
@@ -35,6 +37,7 @@ import * as HttpRouter from "effect/http/HttpRouter";
 
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as AdministrationService from "./AdministrationService.ts";
+import * as AttentionService from "./AttentionService.ts";
 import * as CitizenService from "./CitizenService.ts";
 import * as ChronicleService from "./ChronicleService.ts";
 import * as ConfigService from "./ConfigService.ts";
@@ -42,6 +45,7 @@ import * as ContextService from "./ContextService.ts";
 import * as CivilizationHttp from "./http.ts";
 import * as KnowledgeService from "./KnowledgeService.ts";
 import * as MailService from "./MailService.ts";
+import * as OnboardingService from "./OnboardingService.ts";
 import * as OperationsService from "./OperationsService.ts";
 import * as ProjectBriefService from "./ProjectBriefService.ts";
 
@@ -55,6 +59,14 @@ const fakeAdministration = AdministrationService.CivilizationAdministrationServi
   applyReassignment: () => Effect.die("unused administration apply"),
   reclaimTitle: () => Effect.die("unused administration reclaim"),
   restoreTitle: () => Effect.die("unused administration restore"),
+});
+const fakeAttention = AttentionService.CivilizationAttentionService.of({
+  snapshot: (projectId) =>
+    Effect.succeed({
+      projectId,
+      generatedAt: "2026-10-18T12:00:00.000Z",
+      items: [],
+    }),
 });
 const fakeKnowledge = KnowledgeService.CivilizationKnowledgeService.of({
   searchCitizens: () => Effect.succeed([]),
@@ -102,6 +114,7 @@ const fakeMail = MailService.CivilizationMailService.of({
   authoritativeCaller: () => Effect.die("unused mail caller lookup"),
   authoritativeCallerAgainstEffective: () => Effect.die("unused effective mail caller lookup"),
   send: () => Effect.die("unused mail send"),
+  sendHandoff: () => Effect.die("unused handoff send"),
   listInbox: () => Effect.die("unused agent inbox list"),
   receive: () => Effect.die("unused mail receive"),
   acknowledge: () => Effect.die("unused mail acknowledge"),
@@ -197,6 +210,11 @@ const fakeProjectBrief = ProjectBriefService.CivilizationProjectBriefService.of(
       content: null,
     }),
 });
+const fakeOnboarding = OnboardingService.CivilizationOnboardingService.of({
+  listPresets: () => Effect.die("unused onboarding presets"),
+  preview: () => Effect.die("unused onboarding preview"),
+  previewContent: () => Effect.die("unused onboarding content preview"),
+});
 
 const makeRoutes = (
   adoptionCalls: Ref.Ref<number>,
@@ -207,6 +225,8 @@ const makeRoutes = (
   chronicle: ChronicleService.CivilizationChronicleServiceShape = fakeChronicle,
   context: typeof fakeContext = fakeContext,
   projectBrief: ProjectBriefService.CivilizationProjectBriefServiceShape = fakeProjectBrief,
+  onboarding: OnboardingService.CivilizationOnboardingServiceShape = fakeOnboarding,
+  attention: AttentionService.CivilizationAttentionService["Service"] = fakeAttention,
 ) => {
   const fakeCitizens = CitizenService.CivilizationCitizenService.of({
     adoptExisting: () =>
@@ -284,12 +304,14 @@ const makeRoutes = (
     Layer.provide(
       Layer.succeed(AdministrationService.CivilizationAdministrationService, fakeAdministration),
     ),
+    Layer.provide(Layer.succeed(AttentionService.CivilizationAttentionService, attention)),
     Layer.provide(Layer.succeed(KnowledgeService.CivilizationKnowledgeService, knowledge)),
     Layer.provide(Layer.succeed(ChronicleService.CivilizationChronicleService, chronicle)),
     Layer.provide(Layer.succeed(ContextService.CivilizationContextService, context)),
     Layer.provide(Layer.succeed(MailService.CivilizationMailService, mail)),
     Layer.provide(Layer.succeed(OperationsService.CivilizationOperationsService, operations)),
     Layer.provide(Layer.succeed(ProjectBriefService.CivilizationProjectBriefService, projectBrief)),
+    Layer.provide(Layer.succeed(OnboardingService.CivilizationOnboardingService, onboarding)),
     Layer.provide(HttpPlatform.layer),
     Layer.provide(Etag.layerWeak),
     Layer.provide(NodeServices.layer),
@@ -568,6 +590,363 @@ it.effect(
           }),
         (server) => Effect.promise(() => server.dispose()),
       );
+    }),
+);
+
+it.effect(
+  "serves bounded body-free attention for one required exact project under orchestration:read",
+  () =>
+    Effect.gen(function* () {
+      const adoptionCalls = yield* Ref.make(0);
+      const requestedProjects = yield* Ref.make<ReadonlyArray<ProjectId>>([]);
+      const projectId = ProjectId.make("project:attention:http");
+      const attention = AttentionService.CivilizationAttentionService.of({
+        snapshot: (requestedProjectId) =>
+          Ref.update(requestedProjects, (current) => [...current, requestedProjectId]).pipe(
+            Effect.as({
+              projectId: requestedProjectId,
+              generatedAt: "2026-10-18T12:00:00.000Z",
+              items: Array.from({ length: 8 }, (_, index) => ({
+                key: `${requestedProjectId}:attention:${index}`,
+                kind: "provider_support_limited" as const,
+                severity: "warning" as const,
+                target: "configuration" as const,
+                title: `Attention ${index}`,
+                detail: `Metadata-only attention detail ${index}.`,
+              })),
+            }),
+          ),
+      });
+
+      yield* Effect.acquireUseRelease(
+        Effect.sync(() =>
+          HttpRouter.toWebHandler(
+            makeRoutes(
+              adoptionCalls,
+              ["orchestration:read"],
+              fakeKnowledge,
+              fakeMail,
+              fakeOperations,
+              fakeChronicle,
+              fakeContext,
+              fakeProjectBrief,
+              fakeOnboarding,
+              attention,
+            ),
+            { disableLogger: true },
+          ),
+        ),
+        (server) =>
+          Effect.tryPromise(async () => {
+            const response = await server.handler(
+              new Request(
+                `http://127.0.0.1/api/civilization/attention?projectId=${encodeURIComponent(projectId)}`,
+              ),
+              requestContext,
+            );
+            expect(response.status).toBe(200);
+            const body = (await response.json()) as {
+              readonly projectId: string;
+              readonly generatedAt: string;
+              readonly items: ReadonlyArray<Record<string, unknown>>;
+            };
+            expect(body.projectId).toBe(projectId);
+            expect(body.items).toHaveLength(8);
+            expect(Object.keys(body).sort()).toEqual(["generatedAt", "items", "projectId"]);
+            for (const item of body.items) {
+              expect(Object.keys(item).sort()).toEqual([
+                "detail",
+                "key",
+                "kind",
+                "severity",
+                "target",
+                "title",
+              ]);
+              expect(item).not.toHaveProperty("body");
+              expect(item).not.toHaveProperty("content");
+              expect(item).not.toHaveProperty("packet");
+            }
+
+            const missingProject = await server.handler(
+              new Request("http://127.0.0.1/api/civilization/attention"),
+              requestContext,
+            );
+            expect(missingProject.status).toBe(400);
+          }),
+        (server) => Effect.promise(() => server.dispose()),
+      );
+      expect(yield* Ref.get(requestedProjects)).toEqual([projectId]);
+
+      yield* Effect.acquireUseRelease(
+        Effect.sync(() =>
+          HttpRouter.toWebHandler(
+            makeRoutes(
+              adoptionCalls,
+              [],
+              fakeKnowledge,
+              fakeMail,
+              fakeOperations,
+              fakeChronicle,
+              fakeContext,
+              fakeProjectBrief,
+              fakeOnboarding,
+              attention,
+            ),
+            { disableLogger: true },
+          ),
+        ),
+        (server) =>
+          Effect.tryPromise(async () => {
+            const denied = await server.handler(
+              new Request(
+                `http://127.0.0.1/api/civilization/attention?projectId=${encodeURIComponent(projectId)}`,
+              ),
+              requestContext,
+            );
+            expect(denied.status).toBe(403);
+            expect(await denied.json()).toMatchObject({
+              code: "insufficient_scope",
+              requiredPermission: "orchestration:read",
+            });
+          }),
+        (server) => Effect.promise(() => server.dispose()),
+      );
+      expect(yield* Ref.get(requestedProjects)).toEqual([projectId]);
+    }),
+);
+
+it.effect(
+  "keeps onboarding metadata/redacted preview readable and exact content behind settings:write",
+  () =>
+    Effect.gen(function* () {
+      const adoptionCalls = yield* Ref.make(0);
+      const calls = yield* Ref.make({ presets: 0, preview: 0, content: 0 });
+      const contentInputs = yield* Ref.make<ReadonlyArray<unknown>>([]);
+      const projectId = ProjectId.make("project:onboarding:http");
+      const threadId = ThreadId.make("thread:onboarding:http");
+      const effective = {
+        config: CivilizationDefaultConfig,
+        environmentRevision: 2,
+        projectRevision: 3,
+        provenance: [],
+        selectedNameProbabilities: [],
+        selectedProfileProbabilities: [],
+      } as const;
+      const budget = {
+        limitBytes: 4096,
+        packetBytes: 0,
+        requiredBytes: 0,
+        briefBytes: 0,
+        rosterBytes: 0,
+        noteBytes: 0,
+        inboxBytes: 0,
+        unusedBytes: 4096,
+      } as const;
+      const composition = {
+        brief: { candidates: 0, included: 0, omitted: 0 },
+        roster: { candidates: 0, included: 0, omitted: 0 },
+        notes: { candidates: 0, included: 0, omitted: 0 },
+        inbox: { candidates: 0, included: 0, omitted: 0 },
+      } as const;
+      const onboarding = OnboardingService.CivilizationOnboardingService.of({
+        listPresets: (requestedProjectId) =>
+          Ref.update(calls, (current) => ({ ...current, presets: current.presets + 1 })).pipe(
+            Effect.as({
+              projectId: requestedProjectId,
+              environmentRevision: 2,
+              projectRevision: 3,
+              presets: [
+                {
+                  id: "custom" as const,
+                  label: "Custom",
+                  description: "Keep current settings.",
+                  candidateOverride: { version: CIVILIZATION_CONFIG_VERSION },
+                  changes: [],
+                },
+              ],
+            }),
+          ),
+        preview: ((input: CivilizationOnboardingPreviewRequest) => {
+          const common = {
+            projectId: input.projectId,
+            effectiveConfig: effective,
+            environmentRevision: 2,
+            projectRevision: 3,
+            changes: [],
+            capabilities: [],
+            selectedCapability: null,
+            budget,
+            composition,
+            eligibility: {
+              brief: true,
+              roster: true,
+              notes: true,
+              inbox: true,
+              exactContent: false,
+            },
+            warnings: [],
+          } as const;
+          return Ref.update(calls, (current) => ({
+            ...current,
+            preview: current.preview + 1,
+          })).pipe(
+            Effect.as(
+              input.previewKind === "configuration_only"
+                ? { ...common, previewKind: "configuration_only" as const }
+                : { ...common, previewKind: "exact_existing_citizen" as const },
+            ),
+          );
+        }) as unknown as OnboardingService.CivilizationOnboardingService["Service"]["preview"],
+        previewContent: (input) =>
+          Ref.update(contentInputs, (current) => [...current, input]).pipe(
+            Effect.andThen(
+              Ref.update(calls, (current) => ({ ...current, content: current.content + 1 })),
+            ),
+            Effect.as({
+              projectId: input.projectId,
+              threadId: input.threadId,
+              effectiveConfig: effective,
+              environmentRevision: 2,
+              projectRevision: 3,
+              capability: {
+                providerInstanceId: ProviderInstanceId.make("codex-main"),
+                support: "full" as const,
+                contextInjection: true,
+                keyedContextReplacement: true,
+                actionablePromptRefresh: true,
+                providerContinuationRefresh: true,
+                messaging: true,
+              },
+              authority: {
+                runId: RunId.make("run:onboarding:http"),
+                providerInstanceId: ProviderInstanceId.make("codex-main"),
+                runtimeMode: "full-access" as const,
+                interactionMode: "default" as const,
+              },
+              budget,
+              composition,
+              packet: null,
+              warnings: [],
+            }),
+          ),
+      });
+
+      yield* Effect.acquireUseRelease(
+        Effect.sync(() =>
+          HttpRouter.toWebHandler(
+            makeRoutes(
+              adoptionCalls,
+              ["orchestration:read"],
+              fakeKnowledge,
+              fakeMail,
+              fakeOperations,
+              fakeChronicle,
+              fakeContext,
+              fakeProjectBrief,
+              onboarding,
+            ),
+            { disableLogger: true },
+          ),
+        ),
+        (server) =>
+          Effect.tryPromise(async () => {
+            const presets = await server.handler(
+              new Request(
+                `http://127.0.0.1/api/civilization/onboarding/presets?projectId=${encodeURIComponent(projectId)}`,
+              ),
+              requestContext,
+            );
+            expect(presets.status).toBe(200);
+            expect(await presets.json()).toMatchObject({
+              projectId,
+              environmentRevision: 2,
+              projectRevision: 3,
+            });
+
+            const redacted = await server.handler(
+              postJson("/api/civilization/onboarding/preview", {
+                previewKind: "configuration_only",
+                projectId,
+                candidateOverride: { version: CIVILIZATION_CONFIG_VERSION },
+              }),
+              requestContext,
+            );
+            expect(redacted.status).toBe(200);
+            const redactedBody = await redacted.json();
+            expect(redactedBody).toMatchObject({ projectId, previewKind: "configuration_only" });
+            expect(redactedBody).not.toHaveProperty("packet");
+
+            const content = await server.handler(
+              postJson("/api/civilization/onboarding/preview/content", {
+                projectId,
+                threadId,
+              }),
+              requestContext,
+            );
+            expect(content.status).toBe(403);
+            expect(await content.json()).toMatchObject({
+              code: "insufficient_scope",
+              requiredPermission: "settings:write",
+            });
+          }),
+        (server) => Effect.promise(() => server.dispose()),
+      );
+      expect(yield* Ref.get(calls)).toEqual({ presets: 1, preview: 1, content: 0 });
+
+      yield* Effect.acquireUseRelease(
+        Effect.sync(() =>
+          HttpRouter.toWebHandler(
+            makeRoutes(
+              adoptionCalls,
+              ["orchestration:read", "orchestration:operate", "settings:write"],
+              fakeKnowledge,
+              fakeMail,
+              fakeOperations,
+              fakeChronicle,
+              fakeContext,
+              fakeProjectBrief,
+              onboarding,
+            ),
+            { disableLogger: true },
+          ),
+        ),
+        (server) =>
+          Effect.tryPromise(async () => {
+            const content = await server.handler(
+              postJson("/api/civilization/onboarding/preview/content", {
+                projectId,
+                threadId,
+                candidateOverride: { version: CIVILIZATION_CONFIG_VERSION },
+              }),
+              requestContext,
+            );
+            expect(content.status).toBe(200);
+            expect(await content.json()).toMatchObject({ projectId, threadId, packet: null });
+
+            const forged = await server.handler(
+              postJson("/api/civilization/onboarding/preview/content", {
+                projectId,
+                threadId,
+                runId: "run:forged",
+                providerInstanceId: "forged-provider",
+                runtimeMode: "full-access",
+                interactionMode: "default",
+              }),
+              requestContext,
+            );
+            expect(forged.status).toBe(200);
+          }),
+        (server) => Effect.promise(() => server.dispose()),
+      );
+      expect(yield* Ref.get(calls)).toEqual({ presets: 1, preview: 1, content: 2 });
+      expect(yield* Ref.get(contentInputs)).toEqual([
+        {
+          projectId,
+          threadId,
+          candidateOverride: { version: CIVILIZATION_CONFIG_VERSION },
+        },
+        { projectId, threadId },
+      ]);
     }),
 );
 
@@ -1315,6 +1694,7 @@ it.effect(
         yield* Ref.make<MailService.CorrespondenceThreadInput | null>(null);
       const summary = {
         messageId,
+        contentKind: "text" as const,
         senderThreadId: ThreadId.make("thread:sender"),
         senderNameAtSend: "Ada",
         senderCitizenEpoch: 2,
@@ -1422,7 +1802,7 @@ it.effect(
 
             const correspondence = await server.handler(
               new Request(
-                `http://127.0.0.1/api/civilization/correspondence?projectId=${encodeURIComponent(projectId)}&participantThreadId=thread%3Asender&counterpartyThreadId=thread%3Arecipient&replyRelation=root&acknowledged=false&terminal=true&deliveryEpoch=4&from=${encodeURIComponent("2026-10-16T09:00:00.000Z")}&to=${encodeURIComponent("2026-10-16T11:00:00.000Z")}&cursor=correspondence-cursor&limit=2`,
+                `http://127.0.0.1/api/civilization/correspondence?projectId=${encodeURIComponent(projectId)}&participantThreadId=thread%3Asender&counterpartyThreadId=thread%3Arecipient&contentKind=handoff_v1&replyRelation=root&acknowledged=false&terminal=true&deliveryEpoch=4&from=${encodeURIComponent("2026-10-16T09:00:00.000Z")}&to=${encodeURIComponent("2026-10-16T11:00:00.000Z")}&cursor=correspondence-cursor&limit=2`,
               ),
               requestContext,
             );
@@ -1467,6 +1847,7 @@ it.effect(
               projectId,
               participantThreadId: ThreadId.make("thread:sender"),
               counterpartyThreadId: ThreadId.make("thread:recipient"),
+              contentKind: "handoff_v1",
               replyRelation: "root",
               acknowledged: false,
               terminal: true,

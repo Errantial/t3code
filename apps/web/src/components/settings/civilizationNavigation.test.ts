@@ -42,6 +42,7 @@ describe("Civilization settings navigation", () => {
     ["civilization-context-inspector", { view: "context", contextMode: "inspector" }],
     ["civilization-personality", { view: "configuration" }],
     ["civilization-data-retention", { view: "configuration" }],
+    ["civilization-onboarding", { view: "configuration" }],
   ] as const)("maps %s to its owning view", (targetId, expected) => {
     expect(civilizationViewForTargetId(targetId)).toEqual(expected);
     expect(civilizationViewForTargetId(`#${targetId}`)).toEqual(expected);
@@ -83,6 +84,33 @@ describe("Civilization settings navigation", () => {
       view: "activity",
       activity: "chronicle",
       activityThread: "thread-new",
+    });
+  });
+
+  it("keeps only safe onboarding stage/choice fields and removes them when the wizard closes", () => {
+    const scope = {
+      project: "logical-project",
+      machine: "environment-a",
+      checkout: "environment-a:/repo",
+    };
+    const opened = mergeCivilizationNavigationSearch(scope, {
+      view: "configuration",
+      onboarding: "privacy",
+      onboardingPreset: "minimal",
+      onboardingAdoption: "future_only",
+      onboardingTitlePolicy: "preserve",
+    });
+    expect(opened).toEqual({
+      ...scope,
+      view: "configuration",
+      onboarding: "privacy",
+      onboardingPreset: "minimal",
+      onboardingAdoption: "future_only",
+      onboardingTitlePolicy: "preserve",
+    });
+    expect(mergeCivilizationNavigationSearch(opened, { view: "configuration" })).toEqual({
+      ...scope,
+      view: "configuration",
     });
   });
 });

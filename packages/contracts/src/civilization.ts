@@ -35,6 +35,12 @@ export const CIVILIZATION_CITIZEN_SEARCH_MAX_LIMIT = 20;
 export const CIVILIZATION_CITIZEN_SEARCH_MIN_QUERY_CHARACTERS = 2;
 export const CIVILIZATION_CITIZEN_SEARCH_MAX_QUERY_CHARACTERS = 200;
 export const CIVILIZATION_CITIZEN_SEARCH_MAX_QUERY_BYTES = 512;
+export const CIVILIZATION_ATTENTION_MAX_ITEMS = 8;
+export const CIVILIZATION_MAX_HANDOFF_ITEMS = 8;
+export const CIVILIZATION_MAX_HANDOFF_ITEM_BYTES = 512;
+export const CIVILIZATION_MAX_HANDOFF_REFERENCES = 16;
+export const CIVILIZATION_MAX_HANDOFF_REFERENCE_KIND_BYTES = 128;
+export const CIVILIZATION_MAX_HANDOFF_REFERENCE_BYTES = 1024;
 
 const projectBriefUnsafeText = (value: string) =>
   [...value].some((character) => {
@@ -472,6 +478,44 @@ export const CivilizationStatus = Schema.Struct({
 });
 export type CivilizationStatus = typeof CivilizationStatus.Type;
 
+export const CivilizationAttentionKind = Schema.Literals([
+  "adoption_in_progress",
+  "civilization_degraded",
+  "provider_support_limited",
+  "context_provider_start_failures",
+  "packet_budget_pressure",
+]);
+export type CivilizationAttentionKind = typeof CivilizationAttentionKind.Type;
+
+export const CivilizationAttentionSeverity = Schema.Literals(["info", "warning", "error"]);
+export type CivilizationAttentionSeverity = typeof CivilizationAttentionSeverity.Type;
+
+export const CivilizationAttentionTarget = Schema.Literals([
+  "overview",
+  "configuration",
+  "context_analytics",
+]);
+export type CivilizationAttentionTarget = typeof CivilizationAttentionTarget.Type;
+
+export const CivilizationAttentionItem = Schema.Struct({
+  key: TrimmedNonEmptyString,
+  kind: CivilizationAttentionKind,
+  severity: CivilizationAttentionSeverity,
+  target: CivilizationAttentionTarget,
+  title: TrimmedNonEmptyString,
+  detail: TrimmedNonEmptyString,
+}).annotate({ parseOptions: { onExcessProperty: "error" } });
+export type CivilizationAttentionItem = typeof CivilizationAttentionItem.Type;
+
+export const CivilizationAttentionResult = Schema.Struct({
+  projectId: ProjectId,
+  generatedAt: IsoDateTime,
+  items: Schema.Array(CivilizationAttentionItem).pipe(
+    Schema.check(Schema.isMaxLength(CIVILIZATION_ATTENTION_MAX_ITEMS)),
+  ),
+}).annotate({ parseOptions: { onExcessProperty: "error" } });
+export type CivilizationAttentionResult = typeof CivilizationAttentionResult.Type;
+
 export const CivilizationConfigDescription = Schema.Struct({
   version: Schema.Number,
   inheritance: Schema.String,
@@ -494,12 +538,20 @@ export const CivilizationConfigValidationResult = Schema.Struct({
   effective: CivilizationEffectiveConfig,
 });
 
-export const CivilizationConfigSetRequest = Schema.Struct({
-  projectId: Schema.optional(ProjectId),
-  expectedRevision: Schema.Number,
-  expectedEnvironmentRevision: Schema.optional(Schema.Number),
-  override: CivilizationConfigOverride,
-});
+export const CivilizationConfigSetRequest = Schema.Union([
+  Schema.Struct({
+    projectId: Schema.optional(Schema.Undefined),
+    expectedRevision: Schema.Number,
+    expectedEnvironmentRevision: Schema.optional(Schema.Undefined),
+    override: CivilizationConfigOverride,
+  }),
+  Schema.Struct({
+    projectId: ProjectId,
+    expectedRevision: Schema.Number,
+    expectedEnvironmentRevision: Schema.Number,
+    override: CivilizationConfigOverride,
+  }),
+]);
 
 export const CivilizationConfigResetRequest = Schema.Struct({
   projectId: Schema.optional(ProjectId),
@@ -1025,8 +1077,53 @@ export const CivilizationMailTerminalReason = Schema.Literals([
 ]);
 export type CivilizationMailTerminalReason = typeof CivilizationMailTerminalReason.Type;
 
+export const CivilizationMailContentKind = Schema.Literals(["text", "handoff_v1"]);
+export type CivilizationMailContentKind = typeof CivilizationMailContentKind.Type;
+
+const passiveHandoffText = (maxBytes: number, expected: string) =>
+  projectBriefText(maxBytes, expected);
+
+export const CivilizationPassiveHandoffReference = Schema.Struct({
+  kind: passiveHandoffText(
+    CIVILIZATION_MAX_HANDOFF_REFERENCE_KIND_BYTES,
+    "a safe non-blank handoff reference kind within the byte limit",
+  ),
+  reference: passiveHandoffText(
+    CIVILIZATION_MAX_HANDOFF_REFERENCE_BYTES,
+    "a safe non-blank handoff reference within the byte limit",
+  ),
+}).annotate({ parseOptions: { onExcessProperty: "error" } });
+export type CivilizationPassiveHandoffReference = typeof CivilizationPassiveHandoffReference.Type;
+
+const passiveHandoffItem = passiveHandoffText(
+  CIVILIZATION_MAX_HANDOFF_ITEM_BYTES,
+  "safe non-blank handoff text within the byte limit",
+);
+
+export const CivilizationPassiveHandoffPayloadV1 = Schema.Struct({
+  version: Schema.Literal(1),
+  summary: passiveHandoffItem,
+  completed: Schema.Array(passiveHandoffItem).pipe(
+    Schema.check(Schema.isMaxLength(CIVILIZATION_MAX_HANDOFF_ITEMS)),
+  ),
+  decisions: Schema.Array(passiveHandoffItem).pipe(
+    Schema.check(Schema.isMaxLength(CIVILIZATION_MAX_HANDOFF_ITEMS)),
+  ),
+  nextActions: Schema.Array(passiveHandoffItem).pipe(
+    Schema.check(Schema.isMaxLength(CIVILIZATION_MAX_HANDOFF_ITEMS)),
+  ),
+  blockersOrQuestions: Schema.Array(passiveHandoffItem).pipe(
+    Schema.check(Schema.isMaxLength(CIVILIZATION_MAX_HANDOFF_ITEMS)),
+  ),
+  references: Schema.Array(CivilizationPassiveHandoffReference).pipe(
+    Schema.check(Schema.isMaxLength(CIVILIZATION_MAX_HANDOFF_REFERENCES)),
+  ),
+}).annotate({ parseOptions: { onExcessProperty: "error" } });
+export type CivilizationPassiveHandoffPayloadV1 = typeof CivilizationPassiveHandoffPayloadV1.Type;
+
 export const CivilizationMailSummary = Schema.Struct({
   messageId: CivilizationMessageId,
+  contentKind: CivilizationMailContentKind,
   senderThreadId: ThreadId,
   senderNameAtSend: Schema.String,
   senderCitizenEpoch: Schema.Number,
@@ -1051,10 +1148,25 @@ export const CivilizationMailSummary = Schema.Struct({
 });
 export type CivilizationMailSummary = typeof CivilizationMailSummary.Type;
 
-export const CivilizationMailBody = Schema.Struct({
+export const CivilizationTextMailBody = Schema.Struct({
   ...CivilizationMailSummary.fields,
+  contentKind: Schema.Literal("text"),
   body: Schema.String,
 });
+export type CivilizationTextMailBody = typeof CivilizationTextMailBody.Type;
+
+export const CivilizationHandoffMailBody = Schema.Struct({
+  ...CivilizationMailSummary.fields,
+  contentKind: Schema.Literal("handoff_v1"),
+  body: Schema.String,
+  handoff: CivilizationPassiveHandoffPayloadV1,
+});
+export type CivilizationHandoffMailBody = typeof CivilizationHandoffMailBody.Type;
+
+export const CivilizationMailBody = Schema.Union([
+  CivilizationTextMailBody,
+  CivilizationHandoffMailBody,
+]);
 export type CivilizationMailBody = typeof CivilizationMailBody.Type;
 
 export const CivilizationMailSendRequest = Schema.Struct({
@@ -1064,6 +1176,15 @@ export const CivilizationMailSendRequest = Schema.Struct({
   replyToMessageId: Schema.optional(CivilizationMessageId),
 });
 export type CivilizationMailSendRequest = typeof CivilizationMailSendRequest.Type;
+
+export const CivilizationPassiveHandoffSendRequest = Schema.Struct({
+  targetThreadId: ThreadId,
+  clientRequestId: TrimmedNonEmptyString,
+  handoff: CivilizationPassiveHandoffPayloadV1,
+  replyToMessageId: Schema.optional(CivilizationMessageId),
+});
+export type CivilizationPassiveHandoffSendRequest =
+  typeof CivilizationPassiveHandoffSendRequest.Type;
 
 export const CivilizationMailSendResult = Schema.Struct({
   message: CivilizationMailSummary,
@@ -1122,10 +1243,10 @@ export const CivilizationAdminMailListRequest = Schema.Struct({
 });
 export type CivilizationAdminMailListRequest = typeof CivilizationAdminMailListRequest.Type;
 
-export const CivilizationAdminMailRecord = Schema.Struct({
-  projectId: ProjectId,
-  ...CivilizationMailBody.fields,
-});
+export const CivilizationAdminMailRecord = Schema.Union([
+  Schema.Struct({ projectId: ProjectId, ...CivilizationTextMailBody.fields }),
+  Schema.Struct({ projectId: ProjectId, ...CivilizationHandoffMailBody.fields }),
+]);
 export type CivilizationAdminMailRecord = typeof CivilizationAdminMailRecord.Type;
 
 export const CivilizationAdminMailPage = Schema.Struct({
@@ -1735,6 +1856,7 @@ export const CivilizationMailInvalidReason = Schema.Literals([
   "expired_message",
   "too_many_messages",
   "response_too_large",
+  "corrupt_message",
 ]);
 export type CivilizationMailInvalidReason = typeof CivilizationMailInvalidReason.Type;
 

@@ -25,15 +25,33 @@ import {
 import * as ConfigService from "./ConfigService.ts";
 import * as CitizenService from "./CitizenService.ts";
 import * as AdministrationService from "./AdministrationService.ts";
+import * as AttentionService from "./AttentionService.ts";
 import * as ContextService from "./ContextService.ts";
 import * as ChronicleService from "./ChronicleService.ts";
 import * as KnowledgeService from "./KnowledgeService.ts";
 import * as MailService from "./MailService.ts";
 import * as OperationsService from "./OperationsService.ts";
+import * as OnboardingService from "./OnboardingService.ts";
 import * as ProjectBriefService from "./ProjectBriefService.ts";
 
 const withCivilizationStorageErrors = <A, R>(
   effect: Effect.Effect<A, ConfigService.CivilizationConfigServiceError, R>,
+) =>
+  effect.pipe(
+    Effect.catchTags({
+      SqlError: (cause) => failEnvironmentInternal("internal_error", cause),
+    }),
+  );
+
+type CivilizationOnboardingServiceError =
+  | Effect.Error<ReturnType<OnboardingService.CivilizationOnboardingServiceShape["listPresets"]>>
+  | Effect.Error<ReturnType<OnboardingService.CivilizationOnboardingServiceShape["preview"]>>
+  | Effect.Error<
+      ReturnType<OnboardingService.CivilizationOnboardingServiceShape["previewContent"]>
+    >;
+
+const withCivilizationOnboardingErrors = <A, R>(
+  effect: Effect.Effect<A, CivilizationOnboardingServiceError, R>,
 ) =>
   effect.pipe(
     Effect.catchTags({
@@ -106,11 +124,13 @@ export const layer = HttpApiBuilder.group(
     const config = yield* ConfigService.CivilizationConfigService;
     const citizens = yield* CitizenService.CivilizationCitizenService;
     const administration = yield* AdministrationService.CivilizationAdministrationService;
+    const attention = yield* AttentionService.CivilizationAttentionService;
     const context = yield* ContextService.CivilizationContextService;
     const chronicle = yield* ChronicleService.CivilizationChronicleService;
     const knowledge = yield* KnowledgeService.CivilizationKnowledgeService;
     const mail = yield* MailService.CivilizationMailService;
     const operations = yield* OperationsService.CivilizationOperationsService;
+    const onboarding = yield* OnboardingService.CivilizationOnboardingService;
     const projectBrief = yield* ProjectBriefService.CivilizationProjectBriefService;
 
     const authorizeRead = (endpoint: string) =>
@@ -139,6 +159,19 @@ export const layer = HttpApiBuilder.group(
         Effect.fn("environment.civilization.capabilities")(function* (args) {
           yield* authorizeRead(args.endpoint.name);
           return { providers: yield* context.listCapabilities() };
+        }),
+      )
+      .handle(
+        "attention",
+        Effect.fn("environment.civilization.attention")(function* (args) {
+          yield* authorizeRead(args.endpoint.name);
+          return yield* attention.snapshot(args.query.projectId).pipe(
+            Effect.catchTags({
+              SqlError: (cause) => failEnvironmentInternal("internal_error", cause),
+              CivilizationContextInspectionInvalidError: (cause) =>
+                failEnvironmentInternal("internal_error", cause),
+            }),
+          );
         }),
       )
       .handle(
@@ -200,6 +233,29 @@ export const layer = HttpApiBuilder.group(
         Effect.fn("environment.civilization.configExport")(function* (args) {
           yield* authorizeRead(args.endpoint.name);
           return yield* withCivilizationStorageErrors(config.export(args.query.projectId));
+        }),
+      )
+      .handle(
+        "onboardingPresets",
+        Effect.fn("environment.civilization.onboardingPresets")(function* (args) {
+          yield* authorizeRead(args.endpoint.name);
+          return yield* withCivilizationOnboardingErrors(
+            onboarding.listPresets(args.query.projectId),
+          );
+        }),
+      )
+      .handle(
+        "onboardingPreview",
+        Effect.fn("environment.civilization.onboardingPreview")(function* (args) {
+          yield* authorizeRead(args.endpoint.name);
+          return yield* withCivilizationOnboardingErrors(onboarding.preview(args.payload));
+        }),
+      )
+      .handle(
+        "onboardingContentPreview",
+        Effect.fn("environment.civilization.onboardingContentPreview")(function* (args) {
+          yield* authorizeSettingsWrite(args.endpoint.name);
+          return yield* withCivilizationOnboardingErrors(onboarding.previewContent(args.payload));
         }),
       )
       .handle(
@@ -672,6 +728,9 @@ export const layer = HttpApiBuilder.group(
               ...(args.query.recipientThreadId === undefined
                 ? {}
                 : { recipientThreadId: args.query.recipientThreadId }),
+              ...(args.query.contentKind === undefined
+                ? {}
+                : { contentKind: args.query.contentKind }),
               ...(args.query.replyRelation === undefined
                 ? {}
                 : { replyRelation: args.query.replyRelation }),

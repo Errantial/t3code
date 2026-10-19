@@ -12,9 +12,12 @@ import { describe, expect, it } from "vite-plus/test";
 
 import {
   applyCivilizationConfigFanout,
+  civilizationAttentionQueryKey,
   civilizationConfigExpectedRevision,
+  civilizationCitizenSearchQueryKey,
   civilizationContextInspectionQueryKey,
   civilizationConfigTargetsKey,
+  civilizationOnboardingQueryKey,
   civilizationOverviewQueryKey,
   civilizationProjectBriefQueryKey,
   mergeCivilizationRevisionPage,
@@ -68,6 +71,20 @@ describe("civilization overview query identity", () => {
   });
 });
 
+describe("civilization attention query identity", () => {
+  it("binds cached attention to one exact physical environment/project pair", () => {
+    const environmentA = EnvironmentId.make("environment-attention-a");
+    const environmentB = EnvironmentId.make("environment-attention-b");
+    const projectA = ProjectId.make("project-attention-a");
+    const projectB = ProjectId.make("project-attention-b");
+
+    const key = civilizationAttentionQueryKey(environmentA, projectA);
+    expect(key).toBe(civilizationAttentionQueryKey(environmentA, projectA));
+    expect(key).not.toBe(civilizationAttentionQueryKey(environmentB, projectA));
+    expect(key).not.toBe(civilizationAttentionQueryKey(environmentA, projectB));
+  });
+});
+
 describe("civilization Project Brief query identity", () => {
   it("binds metadata reads to one exact physical environment/project pair", () => {
     const environmentA = EnvironmentId.make("environment-a");
@@ -79,6 +96,36 @@ describe("civilization Project Brief query identity", () => {
     expect(key).toBe(civilizationProjectBriefQueryKey(environmentA, projectA));
     expect(key).not.toBe(civilizationProjectBriefQueryKey(environmentB, projectA));
     expect(key).not.toBe(civilizationProjectBriefQueryKey(environmentA, projectB));
+  });
+});
+
+describe("civilization onboarding query identity", () => {
+  it("binds server-described presets to one exact physical environment/project pair", () => {
+    const environmentA = EnvironmentId.make("environment-onboarding-a");
+    const environmentB = EnvironmentId.make("environment-onboarding-b");
+    const projectA = ProjectId.make("project-onboarding-a");
+    const projectB = ProjectId.make("project-onboarding-b");
+
+    const key = civilizationOnboardingQueryKey(environmentA, projectA);
+    expect(key).toBe(civilizationOnboardingQueryKey(environmentA, projectA));
+    expect(key).not.toBe(civilizationOnboardingQueryKey(environmentB, projectA));
+    expect(key).not.toBe(civilizationOnboardingQueryKey(environmentA, projectB));
+  });
+});
+
+describe("civilization citizen-search query identity", () => {
+  it("binds cached results to one exact physical project, query, and limit", () => {
+    const environmentA = EnvironmentId.make("environment-a");
+    const environmentB = EnvironmentId.make("environment-b");
+    const projectA = ProjectId.make("project-a");
+    const projectB = ProjectId.make("project-b");
+    const key = civilizationCitizenSearchQueryKey(environmentA, projectA, "ada", 10);
+
+    expect(key).toBe(civilizationCitizenSearchQueryKey(environmentA, projectA, "ada", 10));
+    expect(key).not.toBe(civilizationCitizenSearchQueryKey(environmentB, projectA, "ada", 10));
+    expect(key).not.toBe(civilizationCitizenSearchQueryKey(environmentA, projectB, "ada", 10));
+    expect(key).not.toBe(civilizationCitizenSearchQueryKey(environmentA, projectA, "grace", 10));
+    expect(key).not.toBe(civilizationCitizenSearchQueryKey(environmentA, projectA, "ada", 20));
   });
 });
 

@@ -66,6 +66,7 @@ it.effect(
       yield* configService.set({
         projectId: PROJECT_ID,
         expectedRevision: 0,
+        expectedEnvironmentRevision: 0,
         override: {
           version: CIVILIZATION_CONFIG_VERSION,
           messaging: { retainedMessageCount: MESSAGE_COUNT },
