@@ -80,6 +80,7 @@ import Migration0074 from "./Migrations/074_CivilizationAchievements.ts";
 import Migration0075 from "./Migrations/075_CivilizationCorrespondenceHistory.ts";
 import Migration0076 from "./Migrations/076_CivilizationContextAnalyticsHourly.ts";
 import Migration0077 from "./Migrations/077_CivilizationChronicleSourceIndex.ts";
+import Migration0078 from "./Migrations/078_CanonicalizeThreadPullRequestLinks.ts";
 
 export const migrationEntries = [
   [1, "OrchestrationEvents", Migration0001],
@@ -160,6 +161,7 @@ export const migrationEntries = [
   [75, "CivilizationCorrespondenceHistory", Migration0075],
   [76, "CivilizationContextAnalyticsHourly", Migration0076],
   [77, "CivilizationChronicleSourceIndex", Migration0077],
+  [78, "CanonicalizeThreadPullRequestLinks", Migration0078],
 ] as const;
 
 export const migrationManifest = migrationEntries.map(([id, name]) => [id, name] as const);

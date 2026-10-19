@@ -10,6 +10,12 @@ import PullRequestFilesViewed from "./Migrations/053_PullRequestFilesViewed.ts";
 import RemoveRedundantProjectionIndexes from "./Migrations/056_RemoveRedundantProjectionIndexes.ts";
 import OrchestrationV2 from "./Migrations/055_OrchestrationV2.ts";
 
+const expectedPreviewUpgrade: Array<readonly [number, string]> = [
+  [53, "PullRequestFilesViewed"],
+  [54, "ProjectionThreadsAutoSettleDisabledAt"],
+  ...migrationManifest.filter(([id]) => id >= 56),
+];
+
 const seedPreview = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
   yield* runMigrations({ toMigrationInclusive: 52 });
@@ -32,18 +38,7 @@ describe("V2 preview upgrade", () => {
       const sql = yield* SqlClient.SqlClient;
       yield* seedPreview;
       const imports = yield* sql`SELECT * FROM orchestration_v2_legacy_imports`;
-      assert.deepStrictEqual(yield* runMigrations(), [
-        [53, "PullRequestFilesViewed"],
-        [54, "ProjectionThreadsAutoSettleDisabledAt"],
-        [56, "RemoveRedundantProjectionIndexes"],
-        [57, "ScheduledTaskWebhooks"],
-        [58, "WebhookRelayDeliveries"],
-        [59, "McpAppModelContext"],
-        [60, "ThreadSnapshotWindowIndexes"],
-        [61, "PullRequestReviewGuides"],
-        [62, "ThreadFailureLookupIndex"],
-        [63, "DropUnusedV1Projections"],
-      ]);
+      assert.deepStrictEqual(yield* runMigrations(), expectedPreviewUpgrade);
       assert.deepStrictEqual(yield* runMigrations(), []);
       assert.deepStrictEqual(yield* sql`SELECT * FROM orchestration_v2_legacy_imports`, imports);
       const history = yield* sql<{ readonly migration_id: number; readonly name: string }>`
@@ -118,18 +113,7 @@ describe("V2 preview upgrade", () => {
       );
       assert.strictEqual((yield* sql`SELECT * FROM orchestration_v2_legacy_imports`).length, 1);
       yield* sql`DROP TRIGGER fail_preview_upgrade`;
-      assert.deepStrictEqual(yield* runMigrations(), [
-        [53, "PullRequestFilesViewed"],
-        [54, "ProjectionThreadsAutoSettleDisabledAt"],
-        [56, "RemoveRedundantProjectionIndexes"],
-        [57, "ScheduledTaskWebhooks"],
-        [58, "WebhookRelayDeliveries"],
-        [59, "McpAppModelContext"],
-        [60, "ThreadSnapshotWindowIndexes"],
-        [61, "PullRequestReviewGuides"],
-        [62, "ThreadFailureLookupIndex"],
-        [63, "DropUnusedV1Projections"],
-      ]);
+      assert.deepStrictEqual(yield* runMigrations(), expectedPreviewUpgrade);
     }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
   );
 

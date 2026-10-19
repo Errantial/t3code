@@ -205,6 +205,7 @@ const layerRunExecutionServiceProvided = RunExecutionService.layer.pipe(
       IdAllocator.layer,
       layerProviderEventIngestorProvided,
       layerCivilizationContextProvided,
+      TurnItemPositionStore.layer,
     ),
   ),
 );
