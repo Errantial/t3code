@@ -21,6 +21,8 @@ export {
   unavailableChatGptBrowserHost,
 } from "./server/host.ts";
 export {
+  makeDurableChatGptBrowserRuntime,
+  makeDurableChatGptBrowserTransport,
   makeScopedChatGptBrowserHost,
   type ChatGptBrowserProviderAssets,
   type ChatGptBrowserProviderAssetsPort,
@@ -29,5 +31,20 @@ export {
   type ChatGptBrowserProviderBrowserSession,
   type ChatGptBrowserProviderSecretsPort,
   type ChatGptBrowserProviderSettlementPort,
+  type DurableChatGptBrowserRuntime,
   type ScopedChatGptBrowserHostOptions,
 } from "./server/runtime.ts";
+export {
+  CHATGPT_BROWSER_NATIVE_PROVIDER_PORTS,
+  startNativeChatGptBrowserBroker,
+  type NativeChatGptBrowserBroker,
+} from "./server/nativeBrowser.ts";
+export {
+  makeNativeManagedChatGptBrowserHost,
+  shareChatGptBrowserHost,
+  type NativeManagedChatGptBrowserHostOptions,
+} from "./server/managedHost.ts";
+export {
+  resolveNativeChatGptBrowserReleaseSource,
+  type NativeChatGptBrowserReleaseSourceOptions,
+} from "./server/releaseSource.ts";

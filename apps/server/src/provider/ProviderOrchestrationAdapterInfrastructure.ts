@@ -8,11 +8,11 @@ import * as CursorKeychain from "@t3tools/provider-cursor/server/CursorKeychain"
 import {
   ChatGptBrowserHost,
   ChatGptBrowserOperationStore,
-  layerUnavailableChatGptBrowserHost,
 } from "@t3tools/provider-chatgpt-browser/server";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ProviderContinuationRequests from "@t3tools/provider-core/server/ProviderContinuationRequests";
 import * as ChatGptBrowserOperationStoreLive from "../orchestration-v2/ChatGptBrowserOperationStore.ts";
+import * as ChatGptBrowserHostLive from "./ChatGptBrowserHostLive.ts";
 
 export type ProviderOrchestrationAdapterInfrastructure =
   | ClaudeAdapterV2.ClaudeAgentSdkQueryRunner
@@ -34,7 +34,7 @@ export const layer = Layer.mergeAll(
   CodexAdapterV2.layerAppServerClientFactory,
   CursorAgentSdk.layer.pipe(Layer.provideMerge(CursorSdk.layer)),
   CursorKeychain.layer,
-  layerUnavailableChatGptBrowserHost,
+  ChatGptBrowserHostLive.layer,
   ChatGptBrowserOperationStoreLive.layer,
   IdAllocator.layer,
   ProviderContinuationRequests.layer,

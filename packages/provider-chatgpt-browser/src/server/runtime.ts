@@ -4,6 +4,8 @@ import { createHash, randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 // @effect-diagnostics-next-line nodeBuiltinImport:off -- WAL paths are resolved entirely inside the injected provider state directory.
 import path from "node:path";
+// @effect-diagnostics-next-line nodeBuiltinImport:off -- Windows atomic replacement retries use bounded promise-based delay without global timers.
+import { setTimeout as delay } from "node:timers/promises";
 
 import {
   ChatGptBrowserHostError,
@@ -53,6 +55,7 @@ export interface ChatGptBrowserProviderBrowserSession {
   readonly sendExact: (
     request: ChatGptBrowserProviderV1SendRequest,
     signal: AbortSignal,
+    context?: { readonly conversationId?: string },
   ) => Promise<ChatGptBrowserProviderBrowserObservation>;
   readonly queryExact: (
     providerOperationId: ChatGptBrowserProviderOperationId,
@@ -124,7 +127,13 @@ const providerFailure = (
 ): ChatGptBrowserProviderV1Error => ({ code, retryable, message: message.slice(0, 512) });
 
 const isProviderFailure = (value: unknown): value is ChatGptBrowserProviderV1Error =>
-  Boolean(value && typeof value === "object" && "code" in value && "retryable" in value && "message" in value);
+  Boolean(
+    value &&
+    typeof value === "object" &&
+    "code" in value &&
+    "retryable" in value &&
+    "message" in value,
+  );
 
 const hostFailure = (operation: string, cause?: unknown) =>
   new ChatGptBrowserHostError({ operation, ...(cause === undefined ? {} : { cause }) });
@@ -142,7 +151,8 @@ function parseOperation(value: unknown): DurableOperation | null {
     typeof row.text !== "string" ||
     typeof row.textHash !== "string" ||
     (row.dispatchState !== "prepared" && row.dispatchState !== "dispatched") ||
-    !row.state || !(row.state in stateRank) ||
+    !row.state ||
+    !(row.state in stateRank) ||
     !row.nativeIdentity ||
     !Array.isArray(row.events)
   ) {
@@ -156,7 +166,8 @@ function parseOperation(value: unknown): DurableOperation | null {
   }
   let previousSequence = -1;
   for (const event of events) {
-    if (event.providerOperationId !== row.providerOperationId || event.sequence <= previousSequence) return null;
+    if (event.providerOperationId !== row.providerOperationId || event.sequence <= previousSequence)
+      return null;
     previousSequence = event.sequence;
   }
   return { ...row, events } as DurableOperation;
@@ -170,7 +181,11 @@ class ProviderWal {
   }
 
   async init(): Promise<void> {
-    await fs.mkdir(this.directory, { recursive: true });
+    await fs.mkdir(this.directory, { recursive: true, mode: 0o700 });
+    if (process.platform !== "win32") {
+      await fs.chmod(this.directory, 0o700);
+      await syncDirectory(path.dirname(this.directory));
+    }
   }
 
   private file(operationId: string): string {
@@ -192,7 +207,11 @@ class ProviderWal {
       throw new Error("provider_wal_corrupt");
     }
     const record = parseOperation(parsed);
-    if (!record || record.providerOperationId !== operationId || record.textHash !== sha256(record.text)) {
+    if (
+      !record ||
+      record.providerOperationId !== operationId ||
+      record.textHash !== sha256(record.text)
+    ) {
       throw new Error("provider_wal_corrupt");
     }
     return record;
@@ -210,7 +229,11 @@ class ProviderWal {
         throw new Error("provider_wal_corrupt");
       }
       const record = parseOperation(raw);
-      if (!record || fileName(record.providerOperationId) !== name || record.textHash !== sha256(record.text)) {
+      if (
+        !record ||
+        fileName(record.providerOperationId) !== name ||
+        record.textHash !== sha256(record.text)
+      ) {
         throw new Error("provider_wal_corrupt");
       }
       records.push(record);
@@ -230,9 +253,55 @@ class ProviderWal {
       await handle.close();
     }
     try {
-      await fs.rename(temp, target);
+      await replaceFile(temp, target);
+      if (process.platform !== "win32") await syncDirectory(this.directory);
     } finally {
       await fs.rm(temp, { force: true }).catch(() => undefined);
+    }
+  }
+}
+
+async function syncDirectory(directory: string): Promise<void> {
+  const handle = await fs.open(directory, "r");
+  try {
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+}
+
+async function replaceFile(source: string, target: string): Promise<void> {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      await fs.rename(source, target);
+      return;
+    } catch (cause) {
+      const code = (cause as NodeJS.ErrnoException).code;
+      const sharingViolation =
+        process.platform === "win32" && (code === "EACCES" || code === "EPERM" || code === "EBUSY");
+      if (!sharingViolation || attempt >= 7) throw cause;
+      await delay(Math.min(100, 5 * 2 ** attempt));
+    }
+  }
+}
+
+class OperationSerial {
+  private readonly tails = new Map<string, Promise<void>>();
+
+  async run<A>(providerOperationId: string, operation: () => Promise<A>): Promise<A> {
+    const prior = this.tails.get(providerOperationId) ?? Promise.resolve();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const current = prior.then(() => gate);
+    this.tails.set(providerOperationId, current);
+    await prior;
+    try {
+      return await operation();
+    } finally {
+      release();
+      if (this.tails.get(providerOperationId) === current) this.tails.delete(providerOperationId);
     }
   }
 }
@@ -253,6 +322,22 @@ function appendEvent(
   return { ...record, events: [...record.events, event] };
 }
 
+function mergeNativeIdentity(
+  current: ChatGptBrowserProviderV1NativeIdentity,
+  incoming: ChatGptBrowserProviderV1NativeIdentity,
+): ChatGptBrowserProviderV1NativeIdentity {
+  for (const key of ["conversationId", "userMessageId", "providerTurnId"] as const) {
+    if (
+      current[key] !== undefined &&
+      incoming[key] !== undefined &&
+      current[key] !== incoming[key]
+    ) {
+      throw new Error(`provider_native_identity_changed:${key}`);
+    }
+  }
+  return { ...current, ...incoming };
+}
+
 function terminalEvent(record: DurableOperation) {
   return record.events.findLast((event) => event.payload.type === "operation.terminal");
 }
@@ -271,15 +356,18 @@ async function syncObservation(
   observation: ChatGptBrowserProviderBrowserObservation,
   settlement: ChatGptBrowserProviderSettlementPort,
 ): Promise<DurableOperation> {
-  if (observation.providerOperationId !== record.providerOperationId) throw new Error("provider_operation_mismatch");
+  if (observation.providerOperationId !== record.providerOperationId)
+    throw new Error("provider_operation_mismatch");
   let next: DurableOperation = {
     ...record,
-    nativeIdentity: { ...record.nativeIdentity, ...observation.nativeIdentity },
-    state: stateRank[observation.state] > stateRank[record.state] ? observation.state : record.state,
+    nativeIdentity: mergeNativeIdentity(record.nativeIdentity, observation.nativeIdentity),
+    state:
+      stateRank[observation.state] > stateRank[record.state] ? observation.state : record.state,
   };
 
   if (observation.finalText !== undefined) {
-    if (next.finalText !== undefined && next.finalText !== observation.finalText) throw new Error("provider_final_changed");
+    if (next.finalText !== undefined && next.finalText !== observation.finalText)
+      throw new Error("provider_final_changed");
     next = { ...next, finalText: observation.finalText };
     if (!finalEvent(next)) {
       next = appendEvent(next, {
@@ -290,7 +378,10 @@ async function syncObservation(
     }
   }
 
-  if ((observation.state === "terminal" || observation.state === "drained") && !observation.terminalStatus) {
+  if (
+    (observation.state === "terminal" || observation.state === "drained") &&
+    !observation.terminalStatus
+  ) {
     throw new Error("provider_terminal_missing");
   }
   if (observation.terminalStatus && !terminalEvent(next)) {
@@ -299,8 +390,10 @@ async function syncObservation(
 
   if (observation.state === "drained" && !drainedEvent(next)) {
     const terminal = terminalEvent(next);
-    if (!terminal || terminal.payload.type !== "operation.terminal") throw new Error("provider_drain_without_terminal");
-    if (terminal.payload.status === "completed" && !finalEvent(next)) throw new Error("provider_drain_without_final");
+    if (!terminal || terminal.payload.type !== "operation.terminal")
+      throw new Error("provider_drain_without_terminal");
+    if (terminal.payload.status === "completed" && !finalEvent(next))
+      throw new Error("provider_drain_without_final");
     await settlement.settleBeforeDrain({
       providerOperationId: record.providerOperationId as ChatGptBrowserProviderOperationId,
       nativeIdentity: next.nativeIdentity,
@@ -318,10 +411,14 @@ function snapshot(record: DurableOperation): ChatGptBrowserProviderV1OperationSn
   const highWater = ChatGptBrowserProviderV1EventSequence.make(record.events.at(-1)?.sequence ?? 0);
   const terminal = terminalEvent(record);
   const drained = drainedEvent(record);
-  if (drained?.payload.type === "operation.drained" && terminal?.payload.type === "operation.terminal") {
+  if (
+    drained?.payload.type === "operation.drained" &&
+    terminal?.payload.type === "operation.terminal"
+  ) {
     return {
       providerOperationId: record.providerOperationId as ChatGptBrowserProviderOperationId,
-      providerSessionId: record.providerSessionId as ChatGptBrowserProviderV1OperationSnapshot["providerSessionId"],
+      providerSessionId:
+        record.providerSessionId as ChatGptBrowserProviderV1OperationSnapshot["providerSessionId"],
       nativeIdentity: record.nativeIdentity,
       highWater,
       state: "drained",
@@ -334,7 +431,8 @@ function snapshot(record: DurableOperation): ChatGptBrowserProviderV1OperationSn
   if (terminal?.payload.type === "operation.terminal") {
     return {
       providerOperationId: record.providerOperationId as ChatGptBrowserProviderOperationId,
-      providerSessionId: record.providerSessionId as ChatGptBrowserProviderV1OperationSnapshot["providerSessionId"],
+      providerSessionId:
+        record.providerSessionId as ChatGptBrowserProviderV1OperationSnapshot["providerSessionId"],
       nativeIdentity: record.nativeIdentity,
       highWater,
       state: "terminal",
@@ -345,7 +443,8 @@ function snapshot(record: DurableOperation): ChatGptBrowserProviderV1OperationSn
   }
   return {
     providerOperationId: record.providerOperationId as ChatGptBrowserProviderOperationId,
-    providerSessionId: record.providerSessionId as ChatGptBrowserProviderV1OperationSnapshot["providerSessionId"],
+    providerSessionId:
+      record.providerSessionId as ChatGptBrowserProviderV1OperationSnapshot["providerSessionId"],
     nativeIdentity: record.nativeIdentity,
     highWater,
     state: record.state === "drained" || record.state === "terminal" ? "running" : record.state,
@@ -354,20 +453,29 @@ function snapshot(record: DurableOperation): ChatGptBrowserProviderV1OperationSn
 
 function finalChunk(record: DurableOperation, offset: number, limit: number) {
   const text = record.finalText;
-  if (text === undefined || !finalEvent(record)) throw providerFailure("invalid_state", "Final content is not complete yet.", true);
-  if (offset < 0 || offset > text.length) throw providerFailure("invalid_state", "Final content offset is outside the result.");
+  if (text === undefined || !finalEvent(record))
+    throw providerFailure("invalid_state", "Final content is not complete yet.", true);
+  if (offset < 0 || offset > text.length)
+    throw providerFailure("invalid_state", "Final content offset is outside the result.");
   if (offset > 0 && offset < text.length) {
     const current = text.charCodeAt(offset);
     const previous = text.charCodeAt(offset - 1);
     if (current >= 0xdc00 && current <= 0xdfff && previous >= 0xd800 && previous <= 0xdbff) {
-      throw providerFailure("invalid_state", "Final content offset splits a UTF-16 surrogate pair.");
+      throw providerFailure(
+        "invalid_state",
+        "Final content offset splits a UTF-16 surrogate pair.",
+      );
     }
   }
-  let end = Math.min(text.length, offset + Math.min(limit, CHATGPT_BROWSER_PROVIDER_V1_FINAL_CONTENT_MAX_UTF16));
+  let end = Math.min(
+    text.length,
+    offset + Math.min(limit, CHATGPT_BROWSER_PROVIDER_V1_FINAL_CONTENT_MAX_UTF16),
+  );
   if (end > offset && end < text.length) {
     const previous = text.charCodeAt(end - 1);
     const current = text.charCodeAt(end);
-    if (previous >= 0xd800 && previous <= 0xdbff && current >= 0xdc00 && current <= 0xdfff) end -= 1;
+    if (previous >= 0xd800 && previous <= 0xdbff && current >= 0xdc00 && current <= 0xdfff)
+      end -= 1;
   }
   return {
     type: "assistant.final_chunk" as const,
@@ -388,116 +496,319 @@ function interruptible<A>(
     const controller = new AbortController();
     void run(controller.signal).then(
       (value) => resume(Effect.succeed(value)),
-      (cause) => resume(Effect.fail(isProviderFailure(cause)
-        ? cause
-        : providerFailure("browser_unavailable", `${operation} failed.`, true))),
+      (cause) =>
+        resume(
+          Effect.fail(
+            isProviderFailure(cause)
+              ? cause
+              : providerFailure(
+                  "browser_unavailable",
+                  `${operation} failed${cause instanceof Error ? `: ${cause.message}` : "."}`,
+                  true,
+                ),
+          ),
+        ),
     );
     return Effect.sync(() => controller.abort(new Error(`${operation} interrupted`)));
   });
 }
 
-function makeTransport(input: {
-  readonly wal: ProviderWal;
+export interface DurableChatGptBrowserRuntime {
+  readonly transport: ChatGptBrowserProviderV1Transport;
+  readonly acceptObservation: (
+    observation: ChatGptBrowserProviderBrowserObservation,
+  ) => Promise<void>;
+}
+
+export function makeDurableChatGptBrowserRuntime(input: {
+  readonly stateDirectory: string;
   readonly browser: ChatGptBrowserProviderBrowserSession;
   readonly settlement: ChatGptBrowserProviderSettlementPort;
-}): ChatGptBrowserProviderV1Transport {
-  const { wal, browser, settlement } = input;
+}): DurableChatGptBrowserRuntime {
+  const wal = new ProviderWal(input.stateDirectory);
+  const { browser, settlement } = input;
+  const serial = new OperationSerial();
+
+  const priorConversation = async (
+    providerSessionId: string,
+    providerOperationId: string,
+  ): Promise<string | undefined> => {
+    const conversations = new Set(
+      (await wal.all())
+        .filter(
+          (record) =>
+            record.providerSessionId === providerSessionId &&
+            record.providerOperationId !== providerOperationId &&
+            record.nativeIdentity.conversationId,
+        )
+        .map((record) => record.nativeIdentity.conversationId!),
+    );
+    if (conversations.size > 1) {
+      throw providerFailure(
+        "invalid_state",
+        "Provider session maps to multiple ChatGPT conversations.",
+      );
+    }
+    return conversations.values().next().value;
+  };
 
   const loadAndSync = async (
     providerOperationId: ChatGptBrowserProviderOperationId,
     signal: AbortSignal,
   ): Promise<DurableOperation> => {
-    const record = await wal.read(providerOperationId);
-    if (!record) throw providerFailure("operation_unknown", "Provider operation is unknown.");
     const observed = await browser.queryExact(providerOperationId, signal);
-    return observed ? syncObservation(wal, record, observed, settlement) : record;
+    return serial.run(providerOperationId, async () => {
+      const record = await wal.read(providerOperationId);
+      if (!record) {
+        if (observed) {
+          throw providerFailure(
+            "invalid_state",
+            "Browser still owns the exact operation but its durable provider WAL is missing.",
+          );
+        }
+        throw providerFailure("operation_unknown", "Provider operation is unknown.");
+      }
+      return observed ? syncObservation(wal, record, observed, settlement) : record;
+    });
   };
 
-  return {
-    identity: Effect.succeed(browser.identity),
-    send: (request) => interruptible("operation.send", async (signal) => {
-      let record = await wal.read(request.providerOperationId);
-      if (record) {
-        if (record.providerSessionId !== request.providerSessionId || record.text !== request.text) {
-          throw providerFailure("operation_conflict", "Provider operation id belongs to different input.");
+  const waitForObservedChange = async (
+    providerOperationId: ChatGptBrowserProviderOperationId,
+    current: DurableOperation,
+    signal: AbortSignal,
+  ): Promise<void> => {
+    const controller = new AbortController();
+    const abort = () => controller.abort(signal.reason);
+    signal.addEventListener("abort", abort, { once: true });
+    const waiting = browser.waitForChange(providerOperationId, controller.signal);
+    try {
+      // Subscribe first, then close the read/subscribe race with one exact reread. A browser update
+      // that landed after loadAndSync but before waitForChange must not strand replay indefinitely.
+      const observed = await browser.queryExact(providerOperationId, signal);
+      if (observed) {
+        const terminal = terminalEvent(current);
+        const terminalStatus =
+          terminal?.payload.type === "operation.terminal" ? terminal.payload.status : undefined;
+        const changed =
+          observed.state !== current.state ||
+          observed.terminalStatus !== terminalStatus ||
+          observed.finalText !== current.finalText ||
+          JSON.stringify(observed.nativeIdentity) !== JSON.stringify(current.nativeIdentity);
+        if (changed) {
+          controller.abort(new Error("provider observation already changed"));
+          await waiting.catch(() => undefined);
+          return;
         }
-        const observed = await browser.queryExact(request.providerOperationId, signal);
-        if (observed) record = await syncObservation(wal, record, observed, settlement);
-        else if (record.dispatchState === "prepared") {
-          record = { ...record, dispatchState: "dispatched" };
-          await wal.write(record);
-          record = await syncObservation(wal, record, await browser.sendExact(request, signal), settlement);
-        } else {
-          throw providerFailure("invalid_state", "Exact provider send is dispatched but browser ownership is ambiguous.", true);
-        }
-      } else {
-        const active = (await wal.all()).find(candidate =>
-          candidate.providerSessionId === request.providerSessionId && !terminalStates.has(candidate.state));
-        if (active) throw providerFailure("operation_conflict", "Another operation is already active for this provider session.");
-        record = {
-          schemaVersion: 1,
-          providerOperationId: request.providerOperationId,
-          providerSessionId: request.providerSessionId,
-          text: request.text,
-          textHash: sha256(request.text),
-          dispatchState: "prepared",
-          state: "claimed",
-          nativeIdentity: {},
-          events: [],
-        };
-        await wal.write(record);
-        record = { ...record, dispatchState: "dispatched" };
-        await wal.write(record);
-        record = await syncObservation(wal, record, await browser.sendExact(request, signal), settlement);
       }
-      const current = snapshot(record);
-      return {
-        type: "operation.send_receipt",
-        providerOperationId: current.providerOperationId,
-        providerSessionId: current.providerSessionId,
-        state: current.state === "unknown" ? "claimed" : current.state,
-        nativeIdentity: current.nativeIdentity,
-        highWater: current.highWater,
-      };
-    }),
-    queryOperation: (request) => interruptible("operation.query", async (signal) =>
-      snapshot(await loadAndSync(request.providerOperationId, signal))),
-    replay: (request) => interruptible("events.replay", async (signal) => {
-      for (;;) {
-        const record = await loadAndSync(request.providerOperationId, signal);
-        const highWater = record.events.at(-1)?.sequence ?? 0;
-        if (request.after > highWater) throw providerFailure("invalid_state", "Replay cursor is ahead of provider high-water.");
-        const events = record.events.filter((event) => event.sequence > request.after);
-        if (events.length > 0 || terminalStates.has(record.state)) {
-          return {
-            providerOperationId: request.providerOperationId,
-            events,
-            highWater: ChatGptBrowserProviderV1EventSequence.make(highWater),
-          };
-        }
-        await browser.waitForChange(request.providerOperationId, signal);
-      }
-    }),
-    cancel: (request) => interruptible("operation.cancel", async (signal) => {
-      let record = await wal.read(request.providerOperationId);
-      if (!record) throw providerFailure("operation_unknown", "Provider operation is unknown.");
-      if (record.state === "terminal" || record.state === "drained") return snapshot(record);
-      if (record.dispatchState === "prepared") {
-        record = appendEvent(record, { type: "operation.terminal", status: "cancelled" });
-        const terminal = terminalEvent(record)!;
-        record = appendEvent(record, { type: "operation.drained", terminalSequence: terminal.sequence });
-        record = { ...record, state: "drained" };
-        await wal.write(record);
-        return snapshot(record);
-      }
-      record = await syncObservation(wal, record, await browser.cancelExact(request.providerOperationId, signal), settlement);
-      return snapshot(record);
-    }),
-    readFinalContent: (request) => interruptible("assistant.read_final", async (signal) => {
-      const record = await loadAndSync(request.providerOperationId, signal);
-      return finalChunk(record, request.offset, request.limit);
-    }),
+      await waiting;
+    } finally {
+      signal.removeEventListener("abort", abort);
+      controller.abort();
+    }
   };
+
+  const transport: ChatGptBrowserProviderV1Transport = {
+    identity: Effect.succeed(browser.identity),
+    send: (request) =>
+      interruptible("operation.send", async (signal) =>
+        serial.run(request.providerOperationId, async () => {
+          await wal.init();
+          let record = await wal.read(request.providerOperationId);
+          if (record) {
+            if (
+              record.providerSessionId !== request.providerSessionId ||
+              record.text !== request.text
+            ) {
+              throw providerFailure(
+                "operation_conflict",
+                "Provider operation id belongs to different input.",
+              );
+            }
+            const observed = await browser.queryExact(request.providerOperationId, signal);
+            if (observed) {
+              record = await syncObservation(wal, record, observed, settlement);
+              // A broker process restart can recover exact browser ownership from the extension while
+              // losing only its volatile prompt copy. Re-stage the same immutable operation payload;
+              // sendExact is the broker staging primitive and never clicks Send by itself.
+              if (record.state === "claimed") {
+                const conversationId =
+                  record.nativeIdentity.conversationId ??
+                  (await priorConversation(request.providerSessionId, request.providerOperationId));
+                record = await syncObservation(
+                  wal,
+                  record,
+                  await browser.sendExact(
+                    request,
+                    signal,
+                    conversationId ? { conversationId } : undefined,
+                  ),
+                  settlement,
+                );
+              }
+            } else if (record.dispatchState === "prepared") {
+              record = { ...record, dispatchState: "dispatched" };
+              await wal.write(record);
+              const conversationId =
+                record.nativeIdentity.conversationId ??
+                (await priorConversation(request.providerSessionId, request.providerOperationId));
+              record = await syncObservation(
+                wal,
+                record,
+                await browser.sendExact(
+                  request,
+                  signal,
+                  conversationId ? { conversationId } : undefined,
+                ),
+                settlement,
+              );
+            } else {
+              throw providerFailure(
+                "invalid_state",
+                "Exact provider send is dispatched but browser ownership is ambiguous.",
+                true,
+              );
+            }
+          } else {
+            const observed = await browser.queryExact(request.providerOperationId, signal);
+            if (observed) {
+              throw providerFailure(
+                "invalid_state",
+                "Browser already owns the exact operation but its durable provider WAL is missing.",
+              );
+            }
+            const active = (await wal.all()).find(
+              (candidate) =>
+                candidate.providerSessionId === request.providerSessionId &&
+                !terminalStates.has(candidate.state),
+            );
+            if (active)
+              throw providerFailure(
+                "operation_conflict",
+                "Another operation is already active for this provider session.",
+              );
+            record = {
+              schemaVersion: 1,
+              providerOperationId: request.providerOperationId,
+              providerSessionId: request.providerSessionId,
+              text: request.text,
+              textHash: sha256(request.text),
+              dispatchState: "prepared",
+              state: "claimed",
+              nativeIdentity: {},
+              events: [],
+            };
+            await wal.write(record);
+            record = { ...record, dispatchState: "dispatched" };
+            await wal.write(record);
+            const conversationId = await priorConversation(
+              request.providerSessionId,
+              request.providerOperationId,
+            );
+            record = await syncObservation(
+              wal,
+              record,
+              await browser.sendExact(
+                request,
+                signal,
+                conversationId ? { conversationId } : undefined,
+              ),
+              settlement,
+            );
+          }
+          const current = snapshot(record);
+          return {
+            type: "operation.send_receipt",
+            providerOperationId: current.providerOperationId,
+            providerSessionId: current.providerSessionId,
+            state: current.state === "unknown" ? "claimed" : current.state,
+            nativeIdentity: current.nativeIdentity,
+            highWater: current.highWater,
+          };
+        }),
+      ),
+    queryOperation: (request) =>
+      interruptible("operation.query", async (signal) =>
+        snapshot(await loadAndSync(request.providerOperationId, signal)),
+      ),
+    replay: (request) =>
+      interruptible("events.replay", async (signal) => {
+        for (;;) {
+          const record = await loadAndSync(request.providerOperationId, signal);
+          const highWater = record.events.at(-1)?.sequence ?? 0;
+          if (request.after > highWater)
+            throw providerFailure(
+              "invalid_state",
+              "Replay cursor is ahead of provider high-water.",
+            );
+          const events = record.events.filter((event) => event.sequence > request.after);
+          if (events.length > 0 || terminalStates.has(record.state)) {
+            return {
+              providerOperationId: request.providerOperationId,
+              events,
+              highWater: ChatGptBrowserProviderV1EventSequence.make(highWater),
+            };
+          }
+          await waitForObservedChange(request.providerOperationId, record, signal);
+        }
+      }),
+    cancel: (request) =>
+      interruptible("operation.cancel", async (signal) =>
+        serial.run(request.providerOperationId, async () => {
+          let record = await wal.read(request.providerOperationId);
+          if (!record) {
+            const observed = await browser.queryExact(request.providerOperationId, signal);
+            if (observed) {
+              throw providerFailure(
+                "invalid_state",
+                "Browser still owns the exact operation but its durable provider WAL is missing.",
+              );
+            }
+            throw providerFailure("operation_unknown", "Provider operation is unknown.");
+          }
+          if (record.state === "terminal" || record.state === "drained") return snapshot(record);
+          if (record.dispatchState === "prepared") {
+            record = appendEvent(record, { type: "operation.terminal", status: "cancelled" });
+            const terminal = terminalEvent(record)!;
+            record = appendEvent(record, {
+              type: "operation.drained",
+              terminalSequence: terminal.sequence,
+            });
+            record = { ...record, state: "drained" };
+            await wal.write(record);
+            return snapshot(record);
+          }
+          record = await syncObservation(
+            wal,
+            record,
+            await browser.cancelExact(request.providerOperationId, signal),
+            settlement,
+          );
+          return snapshot(record);
+        }),
+      ),
+    readFinalContent: (request) =>
+      interruptible("assistant.read_final", async (signal) => {
+        const record = await loadAndSync(request.providerOperationId, signal);
+        return finalChunk(record, request.offset, request.limit);
+      }),
+  };
+
+  const acceptObservation = (observation: ChatGptBrowserProviderBrowserObservation) =>
+    serial.run(observation.providerOperationId, async () => {
+      const record = await wal.read(observation.providerOperationId);
+      if (!record) throw new Error("provider_wal_missing_for_browser_observation");
+      await syncObservation(wal, record, observation, settlement);
+    });
+
+  return { transport, acceptObservation };
+}
+
+export function makeDurableChatGptBrowserTransport(input: {
+  readonly stateDirectory: string;
+  readonly browser: ChatGptBrowserProviderBrowserSession;
+  readonly settlement: ChatGptBrowserProviderSettlementPort;
+}): ChatGptBrowserProviderV1Transport {
+  return makeDurableChatGptBrowserRuntime(input).transport;
 }
 
 /**
@@ -505,17 +816,21 @@ function makeTransport(input: {
  * delegates only browser execution, secure storage, managed assets and T3 effect settlement to
  * injected ports. No CoS desktop process, project queue, Goal/Loop or product scheduler is present.
  */
-export function makeScopedChatGptBrowserHost(options: ScopedChatGptBrowserHostOptions): ChatGptBrowserHostPort {
+export function makeScopedChatGptBrowserHost(
+  options: ScopedChatGptBrowserHostOptions,
+): ChatGptBrowserHostPort {
   return {
     open: Effect.tryPromise({
       try: async () => {
         const assets = await options.assets.prepare();
-        const wal = new ProviderWal(assets.stateDirectory);
-        await wal.init();
         const browser = await options.browser.open({ assets, secrets: options.secrets });
         return {
           identity: assets.hostIdentity,
-          transport: makeTransport({ wal, browser, settlement: options.settlement }),
+          transport: makeDurableChatGptBrowserTransport({
+            stateDirectory: assets.stateDirectory,
+            browser,
+            settlement: options.settlement,
+          }),
           close: Effect.tryPromise({
             try: () => browser.close(),
             catch: (cause) => hostFailure("close", cause),

@@ -42,6 +42,7 @@ import type { PendingOrchestrationEffectV2 } from "./EffectOutbox.ts";
 import * as EventSink from "./EventSink.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
+import { registerChatGptBrowserProviderEventCheckpoint } from "@t3tools/provider-chatgpt-browser/server";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import * as ProviderEventIngestor from "./ProviderEventIngestor.ts";
 import * as McpAppModelContext from "../mcpApps/McpAppModelContext.ts";
@@ -2609,6 +2610,54 @@ it.effect("does not interrupt an ended provider when its terminal write fails", 
     assert.equal(yield* Ref.get(interrupts), 0);
     assert.deepEqual(observed, ["run:failed", "pull-requests-refreshed"]);
   }),
+);
+
+it.effect(
+  "does not advance a ChatGPT browser provider checkpoint when normalized projection fails",
+  () =>
+    Effect.gen(function* () {
+      const key = "chatgpt-checkpoint:projection-failure";
+      const ids = backgroundScenarioIds(key);
+      const occurredAt = yield* DateTime.now;
+      const checkpointed = yield* Ref.make(0);
+      const event = {
+        type: "provider_turn.updated" as const,
+        driver,
+        providerTurn: {
+          id: ids.rootProviderTurnId,
+          providerThreadId: ids.providerThreadId,
+          nodeId: ids.rootNodeId,
+          runAttemptId: ids.attemptId,
+          nativeTurnRef: null,
+          ordinal: 1,
+          status: "running" as const,
+          startedAt: occurredAt,
+          completedAt: null,
+        },
+      };
+      registerChatGptBrowserProviderEventCheckpoint(
+        event,
+        Ref.update(checkpointed, (count) => count + 1),
+      );
+      yield* captureRootRunTermination({
+        key,
+        initialProviderTurnId: null,
+        shouldFinalizeRun: () => Effect.succeed(true),
+        events: () => Stream.make(event),
+        ingestNormalized: () =>
+          Effect.fail(
+            new ProviderEventIngestor.ProviderEventPublishError({
+              providerSessionId: ProviderSessionId.make(
+                "session:chatgpt-checkpoint-projection-failure",
+              ),
+              eventCount: 1,
+              cause: new Error("simulated projection write failure"),
+            }),
+          ),
+      });
+
+      assert.equal(yield* Ref.get(checkpointed), 0);
+    }),
 );
 
 it.effect("does not interrupt a provider when ingestion fails before the root turn is known", () =>

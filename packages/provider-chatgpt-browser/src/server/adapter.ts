@@ -682,16 +682,31 @@ export const makeChatGptBrowserAdapterV2 = Effect.fn("makeChatGptBrowserAdapterV
         }
 
         const operationId = chatGptBrowserProviderOperationIdForAttempt(args.attemptId);
+        const existingRecovery = yield* operationStore.get(args.attemptId);
         const recovery = yield* operationStore.prepare({
           attemptId: args.attemptId,
           providerOperationId: operationId,
           providerSessionId: input.providerSessionId,
           providerThreadId: args.providerThread.id,
         });
-        const snapshot = yield* transport.queryOperation({
-          type: "operation.query",
-          providerOperationId: operationId,
-        });
+        const snapshot = yield* transport
+          .queryOperation({
+            type: "operation.query",
+            providerOperationId: operationId,
+          })
+          .pipe(
+            Effect.catchIf(
+              (error) => error.code === "operation_unknown",
+              () =>
+                Effect.succeed({
+                  providerOperationId: operationId,
+                  providerSessionId: input.providerSessionId,
+                  nativeIdentity: {},
+                  highWater: ChatGptBrowserProviderV1EventSequence.make(0),
+                  state: "unknown" as const,
+                }),
+            ),
+          );
         if (snapshot.providerOperationId !== operationId) {
           return yield* protocolError("ChatGPT Browser query returned a different operation");
         }
@@ -705,6 +720,11 @@ export const makeChatGptBrowserAdapterV2 = Effect.fn("makeChatGptBrowserAdapterV
           if (recovery.cancelRequested) {
             return yield* protocolError(
               "ChatGPT Browser operation is unknown after durable cancellation was requested; recovery will not create new browser work",
+            );
+          }
+          if (existingRecovery !== undefined) {
+            return yield* protocolError(
+              "ChatGPT Browser exact operation is unknown during recovery; missing provider state is not proof browser work never started",
             );
           }
           const receipt = yield* transport.send({

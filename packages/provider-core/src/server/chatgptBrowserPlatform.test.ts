@@ -253,6 +253,32 @@ $result | ConvertTo-Json -Depth 4 -Compress
       ),
   );
 
+  it.effect.skipIf(process.platform !== "win32")(
+    "reopens already-secured secret storage from a fresh platform instance",
+    () =>
+      withTempRoot((root) =>
+        Effect.gen(function* () {
+          const first = makeWindowsChatGptBrowserPlatform({ rootDirectory: root });
+          yield* first.writeSecret({
+            key: "browser-pairing",
+            value: new TextEncoder().encode("first"),
+          });
+
+          const reopened = makeWindowsChatGptBrowserPlatform({ rootDirectory: root });
+          expect(new TextDecoder().decode((yield* reopened.readSecret("browser-pairing"))!)).toBe(
+            "first",
+          );
+          yield* reopened.writeSecret({
+            key: "browser-pairing",
+            value: new TextEncoder().encode("second"),
+          });
+          expect(new TextDecoder().decode((yield* reopened.readSecret("browser-pairing"))!)).toBe(
+            "second",
+          );
+        }),
+      ),
+  );
+
   it.effect("launches the dedicated profile and stops only the captured process tree", () =>
     withTempRoot((root) =>
       Effect.gen(function* () {

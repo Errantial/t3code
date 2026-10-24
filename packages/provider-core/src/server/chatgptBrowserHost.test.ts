@@ -8,6 +8,7 @@ import { describe, expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 
 import {
+  chatGptBrowserManagedExtensionBuildId,
   makeChatGptBrowserHost,
   type ChatGptBrowserManagedReleaseSource,
 } from "./chatgptBrowserHost.ts";
@@ -182,13 +183,20 @@ describe("ChatGPT managed browser host", () => {
           const release = yield* writeReleaseSource({ base, providerReleaseVersion: "provider-1" });
           let validationProfile = "";
           let validationExtension = "";
+          let validationBuildStamp = "";
           const host = makeChatGptBrowserHost({
             platform: fixture.platform,
             release,
             validateCandidate: (input) =>
-              Effect.sync(() => {
+              fsEffect("test-validation-build-stamp", async () => {
                 validationProfile = input.profileDirectory;
                 validationExtension = input.extensionRoot;
+                validationBuildStamp = (
+                  await NodeFs.readFile(
+                    NodePath.join(input.extensionRoot, "build-stamp.txt"),
+                    "utf8",
+                  )
+                ).trim();
               }),
             connectTransport: () => Effect.succeed(unusedTransport),
           });
@@ -205,6 +213,15 @@ describe("ChatGPT managed browser host", () => {
           expect(fixture.launches[1]?.args).toEqual(["--provider-runtime"]);
           expect(yield* readText(NodePath.join(fixture.paths.extensionRoot, "background.js"))).toBe(
             "provider provider-1",
+          );
+          expect(
+            (yield* readText(NodePath.join(fixture.paths.extensionRoot, "build-stamp.txt"))).trim(),
+          ).toBe(chatGptBrowserManagedExtensionBuildId(release.identity));
+          expect(
+            yield* readText(NodePath.join(fixture.paths.extensionRoot, "managed-build.js")),
+          ).toContain(JSON.stringify(chatGptBrowserManagedExtensionBuildId(release.identity)));
+          expect(validationBuildStamp).toBe(
+            chatGptBrowserManagedExtensionBuildId(release.identity),
           );
           expect(yield* statPath(fixture.paths.profileDirectory)).toBeDefined();
           expect(yield* pathExists(NodePath.dirname(validationProfile))).toBe(false);
@@ -268,6 +285,9 @@ describe("ChatGPT managed browser host", () => {
           expect(yield* readText(NodePath.join(fixture.paths.extensionRoot, "background.js"))).toBe(
             "provider provider-2",
           );
+          expect(
+            (yield* readText(NodePath.join(fixture.paths.extensionRoot, "build-stamp.txt"))).trim(),
+          ).toBe(chatGptBrowserManagedExtensionBuildId(release2.identity));
 
           const activated = (yield* readPointer(fixture.paths.activeProviderPointer)) as {
             active: { identity: { providerReleaseVersion: string } };
@@ -281,12 +301,64 @@ describe("ChatGPT managed browser host", () => {
           expect(yield* readText(NodePath.join(fixture.paths.extensionRoot, "background.js"))).toBe(
             "provider provider-1",
           );
+          expect(
+            (yield* readText(NodePath.join(fixture.paths.extensionRoot, "build-stamp.txt"))).trim(),
+          ).toBe(chatGptBrowserManagedExtensionBuildId(release1.identity));
           const rolledBack = (yield* readPointer(fixture.paths.activeProviderPointer)) as {
             active: { identity: { providerReleaseVersion: string } };
             previous: { identity: { providerReleaseVersion: string } };
           };
           expect(rolledBack.active.identity.providerReleaseVersion).toBe("provider-1");
           expect(rolledBack.previous.identity.providerReleaseVersion).toBe("provider-2");
+        }),
+      ),
+  );
+
+  it.effect(
+    "refreshes the generated extension build identity when release identity changes but source bytes do not",
+    () =>
+      withTempRoot((base) =>
+        Effect.gen(function* () {
+          const fixture = makePlatform(base);
+          const source = { extensionVersion: "1.0.0", background: "same provider bytes" } as const;
+          const release1 = yield* writeReleaseSource({
+            base,
+            providerReleaseVersion: "provider-build-1",
+            ...source,
+          });
+          yield* makeChatGptBrowserHost({
+            platform: fixture.platform,
+            release: release1,
+            validateCandidate: () => Effect.void,
+            connectTransport: () => Effect.succeed(unusedTransport),
+          }).prepareRelease;
+          const publishedInode = (yield* statPath(fixture.paths.extensionRoot)).ino;
+          const firstBuild = chatGptBrowserManagedExtensionBuildId(release1.identity);
+          expect(
+            (yield* readText(NodePath.join(fixture.paths.extensionRoot, "build-stamp.txt"))).trim(),
+          ).toBe(firstBuild);
+
+          const release2 = yield* writeReleaseSource({
+            base,
+            providerReleaseVersion: "provider-build-2",
+            ...source,
+          });
+          yield* makeChatGptBrowserHost({
+            platform: fixture.platform,
+            release: release2,
+            validateCandidate: () => Effect.void,
+            connectTransport: () => Effect.succeed(unusedTransport),
+          }).prepareRelease;
+
+          const secondBuild = chatGptBrowserManagedExtensionBuildId(release2.identity);
+          expect(secondBuild).not.toBe(firstBuild);
+          expect((yield* statPath(fixture.paths.extensionRoot)).ino).toBe(publishedInode);
+          expect(
+            (yield* readText(NodePath.join(fixture.paths.extensionRoot, "build-stamp.txt"))).trim(),
+          ).toBe(secondBuild);
+          expect(
+            yield* readText(NodePath.join(fixture.paths.extensionRoot, "managed-build.js")),
+          ).toContain(JSON.stringify(secondBuild));
         }),
       ),
   );

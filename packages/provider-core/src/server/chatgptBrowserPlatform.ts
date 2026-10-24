@@ -307,11 +307,27 @@ $targetPath = __TARGET_PATH__
 $kind = __TARGET_KIND__
 $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
 if ($kind -eq 'directory') {
-  $acl = [System.Security.AccessControl.DirectorySecurity]::new()
   $inheritance = [System.Security.AccessControl.InheritanceFlags]'ContainerInherit,ObjectInherit'
 } else {
-  $acl = [System.Security.AccessControl.FileSecurity]::new()
   $inheritance = [System.Security.AccessControl.InheritanceFlags]::None
+}
+$current = Get-Acl -LiteralPath $targetPath
+$currentRules = @($current.Access)
+$ownerSid = $current.GetOwner([System.Security.Principal.SecurityIdentifier])
+$alreadySecure = $current.AreAccessRulesProtected -and
+  $ownerSid.Value -eq $identity.User.Value -and
+  $currentRules.Count -eq 1 -and
+  -not $currentRules[0].IsInherited -and
+  $currentRules[0].AccessControlType -eq [System.Security.AccessControl.AccessControlType]::Allow -and
+  $currentRules[0].FileSystemRights -eq [System.Security.AccessControl.FileSystemRights]::FullControl -and
+  $currentRules[0].InheritanceFlags -eq $inheritance -and
+  $currentRules[0].PropagationFlags -eq [System.Security.AccessControl.PropagationFlags]::None -and
+  $currentRules[0].IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value -eq $identity.User.Value
+if ($alreadySecure) { exit 0 }
+if ($kind -eq 'directory') {
+  $acl = [System.Security.AccessControl.DirectorySecurity]::new()
+} else {
+  $acl = [System.Security.AccessControl.FileSecurity]::new()
 }
 $acl.SetAccessRuleProtection($true, $false)
 $acl.SetOwner($identity.User)
@@ -425,7 +441,12 @@ async function stopWindowsBrowserTree(
     "/T",
     "/F",
   ]);
-  if (forced.exitCode !== 0 && browserProcess.isRunning()) {
+  if (forced.exitCode !== 0) {
+    // `taskkill` can lose a race with Chromium's own shutdown: Windows reports a non-zero
+    // "process not found" result while Node has not received the child exit event yet. Give the
+    // captured process handle the same bounded exit grace before treating that result as fatal.
+    if (await waitForExit(browserProcess, runtime, BROWSER_STOP_GRACE_MS)) return;
+    if (!browserProcess.isRunning()) return;
     throw new Error(`taskkill failed for managed browser pid ${browserProcess.pid}`);
   }
   if (

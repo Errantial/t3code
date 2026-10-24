@@ -22,7 +22,23 @@ import {
 const ACTIVE_POINTER_VERSION = 1 as const;
 const INSTALL_SENTINEL = ".t3-chatgpt-browser-install.json";
 const EXTENSION_FINGERPRINT = ".t3-chatgpt-browser-source";
-const EXTENSION_PUBLISH_LAST = new Set(["manifest.json", EXTENSION_FINGERPRINT]);
+const EXTENSION_BUILD_STAMP = "build-stamp.txt";
+const EXTENSION_BUILD_MODULE = "managed-build.js";
+const EXTENSION_PUBLISH_LAST = new Set([
+  "manifest.json",
+  EXTENSION_FINGERPRINT,
+  EXTENSION_BUILD_STAMP,
+]);
+
+export function chatGptBrowserManagedExtensionBuildId(
+  identity: ChatGptBrowserHostIdentity,
+): string {
+  return createHash("sha256")
+    .update("t3-chatgpt-browser-extension\0", "utf8")
+    .update(identity.providerReleaseVersion, "utf8")
+    .digest("hex")
+    .slice(0, 12);
+}
 
 export interface ChatGptBrowserManagedReleaseDescriptor {
   readonly identity: ChatGptBrowserHostIdentity;
@@ -398,7 +414,12 @@ async function fingerprintExtensionDirectory(root: string): Promise<string> {
       const relative = relativeDirectory
         ? NodePath.posix.join(relativeDirectory, entry.name)
         : entry.name;
-      if (relative === EXTENSION_FINGERPRINT) continue;
+      if (
+        relative === EXTENSION_FINGERPRINT ||
+        relative === EXTENSION_BUILD_STAMP ||
+        relative === EXTENSION_BUILD_MODULE
+      )
+        continue;
       const absolute = NodePath.join(directory, entry.name);
       if (entry.isDirectory()) {
         hash.update(`d\0${relative}\0`);
@@ -468,6 +489,48 @@ async function replaceExtensionFile(source: string, target: string): Promise<voi
   await NodeFs.rename(temporary, target);
 }
 
+async function writeExtensionBuildStamp(directory: string, buildId: string): Promise<void> {
+  if (!/^[0-9a-f]{12}$/.test(buildId)) throw new Error("Managed extension build id is invalid");
+  const target = NodePath.join(directory, EXTENSION_BUILD_STAMP);
+  const temporary = NodePath.join(
+    directory,
+    `.${EXTENSION_BUILD_STAMP}.t3-next-${process.pid}-${randomUUID()}`,
+  );
+  await NodeFs.writeFile(temporary, `${buildId}\n`, { mode: 0o600 });
+  await NodeFs.rename(temporary, target);
+}
+
+async function writeExtensionBuildModule(directory: string, buildId: string): Promise<void> {
+  if (!/^[0-9a-f]{12}$/.test(buildId)) throw new Error("Managed extension build id is invalid");
+  const target = NodePath.join(directory, EXTENSION_BUILD_MODULE);
+  const temporary = NodePath.join(
+    directory,
+    `.${EXTENSION_BUILD_MODULE}.t3-next-${process.pid}-${randomUUID()}`,
+  );
+  await NodeFs.writeFile(
+    temporary,
+    `export const T3_MANAGED_EXTENSION_BUILD_ID = ${JSON.stringify(buildId)};\n`,
+    { mode: 0o600 },
+  );
+  await NodeFs.rename(temporary, target);
+}
+
+async function materializedBuildMatches(directory: string, buildId: string): Promise<boolean> {
+  try {
+    const [stamp, module] = await Promise.all([
+      NodeFs.readFile(NodePath.join(directory, EXTENSION_BUILD_STAMP), "utf8"),
+      NodeFs.readFile(NodePath.join(directory, EXTENSION_BUILD_MODULE), "utf8"),
+    ]);
+    return (
+      stamp.trim() === buildId &&
+      module === `export const T3_MANAGED_EXTENSION_BUILD_ID = ${JSON.stringify(buildId)};\n`
+    );
+  } catch (cause) {
+    if ((cause as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw cause;
+  }
+}
+
 async function syncExtensionTreeInPlace(
   source: string,
   target: string,
@@ -482,7 +545,13 @@ async function syncExtensionTreeInPlace(
     (entry) => !root || !EXTENSION_PUBLISH_LAST.has(entry.name),
   );
   const publishLast = root
-    ? sourceEntries.filter((entry) => EXTENSION_PUBLISH_LAST.has(entry.name))
+    ? sourceEntries
+        .filter((entry) => EXTENSION_PUBLISH_LAST.has(entry.name))
+        .sort((left, right) => {
+          const rank = (name: string) =>
+            name === "manifest.json" ? 0 : name === EXTENSION_FINGERPRINT ? 1 : 2;
+          return rank(left.name) - rank(right.name) || left.name.localeCompare(right.name);
+        })
     : [];
 
   const publish = async (entry: (typeof sourceEntries)[number]): Promise<void> => {
@@ -539,6 +608,7 @@ async function recoverInterruptedExtensionMaterialization(
 const materializeStableExtension = (
   source: string,
   stable: string,
+  buildId: string,
 ): Effect.Effect<void, ChatGptBrowserHostError> =>
   Effect.gen(function* () {
     const fingerprint = yield* fingerprintExtension(source);
@@ -553,7 +623,11 @@ const materializeStableExtension = (
         (await validExtension(stable)) &&
         (await materializedFingerprint(stable)) === fingerprint
       ) {
-        if ((await fingerprintExtensionDirectory(stable)) === fingerprint) return;
+        if (
+          (await fingerprintExtensionDirectory(stable)) === fingerprint &&
+          (await materializedBuildMatches(stable, buildId))
+        )
+          return;
       }
 
       await NodeFs.rm(stage, { recursive: true, force: true });
@@ -561,6 +635,8 @@ const materializeStableExtension = (
         await NodeFs.cp(source, stage, { recursive: true, force: true });
         if (!(await validExtension(stage)))
           throw new Error("Staged extension is missing manifest.json");
+        await writeExtensionBuildModule(stage, buildId);
+        await writeExtensionBuildStamp(stage, buildId);
         await NodeFs.writeFile(NodePath.join(stage, EXTENSION_FINGERPRINT), `${fingerprint}\n`, {
           mode: 0o600,
         });
@@ -743,6 +819,9 @@ const makeDisposableValidation = (input: {
           recursive: true,
           force: true,
         });
+        const buildId = chatGptBrowserManagedExtensionBuildId(input.release.identity);
+        await writeExtensionBuildModule(disposableExtension, buildId);
+        await writeExtensionBuildStamp(disposableExtension, buildId);
       });
       const process = yield* input.platform.launchBrowser({
         executablePath: input.installed.browserExecutablePath,
@@ -811,7 +890,11 @@ export function makeChatGptBrowserHost(
       const pointer = yield* readPointer(paths);
       if (pointer !== null && descriptorEqual(pointer.active, candidate)) {
         const installed = yield* requireInstalledRelease({ paths, release: candidate });
-        yield* materializeStableExtension(installed.extensionDirectory, paths.extensionRoot);
+        yield* materializeStableExtension(
+          installed.extensionDirectory,
+          paths.extensionRoot,
+          chatGptBrowserManagedExtensionBuildId(candidate.identity),
+        );
         return candidate;
       }
 
@@ -834,7 +917,11 @@ export function makeChatGptBrowserHost(
         installed,
         validateCandidate: options.validateCandidate,
       });
-      yield* materializeStableExtension(installed.extensionDirectory, paths.extensionRoot);
+      yield* materializeStableExtension(
+        installed.extensionDirectory,
+        paths.extensionRoot,
+        chatGptBrowserManagedExtensionBuildId(candidate.identity),
+      );
       yield* writePointer(
         options.platform,
         paths,
@@ -854,7 +941,11 @@ export function makeChatGptBrowserHost(
         return yield* Effect.fail(hostError("rolling-back-browser-revision"));
       }
       const installed = yield* requireInstalledRelease({ paths, release: pointer.previous });
-      yield* materializeStableExtension(installed.extensionDirectory, paths.extensionRoot);
+      yield* materializeStableExtension(
+        installed.extensionDirectory,
+        paths.extensionRoot,
+        chatGptBrowserManagedExtensionBuildId(pointer.previous.identity),
+      );
       yield* writePointer(
         options.platform,
         paths,
@@ -883,7 +974,11 @@ export function makeChatGptBrowserHost(
           validateCandidate: options.validateCandidate,
         });
         const release = descriptorFromSource(options.release);
-        yield* materializeStableExtension(installed.extensionDirectory, paths.extensionRoot);
+        yield* materializeStableExtension(
+          installed.extensionDirectory,
+          paths.extensionRoot,
+          chatGptBrowserManagedExtensionBuildId(release.identity),
+        );
         pointer = pointerForActivation(release, undefined);
         yield* writePointer(options.platform, paths, pointer);
       }
@@ -892,7 +987,11 @@ export function makeChatGptBrowserHost(
         return yield* Effect.fail(hostError("matching-active-platform-target"));
       }
       const installed = yield* requireInstalledRelease({ paths, release: pointer.active });
-      yield* materializeStableExtension(installed.extensionDirectory, paths.extensionRoot);
+      yield* materializeStableExtension(
+        installed.extensionDirectory,
+        paths.extensionRoot,
+        chatGptBrowserManagedExtensionBuildId(pointer.active.identity),
+      );
       yield* tryFs("preparing-browser-profile", () =>
         NodeFs.mkdir(paths.profileDirectory, { recursive: true }),
       );

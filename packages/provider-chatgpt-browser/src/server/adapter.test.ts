@@ -452,6 +452,43 @@ describe("ChatGPT Browser ProviderAdapterV2", () => {
       ),
   );
 
+  it.effect(
+    "does not recreate a previously prepared operation when provider state is unknown",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const attemptId = RunAttemptId.make("attempt-chatgpt-browser-recovery-provider-unknown");
+          const operationId = chatGptBrowserProviderOperationIdForAttempt(attemptId);
+          const operationStore = yield* memoryOperationStore();
+          const fake = makeFakeChatGptBrowserProviderV1Transport({ providerSessionId, events: [] });
+          const runtime = yield* openRuntime({ host: host(fake.transport), operationStore });
+          const providerThread = yield* runtime.ensureThread({
+            threadId,
+            modelSelection: { instanceId, model: "default" },
+            runtimePolicy: {
+              runtimeMode: "full-access",
+              interactionMode: "default",
+              cwd: "/workspace",
+            },
+          });
+          yield* operationStore.prepare({
+            attemptId,
+            providerOperationId: operationId,
+            providerSessionId,
+            providerThreadId: providerThread.id,
+          });
+
+          const started = yield* Effect.exit(
+            runtime.startTurn(turnInput(providerThread, attemptId)),
+          );
+
+          expect(started._tag).toBe("Failure");
+          expect(fake.calls.queriedOperationIds).toEqual([operationId]);
+          expect(fake.calls.sentOperationIds).toEqual([]);
+        }),
+      ),
+  );
+
   it.effect("maps a drained provider failure to a V2 failure item and terminal", () =>
     Effect.scoped(
       Effect.gen(function* () {
