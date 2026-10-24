@@ -20,3 +20,14 @@ export {
   layerUnavailableChatGptBrowserHost,
   unavailableChatGptBrowserHost,
 } from "./server/host.ts";
+export {
+  makeScopedChatGptBrowserHost,
+  type ChatGptBrowserProviderAssets,
+  type ChatGptBrowserProviderAssetsPort,
+  type ChatGptBrowserProviderBrowserObservation,
+  type ChatGptBrowserProviderBrowserPort,
+  type ChatGptBrowserProviderBrowserSession,
+  type ChatGptBrowserProviderSecretsPort,
+  type ChatGptBrowserProviderSettlementPort,
+  type ScopedChatGptBrowserHostOptions,
+} from "./server/runtime.ts";

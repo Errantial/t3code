@@ -1,0 +1,268 @@
+// @effect-diagnostics-next-line nodeBuiltinImport:off -- Test-only temp WAL inspection uses the real Node filesystem.
+import { promises as fs } from "node:fs";
+import { tmpdir } from "node:os";
+// @effect-diagnostics-next-line nodeBuiltinImport:off -- Test-only temporary WAL path composition.
+import path from "node:path";
+
+import { describe, expect, it } from "@effect/vitest";
+import { ProviderSessionId, RunAttemptId } from "@t3tools/contracts";
+import {
+  ChatGptBrowserProviderV1EventSequence,
+  ChatGptBrowserProviderV1ProtocolIdentity,
+  chatGptBrowserProviderOperationIdForAttempt,
+  type ChatGptBrowserProviderOperationId,
+} from "@t3tools/provider-core/server/chatgptBrowserProviderV1";
+import * as Effect from "effect/Effect";
+import * as Schema from "effect/Schema";
+
+import {
+  makeScopedChatGptBrowserHost,
+  type ChatGptBrowserProviderBrowserObservation,
+  type ChatGptBrowserProviderBrowserSession,
+  type ScopedChatGptBrowserHostOptions,
+} from "./runtime.ts";
+
+const providerSessionId = ProviderSessionId.make("provider-session:provider-instance:test:shared");
+const operationId = chatGptBrowserProviderOperationIdForAttempt(RunAttemptId.make("attempt-runtime-test"));
+
+async function tempRoot(): Promise<string> {
+  return fs.realpath(await fs.mkdtemp(path.join(tmpdir(), "t3-chatgpt-browser-runtime-")));
+}
+
+function fakeBrowser() {
+  const observations = new Map<string, ChatGptBrowserProviderBrowserObservation>();
+  const waits = new Map<string, Set<() => void>>();
+  const calls = { send: 0, cancel: 0, close: 0 };
+  let failNextSend = false;
+  const wake = (id: string) => {
+    for (const release of waits.get(id) ?? []) release();
+    waits.delete(id);
+  };
+  const observe = (value: ChatGptBrowserProviderBrowserObservation) => {
+    observations.set(value.providerOperationId, value);
+    wake(value.providerOperationId);
+  };
+  const session: ChatGptBrowserProviderBrowserSession = {
+    identity: Schema.decodeSync(ChatGptBrowserProviderV1ProtocolIdentity)({
+      protocol: "provider-v1",
+      version: 1,
+      providerInstanceId: "provider-instance-test",
+      browserInstanceId: "browser-instance-test",
+      extensionVersion: "extension-test",
+      extensionBuildId: "extension-build-test",
+      ready: true,
+      features: ["provider-v1-durable-authority"],
+    }),
+    sendExact: async (request) => {
+      calls.send += 1;
+      if (failNextSend) {
+        failNextSend = false;
+        throw new Error("lost before exact browser receipt");
+      }
+      const existing = observations.get(request.providerOperationId);
+      if (existing) return existing;
+      const value: ChatGptBrowserProviderBrowserObservation = {
+        providerOperationId: request.providerOperationId,
+        state: "running",
+        nativeIdentity: {
+          conversationId: "conversation-native",
+          userMessageId: "user-message-native",
+          providerTurnId: "provider-turn-native",
+        },
+      };
+      observations.set(request.providerOperationId, value);
+      return value;
+    },
+    queryExact: async (id) => observations.get(id) ?? null,
+    cancelExact: async (id) => {
+      calls.cancel += 1;
+      const current = observations.get(id);
+      if (!current) throw new Error("unknown exact operation");
+      const value: ChatGptBrowserProviderBrowserObservation = {
+        ...current,
+        state: "drained",
+        terminalStatus: "cancelled",
+      };
+      observations.set(id, value);
+      return value;
+    },
+    waitForChange: (id, signal) =>
+      new Promise<void>((resolve, reject) => {
+        if (signal.aborted) return reject(signal.reason);
+        const finish = () => {
+          signal.removeEventListener("abort", aborted);
+          resolve();
+        };
+        const aborted = () => {
+          waits.get(id)?.delete(finish);
+          reject(signal.reason);
+        };
+        signal.addEventListener("abort", aborted, { once: true });
+        const set = waits.get(id) ?? new Set<() => void>();
+        set.add(finish);
+        waits.set(id, set);
+      }),
+    close: async () => {
+      calls.close += 1;
+    },
+  };
+  return { session, observations, observe, calls, failNextSend: () => { failNextSend = true; } };
+}
+
+function options(root: string, browser: ReturnType<typeof fakeBrowser>, settled: Array<string>): ScopedChatGptBrowserHostOptions {
+  return {
+    assets: {
+      prepare: async () => ({
+        stateDirectory: root,
+        hostIdentity: {
+          target: "windows-x64",
+          browserRevision: "browser-revision-test",
+          providerReleaseVersion: "provider-release-test",
+          extensionVersion: "extension-test",
+        },
+      }),
+    },
+    secrets: {
+      read: async () => null,
+      write: async () => undefined,
+      delete: async () => undefined,
+    },
+    browser: { open: async () => browser.session },
+    settlement: {
+      settleBeforeDrain: async ({ providerOperationId }) => {
+        settled.push(providerOperationId);
+      },
+    },
+  };
+}
+
+const sendRequest = (id = operationId, session = providerSessionId, text = "hello provider") => ({
+  type: "operation.send" as const,
+  providerOperationId: id,
+  providerSessionId: session,
+  text,
+});
+
+describe("scoped in-process ChatGPT browser provider host", () => {
+  it("uses one durable operation WAL, refuses provider-side queuing, and replays the same send exactly", async () => {
+    const root = await tempRoot();
+    const browser = fakeBrowser();
+    const settled: string[] = [];
+    try {
+      const opened = await Effect.runPromise(makeScopedChatGptBrowserHost(options(root, browser, settled)).open);
+      const first = await Effect.runPromise(opened.transport.send(sendRequest()));
+      const repeated = await Effect.runPromise(opened.transport.send(sendRequest()));
+      expect(first).toMatchObject({ providerOperationId: operationId, providerSessionId, state: "running" });
+      expect(repeated).toEqual(first);
+      expect(browser.calls.send).toBe(1);
+
+      await expect(Effect.runPromise(opened.transport.send(sendRequest(operationId, providerSessionId, "changed"))))
+        .rejects.toMatchObject({ code: "operation_conflict" });
+      const other = chatGptBrowserProviderOperationIdForAttempt(RunAttemptId.make("attempt-runtime-other"));
+      await expect(Effect.runPromise(opened.transport.send(sendRequest(other))))
+        .rejects.toMatchObject({ code: "operation_conflict" });
+
+      const names = await fs.readdir(path.join(root, "chatgpt-browser-provider-v1"));
+      expect(names.filter((name) => name.endsWith(".json"))).toHaveLength(1);
+      await Effect.runPromise(opened.close);
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("reconstructs final/terminal/drain once, waits on browser change, and preserves UTF-16 final semantics", async () => {
+    const root = await tempRoot();
+    const browser = fakeBrowser();
+    const settled: string[] = [];
+    try {
+      const opened = await Effect.runPromise(makeScopedChatGptBrowserHost(options(root, browser, settled)).open);
+      await Effect.runPromise(opened.transport.send(sendRequest()));
+      const replay = Effect.runPromise(opened.transport.replay({
+        type: "events.replay",
+        providerOperationId: operationId,
+        after: ChatGptBrowserProviderV1EventSequence.make(0),
+      }));
+
+      browser.observe({
+        providerOperationId: operationId,
+        state: "drained",
+        nativeIdentity: {
+          conversationId: "conversation-native",
+          userMessageId: "user-message-native",
+          providerTurnId: "provider-turn-native",
+        },
+        terminalStatus: "completed",
+        finalText: "a😀b",
+      });
+
+      const page = await replay;
+      expect(page.events.map((event) => event.payload.type)).toEqual([
+        "assistant.final",
+        "operation.terminal",
+        "operation.drained",
+      ]);
+      expect(page.highWater).toBe(3);
+      expect(settled).toEqual([operationId]);
+      expect(await Effect.runPromise(opened.transport.queryOperation({ type: "operation.query", providerOperationId: operationId })))
+        .toMatchObject({ state: "drained", terminalStatus: "completed", terminalSequence: 2, drainedThrough: 3 });
+
+      expect(await Effect.runPromise(opened.transport.readFinalContent({
+        type: "assistant.read_final", providerOperationId: operationId, offset: 1, limit: 2,
+      }))).toMatchObject({ text: "😀", totalLength: 4, complete: false, contentHash: expect.stringMatching(/^[0-9a-f]{64}$/) });
+      await expect(Effect.runPromise(opened.transport.readFinalContent({
+        type: "assistant.read_final", providerOperationId: operationId, offset: 2, limit: 2,
+      }))).rejects.toMatchObject({ code: "invalid_state" });
+
+      // Re-querying/reopening observes the same browser truth but never appends a second terminal/drain.
+      const reopened = await Effect.runPromise(makeScopedChatGptBrowserHost(options(root, browser, settled)).open);
+      const stable = await Effect.runPromise(reopened.transport.replay({
+        type: "events.replay", providerOperationId: operationId, after: ChatGptBrowserProviderV1EventSequence.make(0),
+      }));
+      expect(stable).toEqual(page);
+      expect(settled).toEqual([operationId]);
+      await Effect.runPromise(reopened.close);
+      await Effect.runPromise(opened.close);
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("cancels by exact provider operation and seals drain only after the T3 settlement fence", async () => {
+    const root = await tempRoot();
+    const browser = fakeBrowser();
+    const settled: string[] = [];
+    try {
+      const opened = await Effect.runPromise(makeScopedChatGptBrowserHost(options(root, browser, settled)).open);
+      await Effect.runPromise(opened.transport.send(sendRequest()));
+      const cancelled = await Effect.runPromise(opened.transport.cancel({ type: "operation.cancel", providerOperationId: operationId }));
+      expect(cancelled).toMatchObject({ state: "drained", terminalStatus: "cancelled" });
+      expect(browser.calls.cancel).toBe(1);
+      expect(settled).toEqual([operationId]);
+      await Effect.runPromise(opened.close);
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("never re-sends a dispatched operation when browser ownership is ambiguous after restart", async () => {
+    const root = await tempRoot();
+    const browser = fakeBrowser();
+    const settled: string[] = [];
+    try {
+      browser.failNextSend();
+      const opened = await Effect.runPromise(makeScopedChatGptBrowserHost(options(root, browser, settled)).open);
+      await expect(Effect.runPromise(opened.transport.send(sendRequest())))
+        .rejects.toMatchObject({ code: "browser_unavailable" });
+      expect(browser.calls.send).toBe(1);
+
+      const reopened = await Effect.runPromise(makeScopedChatGptBrowserHost(options(root, browser, settled)).open);
+      await expect(Effect.runPromise(reopened.transport.send(sendRequest())))
+        .rejects.toMatchObject({ code: "invalid_state" });
+      expect(browser.calls.send).toBe(1);
+      await Effect.runPromise(reopened.close);
+      await Effect.runPromise(opened.close);
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+});
