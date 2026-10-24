@@ -34,6 +34,23 @@ export interface ProviderDriverMetadata {
    */
   readonly supportsMultipleInstances?: boolean;
   readonly hasDefaultInstance?: boolean;
+  readonly operationConcurrency?: ProviderOperationConcurrencyPolicy;
+}
+
+export interface ProviderOperationConcurrencyPolicy {
+  /** Driver scope shares one T3-owned admission budget across all configured instances. */
+  readonly scope: "driver" | "instance";
+  readonly supportedConcurrency: number;
+}
+
+export function providerOperationConcurrencyKey(input: {
+  readonly policy: ProviderOperationConcurrencyPolicy;
+  readonly driverKind: ProviderDriverKind;
+  readonly instanceId: ProviderInstanceId;
+}): string {
+  return input.policy.scope === "driver"
+    ? `driver:${input.driverKind}`
+    : `instance:${input.instanceId}`;
 }
 
 export type ProviderWorkspaceSnapshot = ServerProvider &

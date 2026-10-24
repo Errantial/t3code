@@ -23,6 +23,10 @@
       "types": "./src/server/collectStreamText.ts",
       "import": "./src/server/collectStreamText.ts"
     },
+    "./server/chatgptBrowserProviderV1": {
+      "types": "./src/server/chatgptBrowserProviderV1.ts",
+      "import": "./src/server/chatgptBrowserProviderV1.ts"
+    },
     "./server/driver": {
       "types": "./src/server/driver.ts",
       "import": "./src/server/driver.ts"
