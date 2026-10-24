@@ -27,6 +27,10 @@
       "types": "./src/server/chatgptBrowserProviderV1.ts",
       "import": "./src/server/chatgptBrowserProviderV1.ts"
     },
+    "./server/chatgptBrowserHost": {
+      "types": "./src/server/chatgptBrowserHost.ts",
+      "import": "./src/server/chatgptBrowserHost.ts"
+    },
     "./server/driver": {
       "types": "./src/server/driver.ts",
       "import": "./src/server/driver.ts"
