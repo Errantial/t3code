@@ -24,6 +24,7 @@ import {
   buildDesktopBundles,
   DesktopBuildManifestRestoreError,
   BundleNotSelfContainedError,
+  BundledClientPublicConfigError,
   BuildCommandFailedError,
   parseWslRuntimeArchiveMembers,
   readWorkspaceConfig,
@@ -39,6 +40,7 @@ import {
   renderMacPasskeyEntitlements,
   resolveMacWebAuthnEntitlements,
   resolveMacPasskeySigningConfiguration,
+  resolveDesktopArtifactPublicConfig,
   resolveMergedStageDependencies,
   resolveBuildOptions,
   stageWslRuntimeArchive,
@@ -48,6 +50,7 @@ import {
   stageBrowserSecret,
   stageWindowsChatGptBrowserResources,
   validateWindowsPackagedPayload,
+  validateBundledClientPublicConfig,
   verifyPackagedBundleIsSelfContained,
   WindowsPrimaryNativeProbeError,
   WindowsDesktopBuildPrerequisitesMissingError,
@@ -445,6 +448,41 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
         assert.equal(yield* fs.readFileString(path.join(root, "package.json")), packageJson);
       }),
   );
+
+  it.effect("validates the required T3 Connect values in the built web client", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const clientDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-client-public-config-" });
+      const config = {
+        relayUrl: "https://relay.example.test",
+        clerkPublishableKey: `pk_live_${btoa("clerk.example.test$")}`,
+        clerkJwtTemplate: "t3-relay-production",
+        clerkCliOAuthClientId: "oauth-client-production",
+      } as const;
+      yield* fs.makeDirectory(path.join(clientDir, "assets"));
+      yield* fs.writeFileString(
+        path.join(clientDir, "assets", "index.js"),
+        JSON.stringify(Object.values(config)),
+      );
+
+      yield* validateBundledClientPublicConfig(clientDir, config);
+
+      yield* fs.writeFileString(
+        path.join(clientDir, "assets", "index.js"),
+        JSON.stringify([config.relayUrl, config.clerkPublishableKey, config.clerkCliOAuthClientId]),
+      );
+      const error = yield* validateBundledClientPublicConfig(clientDir, config).pipe(Effect.flip);
+      assert.instanceOf(error, BundledClientPublicConfigError);
+      assert.deepStrictEqual(error.missingKeys, ["T3CODE_CLERK_JWT_TEMPLATE"]);
+      assert.notInclude(error.message, config.clerkJwtTemplate);
+    }),
+  );
+
+  it("fails closed for incomplete desktop public config unless the development override is explicit", () => {
+    assert.throws(() => resolveDesktopArtifactPublicConfig({}, false), /public T3 Connect config/u);
+    assert.isUndefined(resolveDesktopArtifactPublicConfig({}, true));
+  });
 
   it.effect("reports a restore failure while still restoring the remaining manifests", () =>
     Effect.gen(function* () {
@@ -1699,6 +1737,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
             mockUpdates: Option.none(),
             mockUpdateServerPort: Option.none(),
             wslRuntime: Option.none(),
+            allowIncompletePublicConfig: Option.none(),
           }),
         );
 
@@ -1723,6 +1762,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
         mockUpdates: Option.some(false),
         mockUpdateServerPort: Option.none(),
         wslRuntime: Option.none(),
+        allowIncompletePublicConfig: Option.some(false),
       }).pipe(
         Effect.provide(
           ConfigProvider.layer(
@@ -1733,6 +1773,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
                 T3CODE_DESKTOP_SIGNED: "true",
                 T3CODE_DESKTOP_VERBOSE: "true",
                 T3CODE_DESKTOP_MOCK_UPDATES: "true",
+                T3CODE_DESKTOP_ALLOW_INCOMPLETE_PUBLIC_CONFIG: "true",
               },
             }),
           ),
@@ -1744,6 +1785,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
       assert.equal(resolved.signed, false);
       assert.equal(resolved.verbose, false);
       assert.equal(resolved.mockUpdates, false);
+      assert.equal(resolved.allowIncompletePublicConfig, false);
     }),
   );
 });

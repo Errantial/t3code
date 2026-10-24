@@ -40,7 +40,11 @@ import {
   findInlinedExternalPackages,
   selectCliRuntimeExternalDependencies,
 } from "./lib/cli-external-packages.ts";
-import { loadRepoEnv } from "./lib/public-config.ts";
+import {
+  loadRepoEnv,
+  resolveDesktopConnectPublicConfig,
+  type DesktopConnectPublicConfig,
+} from "./lib/public-config.ts";
 import { selectDesktopRuntimeExternalDependencies } from "./lib/desktop-external-packages.ts";
 import { resolveCatalogDependencies } from "./lib/resolve-catalog.ts";
 
@@ -191,6 +195,7 @@ interface BuildCliInput {
   readonly mockUpdates: Option.Option<boolean>;
   readonly mockUpdateServerPort: Option.Option<number>;
   readonly wslRuntime: Option.Option<string>;
+  readonly allowIncompletePublicConfig: Option.Option<boolean>;
 }
 
 function detectHostBuildPlatform(hostPlatform: string): typeof BuildPlatform.Type | undefined {
@@ -528,6 +533,17 @@ export class BundledClientAssetsMissingError extends Schema.TaggedError<BundledC
     const preview = this.missingFiles.slice(0, 6).join(", ");
     const suffix = this.missingFiles.length > 6 ? ` (+${this.missingFiles.length - 6} more)` : "";
     return `Bundled client references missing files in ${this.indexPath}: ${preview}${suffix}. Rebuild web/server artifacts.`;
+  }
+}
+
+export class BundledClientPublicConfigError extends Schema.TaggedError<BundledClientPublicConfigError>()(
+  "BundledClientPublicConfigError",
+  {
+    missingKeys: Schema.Array(Schema.String),
+  },
+) {
+  override get message(): string {
+    return `Bundled web client is missing required T3 Connect public config: ${this.missingKeys.join(", ")}. Rebuild with complete production public config.`;
   }
 }
 
@@ -979,6 +995,7 @@ interface ResolvedBuildOptions {
   readonly mockUpdates: boolean;
   readonly mockUpdateServerPort: number | undefined;
   readonly wslRuntime: string | undefined;
+  readonly allowIncompletePublicConfig: boolean;
 }
 
 interface StagePackageJson {
@@ -1724,6 +1741,9 @@ const BuildEnvConfig = Config.all({
   mockUpdates: Config.Boolean("T3CODE_DESKTOP_MOCK_UPDATES").pipe(Config.withDefault(false)),
   mockUpdateServerPort: Config.String("T3CODE_DESKTOP_MOCK_UPDATE_SERVER_PORT").pipe(Config.option),
   wslRuntime: Config.String("T3CODE_DESKTOP_WSL_RUNTIME").pipe(Config.option),
+  allowIncompletePublicConfig: Config.Boolean("T3CODE_DESKTOP_ALLOW_INCOMPLETE_PUBLIC_CONFIG").pipe(
+    Config.withDefault(false),
+  ),
 });
 
 const MockUpdateServerPortSchema = Schema.NumberFromString.check(
@@ -1817,6 +1837,10 @@ export const resolveBuildOptions = Effect.fn("resolveBuildOptions")(function* (
 
   const wslRuntime =
     Option.getOrUndefined(input.wslRuntime) ?? Option.getOrUndefined(env.wslRuntime);
+  const allowIncompletePublicConfig = resolveBooleanFlag(
+    input.allowIncompletePublicConfig,
+    env.allowIncompletePublicConfig,
+  );
 
   return {
     platform,
@@ -1831,6 +1855,7 @@ export const resolveBuildOptions = Effect.fn("resolveBuildOptions")(function* (
     mockUpdates,
     mockUpdateServerPort,
     wslRuntime,
+    allowIncompletePublicConfig,
   } satisfies ResolvedBuildOptions;
 });
 
@@ -1907,6 +1932,7 @@ const buildDesktopBundlesUnlocked = Effect.fn("buildDesktopBundlesUnlocked")(fun
   repoRoot: string,
   appVersion: string,
   verbose: boolean,
+  publicConfig?: DesktopConnectPublicConfig,
 ) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
@@ -1928,11 +1954,23 @@ const buildDesktopBundlesUnlocked = Effect.fn("buildDesktopBundlesUnlocked")(fun
       Effect.gen(function* () {
         yield* updateReleasePackageVersions(appVersion, { rootDir: repoRoot });
         // The compiler must stop reading the aligned manifests before restoration.
+        const publicConfigEnv = publicConfig
+          ? {
+              T3CODE_RELAY_URL: publicConfig.relayUrl,
+              VITE_T3CODE_RELAY_URL: publicConfig.relayUrl,
+              T3CODE_CLERK_PUBLISHABLE_KEY: publicConfig.clerkPublishableKey,
+              VITE_CLERK_PUBLISHABLE_KEY: publicConfig.clerkPublishableKey,
+              T3CODE_CLERK_JWT_TEMPLATE: publicConfig.clerkJwtTemplate,
+              VITE_CLERK_JWT_TEMPLATE: publicConfig.clerkJwtTemplate,
+              T3CODE_CLERK_CLI_OAUTH_CLIENT_ID: publicConfig.clerkCliOAuthClientId,
+              VITE_CLERK_CLI_OAUTH_CLIENT_ID: publicConfig.clerkCliOAuthClientId,
+            }
+          : {};
         yield* runCommand(
           ChildProcess.make(spawnCommand.command, spawnCommand.args, {
             cwd: repoRoot,
             shell: spawnCommand.shell,
-            env: { APP_VERSION: appVersion },
+            env: { APP_VERSION: appVersion, ...publicConfigEnv },
             extendEnv: true,
           }),
           { label: "vp run build:desktop", verbose },
@@ -1968,6 +2006,13 @@ export const buildDesktopBundles = Effect.fn("buildDesktopBundles")(
   (repoRoot: string, appVersion: string, verbose: boolean) =>
     withDesktopBuildLock(repoRoot, buildDesktopBundlesUnlocked(repoRoot, appVersion, verbose)),
 );
+
+export function resolveDesktopArtifactPublicConfig(
+  env: Readonly<Record<string, string | undefined>>,
+  allowIncompletePublicConfig: boolean,
+): DesktopConnectPublicConfig | undefined {
+  return allowIncompletePublicConfig ? undefined : resolveDesktopConnectPublicConfig(env);
+}
 
 const desktopBuildProbeSucceeds = Effect.fn("desktopBuildProbeSucceeds")(function* (
   command: ChildProcess.Command,
@@ -2762,6 +2807,42 @@ const validateBundledClientAssets = Effect.fn("build-desktop-artifact.validateBu
     }
   },
 );
+
+export const validateBundledClientPublicConfig = Effect.fn(
+  "build-desktop-artifact.validateBundledClientPublicConfig",
+)(function* (clientDir: string, config: DesktopConnectPublicConfig) {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const expected = new Map<string, string>([
+    ["T3CODE_RELAY_URL", config.relayUrl],
+    ["T3CODE_CLERK_PUBLISHABLE_KEY", config.clerkPublishableKey],
+    ["T3CODE_CLERK_JWT_TEMPLATE", config.clerkJwtTemplate],
+    ["T3CODE_CLERK_CLI_OAUTH_CLIENT_ID", config.clerkCliOAuthClientId],
+  ]);
+  const directories = [clientDir];
+
+  while (directories.length > 0 && expected.size > 0) {
+    const directory = directories.pop()!;
+    for (const entry of yield* fs.readDirectory(directory)) {
+      const filePath = path.join(directory, entry);
+      const stat = yield* fs.stat(filePath);
+      if (stat.type === "Directory") {
+        directories.push(filePath);
+        continue;
+      }
+      if (stat.type !== "File" || !/\.(?:html|js|mjs)$/u.test(entry)) continue;
+
+      const contents = yield* fs.readFileString(filePath);
+      for (const [key, value] of expected) {
+        if (contents.includes(value)) expected.delete(key);
+      }
+    }
+  }
+
+  if (expected.size > 0) {
+    return yield* new BundledClientPublicConfigError({ missingKeys: [...expected.keys()] });
+  }
+});
 
 export function resolveDesktopRuntimeDependencies(
   dependencies: Record<string, string> | undefined,
@@ -3750,6 +3831,19 @@ const buildDesktopArtifactUnlocked = Effect.fn("buildDesktopArtifactUnlocked")(f
   const repoRoot = yield* RepoRoot;
   const path = yield* Path.Path;
   const fs = yield* FileSystem.FileSystem;
+  const publicConfig = yield* Effect.try({
+    try: () =>
+      resolveDesktopArtifactPublicConfig(
+        loadRepoEnv({ repoRoot }),
+        options.allowIncompletePublicConfig,
+      ),
+    catch: (cause) => (cause instanceof Error ? cause : new Error("Invalid public config.")),
+  });
+  if (options.allowIncompletePublicConfig) {
+    yield* Effect.log(
+      "[desktop-artifact] Allowing incomplete T3 Connect public config for a development/non-production build.",
+    );
+  }
   const hostPlatform = yield* HostProcess.Platform;
   if (hostPlatform === "linux" && options.platform === "linux") {
     yield* preflightLinuxDesktopBuild(options.arch);
@@ -3839,7 +3933,7 @@ const buildDesktopArtifactUnlocked = Effect.fn("buildDesktopArtifactUnlocked")(f
 
   if (!options.skipBuild) {
     yield* Effect.log("[desktop-artifact] Building desktop/server/web artifacts...");
-    yield* buildDesktopBundlesUnlocked(repoRoot, appVersion, options.verbose);
+    yield* buildDesktopBundlesUnlocked(repoRoot, appVersion, options.verbose, publicConfig);
   }
 
   const requiredBuildInputs = [
@@ -3915,6 +4009,9 @@ const buildDesktopArtifactUnlocked = Effect.fn("buildDesktopArtifactUnlocked")(f
   yield* applyWebBrandAssets(webAssetBrand, "apps/server/dist/client");
   yield* Effect.log(`[desktop-artifact] Applied ${webAssetBrand} web client branding.`);
   yield* validateBundledClientAssets(path.dirname(bundledClientEntry));
+  if (publicConfig) {
+    yield* validateBundledClientPublicConfig(path.dirname(bundledClientEntry), publicConfig);
+  }
 
   yield* fs.makeDirectory(path.join(stageAppDir, "apps/desktop"), { recursive: true });
   if (options.platform !== "win") {
@@ -4343,6 +4440,12 @@ const buildDesktopArtifactCli = Command.make("build-desktop-artifact", {
   wslRuntime: Flag.String("wsl-runtime").pipe(
     Flag.withDescription(
       "Path to the Linux CLI release archive (t3-<version>-linux-x64.tar.gz) to embed as the WSL runtime of a Windows build (env: T3CODE_DESKTOP_WSL_RUNTIME).",
+    ),
+    Flag.optional,
+  ),
+  allowIncompletePublicConfig: Flag.Boolean("allow-incomplete-public-config").pipe(
+    Flag.withDescription(
+      "Allow missing T3 Connect public config for development/non-production artifacts only (env: T3CODE_DESKTOP_ALLOW_INCOMPLETE_PUBLIC_CONFIG).",
     ),
     Flag.optional,
   ),

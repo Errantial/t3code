@@ -4,6 +4,9 @@ import * as NodePath from "node:path";
 import * as NodeURL from "node:url";
 import * as NodeUtil from "node:util";
 
+import { clerkFrontendApiHostnameFromPublishableKey } from "@t3tools/shared/relayAuth";
+import { normalizeSecureRelayUrl } from "@t3tools/shared/relayUrl";
+
 export interface T3CodePublicConfig {
   readonly clerkPublishableKey: string | undefined;
   readonly clerkJwtTemplate: string | undefined;
@@ -15,6 +18,41 @@ export interface T3CodePublicConfig {
   readonly relayClientOtlpTracesUrl: string | undefined;
   readonly relayClientOtlpTracesDataset: string | undefined;
   readonly relayClientOtlpTracesToken: string | undefined;
+}
+
+export const REQUIRED_DESKTOP_CONNECT_PUBLIC_CONFIG = [
+  "T3CODE_RELAY_URL",
+  "T3CODE_CLERK_PUBLISHABLE_KEY",
+  "T3CODE_CLERK_JWT_TEMPLATE",
+  "T3CODE_CLERK_CLI_OAUTH_CLIENT_ID",
+] as const;
+
+export interface DesktopConnectPublicConfig {
+  readonly relayUrl: string;
+  readonly clerkPublishableKey: string;
+  readonly clerkJwtTemplate: string;
+  readonly clerkCliOAuthClientId: string;
+}
+
+export class DesktopConnectPublicConfigError extends Error {
+  readonly name = "DesktopConnectPublicConfigError";
+  readonly reason: "missing" | "invalid-relay-url" | "invalid-clerk-publishable-key";
+  readonly keys: ReadonlyArray<(typeof REQUIRED_DESKTOP_CONNECT_PUBLIC_CONFIG)[number]>;
+
+  constructor(
+    reason: "missing" | "invalid-relay-url" | "invalid-clerk-publishable-key",
+    keys: ReadonlyArray<(typeof REQUIRED_DESKTOP_CONNECT_PUBLIC_CONFIG)[number]>,
+  ) {
+    super(
+      reason === "missing"
+        ? `Desktop production build requires public T3 Connect config: ${keys.join(", ")}.`
+        : reason === "invalid-relay-url"
+          ? "T3CODE_RELAY_URL must be a secure absolute HTTPS origin for desktop production builds."
+          : "T3CODE_CLERK_PUBLISHABLE_KEY is invalid for desktop production builds.",
+    );
+    this.reason = reason;
+    this.keys = keys;
+  }
 }
 
 type Environment = Readonly<Record<string, string | undefined>>;
@@ -153,6 +191,46 @@ export function resolvePublicConfig(...sources: readonly Environment[]): T3CodeP
       "T3CODE_RELAY_CLIENT_OTLP_TRACES_TOKEN",
       "VITE_RELAY_OTLP_TRACES_TOKEN",
     ),
+  };
+}
+
+export function resolveDesktopConnectPublicConfig(env: Environment): DesktopConnectPublicConfig {
+  const config = resolvePublicConfig(env);
+  const relayUrlValue = config.relayUrl;
+  const clerkPublishableKey = config.clerkPublishableKey;
+  const clerkJwtTemplate = config.clerkJwtTemplate;
+  const clerkCliOAuthClientId = config.clerkCliOAuthClientId;
+  const missing = [
+    ...(relayUrlValue ? [] : ["T3CODE_RELAY_URL"]),
+    ...(clerkPublishableKey ? [] : ["T3CODE_CLERK_PUBLISHABLE_KEY"]),
+    ...(clerkJwtTemplate ? [] : ["T3CODE_CLERK_JWT_TEMPLATE"]),
+    ...(clerkCliOAuthClientId ? [] : ["T3CODE_CLERK_CLI_OAUTH_CLIENT_ID"]),
+  ] satisfies Array<(typeof REQUIRED_DESKTOP_CONNECT_PUBLIC_CONFIG)[number]>;
+  if (missing.length > 0) {
+    throw new DesktopConnectPublicConfigError("missing", missing);
+  }
+  if (!relayUrlValue || !clerkPublishableKey || !clerkJwtTemplate || !clerkCliOAuthClientId) {
+    throw new DesktopConnectPublicConfigError("missing", missing);
+  }
+
+  const relayUrl = normalizeSecureRelayUrl(relayUrlValue);
+  if (relayUrl === null) {
+    throw new DesktopConnectPublicConfigError("invalid-relay-url", ["T3CODE_RELAY_URL"]);
+  }
+
+  try {
+    clerkFrontendApiHostnameFromPublishableKey(clerkPublishableKey);
+  } catch {
+    throw new DesktopConnectPublicConfigError("invalid-clerk-publishable-key", [
+      "T3CODE_CLERK_PUBLISHABLE_KEY",
+    ]);
+  }
+
+  return {
+    relayUrl,
+    clerkPublishableKey,
+    clerkJwtTemplate,
+    clerkCliOAuthClientId,
   };
 }
 
