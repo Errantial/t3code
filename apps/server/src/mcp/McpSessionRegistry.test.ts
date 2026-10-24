@@ -7,6 +7,7 @@ import * as NetAddress from "effect/net/NetAddress";
 
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as McpSessionRegistry from "./McpSessionRegistry.ts";
+import * as ProviderMcpRelay from "./ProviderMcpRelay.ts";
 
 const environmentId = EnvironmentId.make("environment-1");
 const makeFakeHttpServer = (hostname: string, port = 43123) =>
@@ -31,6 +32,36 @@ const makeRegistry = (now: () => number, httpServer = fakeHttpServer) =>
       Effect.provideService(ServerEnvironment.ServerEnvironment, fakeEnvironment),
       Effect.provide(NodeServices.layer),
     );
+
+it.effect("publishes and revokes the provider relay with the same MCP credential lifecycle", () =>
+  Effect.gen(function* () {
+    const relay = yield* ProviderMcpRelay.__testing.make;
+    const registry = yield* McpSessionRegistry.__testing
+      .make({ now: () => 1_000, livenessWindowMs: 100, providerMcpRelay: relay })
+      .pipe(
+        Effect.provideService(HttpServer.HttpServer, fakeHttpServer),
+        Effect.provideService(ServerEnvironment.ServerEnvironment, fakeEnvironment),
+        Effect.provide(NodeServices.layer),
+      );
+    const issued = yield* registry.issue({
+      threadId: ThreadId.make("thread-relay"),
+      providerInstanceId: ProviderInstanceId.make("chatgpt-browser-instance"),
+      capabilities: new Set(["orchestration"]),
+    });
+    expect(issued.config.relay?.authorizationHeader).toMatch(/^Bearer\s+/);
+    expect(issued.config.relay?.authorizationHeader).not.toBe(issued.config.authorizationHeader);
+    const routeId = issued.config.relay?.routePath.split("/").at(-2);
+    expect(routeId).toBeDefined();
+    const resolved = yield* relay.resolveRoute(routeId!, issued.config.relay?.authorizationHeader);
+    expect(resolved?.providerSessionId).toBe(issued.config.providerSessionId);
+    expect(resolved?.providerAuthorizationHeader).toBe(issued.config.authorizationHeader);
+
+    yield* registry.revokeProviderSession(issued.config.providerSessionId);
+    expect(
+      yield* relay.resolveRoute(routeId!, issued.config.relay?.authorizationHeader),
+    ).toBeUndefined();
+  }),
+);
 
 it.effect("stores only a token hash, resolves the bearer token, and revokes by thread", () =>
   Effect.gen(function* () {

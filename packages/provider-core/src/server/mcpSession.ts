@@ -8,6 +8,15 @@ export interface McpProviderSessionConfig {
   readonly endpoint: string;
   readonly authorizationHeader: string;
   /**
+   * Process-local publication for providers that need T3's MCP server through a relay/tunnel.
+   * The relay credential is distinct from the T3 bearer above and binds to this exact provider
+   * session; callers cannot select another thread/provider session through request headers.
+   */
+  readonly relay?: {
+    readonly routePath: string;
+    readonly authorizationHeader: string;
+  };
+  /**
    * Adapters read it to keep developer instructions truthful: when the user
    * withholds agent browser access, the prompt must not advertise `preview_*`
    * tools that every call would reject.

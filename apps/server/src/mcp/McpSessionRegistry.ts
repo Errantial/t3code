@@ -4,12 +4,14 @@ import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as SynchronizedRef from "effect/SynchronizedRef";
 import { HttpServer } from "effect/http";
 import * as NetAddress from "effect/net/NetAddress";
 
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as McpInvocationContext from "./McpInvocationContext.ts";
+import * as ProviderMcpRelay from "./ProviderMcpRelay.ts";
 import * as McpProviderSession from "@t3tools/provider-core/server/mcpSession";
 
 export interface McpCredentialRequest {
@@ -57,6 +59,7 @@ interface RegistryState {
 export interface McpSessionRegistryOptions {
   readonly livenessWindowMs?: number;
   readonly now?: () => number;
+  readonly providerMcpRelay?: ProviderMcpRelay.ProviderMcpRelayShape;
 }
 
 /**
@@ -86,6 +89,7 @@ const makeWithOptions = Effect.fn("McpSessionRegistry.make")(function* (
   const state = yield* SynchronizedRef.make<RegistryState>({ records: new Map() });
   const currentTimeMillis = options.now ? Effect.sync(options.now) : Clock.currentTimeMillis;
   const livenessWindowMs = options.livenessWindowMs ?? DEFAULT_LIVENESS_WINDOW_MS;
+  const providerMcpRelay = options.providerMcpRelay;
   const endpoint = NetAddress.isInetAddress(httpServer.address)
     ? `http://${getHttpMcpEndpointHost(httpServer.address.address)}:${httpServer.address.port}/mcp`
     : "http://127.0.0.1/mcp";
@@ -124,16 +128,30 @@ const makeWithOptions = Effect.fn("McpSessionRegistry.make")(function* (
         next.set(tokenHash, { tokenHash, scope, lastAliveAt: issuedAt });
         return { records: next };
       });
+      const baseConfig: McpProviderSession.McpProviderSessionConfig = {
+        environmentId,
+        threadId: scope.thread.threadId,
+        providerSessionId,
+        providerInstanceId: scope.thread.providerInstanceId,
+        endpoint,
+        authorizationHeader: `Bearer ${rawToken}`,
+        browserToolsAvailable: scope.capabilities.has("preview"),
+        capabilities: scope.capabilities,
+      };
+      const publication = providerMcpRelay
+        ? yield* providerMcpRelay.publish(baseConfig).pipe(Effect.orDie)
+        : undefined;
       return {
         config: {
-          environmentId,
-          threadId: scope.thread.threadId,
-          providerSessionId,
-          providerInstanceId: scope.thread.providerInstanceId,
-          endpoint,
-          authorizationHeader: `Bearer ${rawToken}`,
-          browserToolsAvailable: scope.capabilities.has("preview"),
-          capabilities: scope.capabilities,
+          ...baseConfig,
+          ...(publication === undefined
+            ? {}
+            : {
+                relay: {
+                  routePath: publication.routePath,
+                  authorizationHeader: publication.authorizationHeader,
+                },
+              }),
         },
       };
     },
@@ -172,9 +190,26 @@ const makeWithOptions = Effect.fn("McpSessionRegistry.make")(function* (
   );
 
   const revokeWhere = (predicate: (record: CredentialRecord) => boolean) =>
-    SynchronizedRef.update(state, ({ records }) => ({
-      records: new Map(Array.from(records).filter(([, record]) => !predicate(record))),
-    }));
+    SynchronizedRef.modify(state, ({ records }) => {
+      const revokedProviderSessions = new Set<string>();
+      const kept = new Map<string, CredentialRecord>();
+      for (const [tokenHash, record] of records) {
+        if (predicate(record)) revokedProviderSessions.add(record.scope.thread.providerSessionId);
+        else kept.set(tokenHash, record);
+      }
+      return [[...revokedProviderSessions], { records: kept }] as const;
+    }).pipe(
+      Effect.tap((providerSessionIds) =>
+        providerMcpRelay
+          ? Effect.forEach(
+              providerSessionIds,
+              (providerSessionId) => providerMcpRelay.revokeProviderSession(providerSessionId),
+              { discard: true },
+            )
+          : Effect.void,
+      ),
+      Effect.asVoid,
+    );
 
   return McpSessionRegistry.of({
     issue,
@@ -188,26 +223,32 @@ const makeWithOptions = Effect.fn("McpSessionRegistry.make")(function* (
     revokeThread: Effect.fn("McpSessionRegistry.revokeThread")(function* (threadId) {
       yield* revokeWhere((record) => record.scope.thread.threadId === threadId);
     }),
-    revokeAll: SynchronizedRef.set(state, { records: new Map() }),
+    revokeAll: revokeWhere(() => true),
   });
 });
 
 let activeMcpSessionRegistry: McpSessionRegistryShape | undefined;
 
-const make = Effect.acquireRelease(
-  makeWithOptions().pipe(
-    Effect.tap((registry) =>
-      Effect.sync(() => {
-        activeMcpSessionRegistry = registry;
-      }),
+const make = Effect.flatMap(
+  Effect.serviceOption(ProviderMcpRelay.ProviderMcpRelay),
+  (providerMcpRelay) =>
+    Effect.acquireRelease(
+      makeWithOptions(
+        Option.isSome(providerMcpRelay) ? { providerMcpRelay: providerMcpRelay.value } : {},
+      ).pipe(
+        Effect.tap((registry) =>
+          Effect.sync(() => {
+            activeMcpSessionRegistry = registry;
+          }),
+        ),
+      ),
+      (registry) =>
+        Effect.sync(() => {
+          if (activeMcpSessionRegistry === registry) {
+            activeMcpSessionRegistry = undefined;
+          }
+        }),
     ),
-  ),
-  (registry) =>
-    Effect.sync(() => {
-      if (activeMcpSessionRegistry === registry) {
-        activeMcpSessionRegistry = undefined;
-      }
-    }),
 );
 
 export const layer = Layer.effect(McpSessionRegistry, make);
