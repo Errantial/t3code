@@ -311,6 +311,10 @@ describe("DesktopBackendConfiguration", () => {
         path.join(resourcesPath, "server.asar/apps/server/dist/bin.mjs"),
       );
       assert.equal(config.env.ELECTRON_RUN_AS_NODE, "1");
+      assert.equal(
+        config.env.T3CODE_CHATGPT_BROWSER_RESOURCES_DIR,
+        path.join(resourcesPath, "chatgpt-browser"),
+      );
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   );
 

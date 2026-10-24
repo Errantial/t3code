@@ -741,12 +741,28 @@ export class WindowsPrimaryNativeProbeError extends Schema.TaggedError<WindowsPr
   }
 }
 
+export class WindowsChatGptBrowserResourceMissingError extends Schema.TaggedError<WindowsChatGptBrowserResourceMissingError>()(
+  "WindowsChatGptBrowserResourceMissingError",
+  {
+    resource: Schema.Literals(["provider", "chromium"]),
+    resourcePath: Schema.String,
+  },
+) {
+  override get message(): string {
+    return this.resource === "provider"
+      ? `Managed ChatGPT browser provider assets are missing at ${this.resourcePath}.`
+      : `Pinned managed Chromium chromium-1223 is missing at ${this.resourcePath}. Install the repository Playwright Chromium before building the Windows desktop artifact.`;
+  }
+}
+
 const WindowsPackagedPayloadValidationReason = Schema.Literals([
   "packaged-app-missing",
   "sidecar-missing",
   "sidecar-invalid",
   "unpacked-native-missing",
   "resource-monitor-missing",
+  "chatgpt-browser-missing",
+  "chatgpt-browser-file-limit-exceeded",
   "wsl-runtime-missing",
   "wsl-runtime-invalid",
   "file-limit-exceeded",
@@ -772,6 +788,12 @@ export class WindowsPackagedPayloadValidationError extends Schema.TaggedError<Wi
     }
     if (this.reason === "resource-monitor-missing") {
       return "Windows packaged payload is missing the resource monitor executable.";
+    }
+    if (this.reason === "chatgpt-browser-missing") {
+      return "Windows packaged payload is missing the managed ChatGPT browser provider or Chromium executable.";
+    }
+    if (this.reason === "chatgpt-browser-file-limit-exceeded") {
+      return `Windows packaged managed ChatGPT browser contains ${String(this.fileCount)} files; expected at most ${String(this.fileLimit)}.`;
     }
     if (this.reason === "wsl-runtime-missing") {
       return "Windows packaged payload is missing the WSL runtime archive or SHA-256 sidecar.";
@@ -997,6 +1019,11 @@ export const DESKTOP_FILE_EXCLUSIONS = [
   "!apps/desktop/resources/browser-secret/**/*",
   "!apps/desktop/prod-resources/browser-secret",
   "!apps/desktop/prod-resources/browser-secret/**/*",
+  // The managed ChatGPT browser is emitted as a loose Electron resource.
+  // Keeping the staging copy out of app.asar avoids
+  // duplicating the ~400MB pinned Chromium payload inside the archive.
+  "!apps/desktop/prod-resources/chatgpt-browser",
+  "!apps/desktop/prod-resources/chatgpt-browser/**/*",
   // Windows stages the server sidecar below prod-resources so electron-builder
   // can copy it using project-relative extraResources matchers. Keep those
   // staging inputs out of app.asar; they are emitted once at resources/.
@@ -1075,6 +1102,11 @@ export function resolveWindowsServerAsarIgnoreGlobs(arch: typeof BuildArch.Type)
 }
 
 export const WINDOWS_PACKAGED_PAYLOAD_FILE_LIMIT = 80;
+// Chromium 1223 currently contributes 310 files and the provider another 34.
+// Keep that intentionally loose resource independently bounded so the generic
+// Windows payload guard can remain strict enough to catch a leaked dependency
+// tree.
+export const WINDOWS_CHATGPT_BROWSER_FILE_LIMIT = 380;
 export const WINDOWS_SERVER_RESOURCE_SOURCE_DIR = "apps/desktop/prod-resources/windows-server";
 export const WINDOWS_SERVER_EXTRA_RESOURCES = [
   {
@@ -1102,6 +1134,17 @@ export const bundlesWslRuntime = (input: {
 export const WSL_RUNTIME_EXTRA_RESOURCES = [
   WSL_RUNTIME_ARCHIVE_EXTRA_RESOURCE,
   WSL_RUNTIME_ARCHIVE_HASH_EXTRA_RESOURCE,
+] as const;
+export const CHATGPT_BROWSER_CHROMIUM_REVISION = 1223 as const;
+export const CHATGPT_BROWSER_CHROMIUM_DIRECTORY =
+  `chromium-${CHATGPT_BROWSER_CHROMIUM_REVISION}` as const;
+export const WINDOWS_CHATGPT_BROWSER_RESOURCE_SOURCE_DIR =
+  "apps/desktop/prod-resources/chatgpt-browser";
+export const WINDOWS_CHATGPT_BROWSER_EXTRA_RESOURCES = [
+  {
+    from: WINDOWS_CHATGPT_BROWSER_RESOURCE_SOURCE_DIR,
+    to: "chatgpt-browser",
+  },
 ] as const;
 export const DESKTOP_EXTRA_RESOURCES = [
   {
@@ -2856,6 +2899,7 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
       ...(platform === "linux" ? LINUX_BROWSER_SECRET_EXTRA_RESOURCES : []),
       ...(platform === "win" ? WINDOWS_SERVER_EXTRA_RESOURCES : []),
       ...(platform === "win" && wslRuntimeBundled ? WSL_RUNTIME_EXTRA_RESOURCES : []),
+      ...(platform === "win" && arch === "x64" ? WINDOWS_CHATGPT_BROWSER_EXTRA_RESOURCES : []),
     ],
   };
   const updateChannel = resolveDesktopUpdateChannel(version);
@@ -3232,6 +3276,63 @@ export const stageWindowsServerSidecar = Effect.fn("stageWindowsServerSidecar")(
   );
 });
 
+export const stageWindowsChatGptBrowserResources = Effect.fn("stageWindowsChatGptBrowserResources")(
+  function* (input: {
+    readonly repoRoot: string;
+    readonly stageProdResourcesDir: string;
+    readonly environment?: NodeJS.ProcessEnv;
+    readonly platform?: NodeJS.Platform;
+  }) {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const environment = input.environment ?? process.env;
+    const platform = input.platform ?? process.platform;
+    const providerSource = path.join(input.repoRoot, "packages/provider-chatgpt-browser/assets");
+    const providerManifest = path.join(providerSource, "extension/manifest.json");
+    const providerStat = yield* fs.stat(providerManifest).pipe(Effect.orElseSucceed(() => null));
+    if (providerStat?.type !== "File") {
+      return yield* new WindowsChatGptBrowserResourceMissingError({
+        resource: "provider",
+        resourcePath: providerManifest,
+      });
+    }
+
+    const configuredPlaywrightRoot = environment.PLAYWRIGHT_BROWSERS_PATH;
+    const playwrightRoot =
+      configuredPlaywrightRoot && configuredPlaywrightRoot !== "0"
+        ? path.resolve(configuredPlaywrightRoot)
+        : platform === "win32"
+          ? environment.LOCALAPPDATA
+            ? path.join(environment.LOCALAPPDATA, "ms-playwright")
+            : null
+          : environment.HOME
+            ? path.join(environment.HOME, ".cache", "ms-playwright")
+            : null;
+    const chromiumSource = playwrightRoot
+      ? path.join(playwrightRoot, CHATGPT_BROWSER_CHROMIUM_DIRECTORY)
+      : CHATGPT_BROWSER_CHROMIUM_DIRECTORY;
+    const chromiumExecutable = path.join(chromiumSource, "chrome-win64/chrome.exe");
+    const chromiumStat = yield* fs.stat(chromiumExecutable).pipe(Effect.orElseSucceed(() => null));
+    if (chromiumStat?.type !== "File") {
+      return yield* new WindowsChatGptBrowserResourceMissingError({
+        resource: "chromium",
+        resourcePath: chromiumExecutable,
+      });
+    }
+
+    const destinationRoot = path.join(input.stageProdResourcesDir, "chatgpt-browser");
+    yield* fs.remove(destinationRoot, { recursive: true }).pipe(Effect.ignore);
+    yield* fs.makeDirectory(path.join(destinationRoot, "chromium"), { recursive: true });
+    yield* Effect.all([
+      fs.copy(providerSource, path.join(destinationRoot, "provider")),
+      fs.copy(
+        chromiumSource,
+        path.join(destinationRoot, "chromium", CHATGPT_BROWSER_CHROMIUM_DIRECTORY),
+      ),
+    ]);
+  },
+);
+
 function collectUnpackedAsarFiles(
   directory: DirectoryRecord,
   parentPath = "",
@@ -3470,6 +3571,37 @@ export const validateWindowsPackagedPayload = Effect.fn(
     });
   }
 
+  let chatGptBrowserFileCount = 0;
+  if (input.targetArch === "x64") {
+    const chatGptBrowserRoot = path.join(resourcesDir, "chatgpt-browser");
+    const chatGptBrowserRequiredFiles = [
+      "chatgpt-browser/provider/extension/manifest.json",
+      `chatgpt-browser/chromium/${CHATGPT_BROWSER_CHROMIUM_DIRECTORY}/chrome-win64/chrome.exe`,
+    ] as const;
+    const missingChatGptBrowserFiles: string[] = [];
+    for (const relativePath of chatGptBrowserRequiredFiles) {
+      if (!(yield* isFile(path.join(resourcesDir, ...relativePath.split("/"))))) {
+        missingChatGptBrowserFiles.push(relativePath);
+      }
+    }
+    if (missingChatGptBrowserFiles.length > 0) {
+      return yield* new WindowsPackagedPayloadValidationError({
+        reason: "chatgpt-browser-missing",
+        packagedAppDir,
+        missingFiles: missingChatGptBrowserFiles,
+      });
+    }
+    chatGptBrowserFileCount = yield* countPayloadFiles(chatGptBrowserRoot);
+    if (chatGptBrowserFileCount > WINDOWS_CHATGPT_BROWSER_FILE_LIMIT) {
+      return yield* new WindowsPackagedPayloadValidationError({
+        reason: "chatgpt-browser-file-limit-exceeded",
+        packagedAppDir,
+        fileCount: chatGptBrowserFileCount,
+        fileLimit: WINDOWS_CHATGPT_BROWSER_FILE_LIMIT,
+      });
+    }
+  }
+
   const resourceMonitorPath = path.join(
     resourcesDir,
     "resource-monitor",
@@ -3582,7 +3714,8 @@ export const validateWindowsPackagedPayload = Effect.fn(
     }
   }
 
-  const fileCount = yield* countPayloadFiles(packagedAppDir);
+  const totalFileCount = yield* countPayloadFiles(packagedAppDir);
+  const fileCount = totalFileCount - chatGptBrowserFileCount;
   if (fileCount > fileLimit) {
     return yield* new WindowsPackagedPayloadValidationError({
       reason: "file-limit-exceeded",
@@ -3600,9 +3733,15 @@ export const validateWindowsPackagedPayload = Effect.fn(
   });
 
   yield* Effect.log(
-    `[desktop-artifact] Validated Windows payload (${String(fileCount)} files, ${String(unpackedFiles.length)} sidecar natives).`,
+    `[desktop-artifact] Validated Windows payload (${String(fileCount)} core files + ${String(chatGptBrowserFileCount)} managed-browser files, ${String(unpackedFiles.length)} sidecar natives).`,
   );
-  return { packagedAppDir, fileCount, unpackedFiles } as const;
+  return {
+    packagedAppDir,
+    fileCount,
+    totalFileCount,
+    chatGptBrowserFileCount,
+    unpackedFiles,
+  } as const;
 });
 
 const buildDesktopArtifactUnlocked = Effect.fn("buildDesktopArtifactUnlocked")(function* (
@@ -3844,6 +3983,12 @@ const buildDesktopArtifactUnlocked = Effect.fn("buildDesktopArtifactUnlocked")(f
   // electron-builder is filtering out stageResourcesDir directory in the AppImage for production
   const stageProdResourcesDir = path.join(stageAppDir, "apps/desktop/prod-resources");
   yield* fs.copy(stageResourcesDir, stageProdResourcesDir);
+  if (options.platform === "win" && options.arch === "x64") {
+    yield* stageWindowsChatGptBrowserResources({
+      repoRoot,
+      stageProdResourcesDir,
+    });
+  }
 
   const configuredMacPasskeySigning =
     options.platform === "mac" && options.signed

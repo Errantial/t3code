@@ -46,6 +46,7 @@ import {
   copyDirectoryPreservingSymlinks,
   LinuxBrowserSecretHostError,
   stageBrowserSecret,
+  stageWindowsChatGptBrowserResources,
   validateWindowsPackagedPayload,
   verifyPackagedBundleIsSelfContained,
   WindowsPrimaryNativeProbeError,
@@ -169,6 +170,20 @@ const makeWindowsPayloadFixture = Effect.fn("test.makeWindowsPayloadFixture")(fu
   const appExecutableName = "t3code.exe";
   yield* fs.writeFileString(path.join(packagedAppDir, appExecutableName), "electron");
   yield* fs.writeFileString(path.join(packagedAppDir, "chrome_crashpad_handler.exe"), "crashpad");
+  if ((input.targetArch ?? "x64") === "x64") {
+    const providerManifest = path.join(
+      resourcesDir,
+      "chatgpt-browser/provider/extension/manifest.json",
+    );
+    const managedChromium = path.join(
+      resourcesDir,
+      `chatgpt-browser/chromium/chromium-1223/chrome-win64/chrome.exe`,
+    );
+    yield* fs.makeDirectory(path.dirname(providerManifest), { recursive: true });
+    yield* fs.makeDirectory(path.dirname(managedChromium), { recursive: true });
+    yield* fs.writeFileString(providerManifest, '{"manifest_version":3,"version":"2.1.39.1"}\n');
+    yield* fs.writeFileString(managedChromium, "managed-chromium");
+  }
 
   if (input.wslRuntime !== undefined) {
     const stem = wslRuntimeArchiveStem(WINDOWS_PAYLOAD_FIXTURE_VERSION, input.targetArch ?? "x64");
@@ -523,6 +538,94 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
     ),
   );
 
+  it.effect("packages the managed ChatGPT browser as a Windows x64 resource", () =>
+    Effect.gen(function* () {
+      const x64 = yield* createBuildConfig(
+        "win",
+        "nsis",
+        "1.2.3",
+        false,
+        false,
+        undefined,
+        undefined,
+        false,
+        "x64",
+      );
+      const arm64 = yield* createBuildConfig(
+        "win",
+        "nsis",
+        "1.2.3",
+        false,
+        false,
+        undefined,
+        undefined,
+        false,
+        "arm64",
+      );
+
+      const managedBrowserResource = {
+        from: "apps/desktop/prod-resources/chatgpt-browser",
+        to: "chatgpt-browser",
+      };
+      assert.deepInclude(x64.extraResources as ReadonlyArray<unknown>, managedBrowserResource);
+      assert.notDeepInclude(arm64.extraResources as ReadonlyArray<unknown>, managedBrowserResource);
+      assert.include(DESKTOP_FILE_EXCLUSIONS, "!apps/desktop/prod-resources/chatgpt-browser/**/*");
+    }),
+  );
+
+  it.effect("stages the pinned managed ChatGPT browser from provider assets and Playwright", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const root = yield* fs.makeTempDirectoryScoped({
+          prefix: "t3-managed-browser-stage-test-",
+        });
+        const repoRoot = path.join(root, "repo");
+        const providerManifest = path.join(
+          repoRoot,
+          "packages/provider-chatgpt-browser/assets/extension/manifest.json",
+        );
+        const playwrightRoot = path.join(root, "playwright");
+        const chromiumExecutable = path.join(
+          playwrightRoot,
+          "chromium-1223/chrome-win64/chrome.exe",
+        );
+        const stageProdResourcesDir = path.join(root, "stage/apps/desktop/prod-resources");
+        yield* fs.makeDirectory(path.dirname(providerManifest), { recursive: true });
+        yield* fs.makeDirectory(path.dirname(chromiumExecutable), { recursive: true });
+        yield* fs.writeFileString(
+          providerManifest,
+          '{"manifest_version":3,"version":"2.1.39.1"}\n',
+        );
+        yield* fs.writeFileString(chromiumExecutable, "chromium");
+
+        yield* stageWindowsChatGptBrowserResources({
+          repoRoot,
+          stageProdResourcesDir,
+          environment: { PLAYWRIGHT_BROWSERS_PATH: playwrightRoot },
+          platform: "win32",
+        });
+
+        assert.equal(
+          yield* fs.readFileString(
+            path.join(stageProdResourcesDir, "chatgpt-browser/provider/extension/manifest.json"),
+          ),
+          '{"manifest_version":3,"version":"2.1.39.1"}\n',
+        );
+        assert.equal(
+          yield* fs.readFileString(
+            path.join(
+              stageProdResourcesDir,
+              "chatgpt-browser/chromium/chromium-1223/chrome-win64/chrome.exe",
+            ),
+          ),
+          "chromium",
+        );
+      }),
+    ),
+  );
+
   // pnpm writes "set this to true or false" placeholders into allowBuilds when a
   // tarball changes. pnpm ignores them, but the release build decode rejects them.
   it.effect("decodes the repo allowBuilds and every file: tarball it names exists", () =>
@@ -868,6 +971,32 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
         assert.deepStrictEqual(secondAsar, firstAsar);
       }),
     ).pipe(Effect.provideService(HostProcess.Platform, "linux")),
+  );
+
+  it.effect.each([
+    "chatgpt-browser/provider/extension/manifest.json",
+    "chatgpt-browser/chromium/chromium-1223/chrome-win64/chrome.exe",
+  ] as const)("rejects a Windows x64 package missing managed browser asset %s", (relativePath) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const fixture = yield* makeWindowsPayloadFixture({ copyUnpackedNatives: true });
+        yield* fs.remove(
+          path.join(fixture.packagedAppDir, "resources", ...relativePath.split("/")),
+        );
+        const error = yield* validateWindowsPackagedPayload({
+          stageDistDir: fixture.stageDistDir,
+          appExecutableName: fixture.appExecutableName,
+          targetArch: "x64",
+          appVersion: WINDOWS_PAYLOAD_FIXTURE_VERSION,
+        }).pipe(Effect.flip);
+
+        assert.instanceOf(error, WindowsPackagedPayloadValidationError);
+        assert.equal(error.reason, "chatgpt-browser-missing");
+        assert.deepStrictEqual(error.missingFiles, [relativePath]);
+      }),
+    ),
   );
 
   it.effect.each(["x64", "arm64"] as const)(
