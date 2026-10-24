@@ -58,6 +58,7 @@ const makeRuntime = (input?: {
   readonly missingLibraries?: ReadonlyArray<string>;
   readonly userId?: number;
   readonly windowsCloseExits?: boolean;
+  readonly ignoreSigterm?: boolean;
 }): RuntimeFixture => {
   const commands: RuntimeFixture["commands"] = [];
   const launches: RuntimeFixture["launches"] = [];
@@ -107,7 +108,7 @@ const makeRuntime = (input?: {
     userId: () => input?.userId ?? 1000,
     signalPosixProcessGroup: (pid, signal) => {
       signals.push({ pid, signal });
-      if (signal === "SIGTERM" || signal === "SIGKILL") {
+      if (signal === "SIGKILL" || (signal === "SIGTERM" && !input?.ignoreSigterm)) {
         running = false;
         resolveExit?.();
         return true;
@@ -450,6 +451,25 @@ describe("Linux x64 ChatGPT browser platform", () => {
     }),
   );
 
+  it.effect(
+    "accepts Ubuntu userns restriction when the managed browser AppArmor profile is loaded",
+    () =>
+      Effect.gen(function* () {
+        const fixture = makeRuntime({
+          files: {
+            "/proc/sys/kernel/unprivileged_userns_clone": "1\n",
+            "/proc/sys/kernel/apparmor_restrict_unprivileged_userns": "1\n",
+            "/sys/kernel/security/apparmor/profiles": "t3-chatgpt-browser (enforce)\n",
+          },
+        });
+        const platform = makeLinuxChatGptBrowserPlatform({
+          rootDirectory: "/tmp/t3",
+          runtime: fixture.runtime,
+        });
+        expect(yield* platform.checkPrerequisites).toEqual([]);
+      }),
+  );
+
   it.effect("launches a detached process group without disabling the sandbox", () =>
     Effect.gen(function* () {
       const fixture = makeRuntime();
@@ -468,6 +488,25 @@ describe("Linux x64 ChatGPT browser platform", () => {
       expect(fixture.launches[0]!.args).not.toContain("--no-sandbox");
       yield* platform.stopBrowser(handle);
       expect(fixture.signals).toContainEqual({ pid: 4242, signal: "SIGTERM" });
+    }),
+  );
+
+  it.effect("escalates a captured Linux process group from SIGTERM to SIGKILL", () =>
+    Effect.gen(function* () {
+      const fixture = makeRuntime({ ignoreSigterm: true });
+      const platform = makeLinuxChatGptBrowserPlatform({
+        rootDirectory: "/tmp/t3",
+        runtime: fixture.runtime,
+      });
+      const handle = yield* platform.launchBrowser({
+        executablePath: "/tmp/t3/browser/chrome",
+        profileDirectory: "/tmp/t3/profile",
+        extensionRoot: "/tmp/t3/extension",
+        args: [],
+      });
+      yield* platform.stopBrowser(handle);
+      expect(fixture.signals).toContainEqual({ pid: 4242, signal: "SIGTERM" });
+      expect(fixture.signals).toContainEqual({ pid: 4242, signal: "SIGKILL" });
     }),
   );
 });

@@ -757,17 +757,45 @@ export class WindowsPrimaryNativeProbeError extends Schema.TaggedError<WindowsPr
   }
 }
 
-export class WindowsChatGptBrowserResourceMissingError extends Schema.TaggedError<WindowsChatGptBrowserResourceMissingError>()(
-  "WindowsChatGptBrowserResourceMissingError",
+export class ChatGptBrowserResourceMissingError extends Schema.TaggedError<ChatGptBrowserResourceMissingError>()(
+  "ChatGptBrowserResourceMissingError",
   {
     resource: Schema.Literals(["provider", "chromium"]),
     resourcePath: Schema.String,
+    target: Schema.Literals(["windows-x64", "linux-x64"]),
   },
 ) {
   override get message(): string {
     return this.resource === "provider"
       ? `Managed ChatGPT browser provider assets are missing at ${this.resourcePath}.`
-      : `Pinned managed Chromium chromium-1223 is missing at ${this.resourcePath}. Install the repository Playwright Chromium before building the Windows desktop artifact.`;
+      : `Pinned managed Chromium chromium-1223 for ${this.target} is missing at ${this.resourcePath}. Install the repository Playwright Chromium before building the desktop artifact.`;
+  }
+}
+
+const LinuxPackagedPayloadValidationReason = Schema.Literals([
+  "packaged-app-missing",
+  "chatgpt-browser-missing",
+  "chatgpt-browser-file-limit-exceeded",
+]);
+
+export class LinuxPackagedPayloadValidationError extends Schema.TaggedError<LinuxPackagedPayloadValidationError>()(
+  "LinuxPackagedPayloadValidationError",
+  {
+    reason: LinuxPackagedPayloadValidationReason,
+    packagedAppDir: Schema.String,
+    missingFiles: Schema.optionalKey(Schema.Array(Schema.String)),
+    fileCount: Schema.optionalKey(Schema.Int),
+    fileLimit: Schema.optionalKey(Schema.Int),
+  },
+) {
+  override get message(): string {
+    if (this.reason === "chatgpt-browser-missing") {
+      return "Linux packaged payload is missing the managed ChatGPT browser provider, Chromium executable, or AppArmor profile.";
+    }
+    if (this.reason === "chatgpt-browser-file-limit-exceeded") {
+      return `Linux packaged managed ChatGPT browser contains ${String(this.fileCount)} files; expected at most ${String(this.fileLimit)}.`;
+    }
+    return `Linux packaged application directory was not found at ${this.packagedAppDir}.`;
   }
 }
 
@@ -1041,6 +1069,7 @@ export const DESKTOP_FILE_EXCLUSIONS = [
   // duplicating the ~400MB pinned Chromium payload inside the archive.
   "!apps/desktop/prod-resources/chatgpt-browser",
   "!apps/desktop/prod-resources/chatgpt-browser/**/*",
+  "!apps/desktop/resources/linux/t3-chatgpt-browser.apparmor",
   // Windows stages the server sidecar below prod-resources so electron-builder
   // can copy it using project-relative extraResources matchers. Keep those
   // staging inputs out of app.asar; they are emitted once at resources/.
@@ -1124,6 +1153,7 @@ export const WINDOWS_PACKAGED_PAYLOAD_FILE_LIMIT = 80;
 // Windows payload guard can remain strict enough to catch a leaked dependency
 // tree.
 export const WINDOWS_CHATGPT_BROWSER_FILE_LIMIT = 380;
+export const LINUX_CHATGPT_BROWSER_FILE_LIMIT = WINDOWS_CHATGPT_BROWSER_FILE_LIMIT;
 export const WINDOWS_SERVER_RESOURCE_SOURCE_DIR = "apps/desktop/prod-resources/windows-server";
 export const WINDOWS_SERVER_EXTRA_RESOURCES = [
   {
@@ -1155,11 +1185,10 @@ export const WSL_RUNTIME_EXTRA_RESOURCES = [
 export const CHATGPT_BROWSER_CHROMIUM_REVISION = 1223 as const;
 export const CHATGPT_BROWSER_CHROMIUM_DIRECTORY =
   `chromium-${CHATGPT_BROWSER_CHROMIUM_REVISION}` as const;
-export const WINDOWS_CHATGPT_BROWSER_RESOURCE_SOURCE_DIR =
-  "apps/desktop/prod-resources/chatgpt-browser";
-export const WINDOWS_CHATGPT_BROWSER_EXTRA_RESOURCES = [
+export const CHATGPT_BROWSER_RESOURCE_SOURCE_DIR = "apps/desktop/prod-resources/chatgpt-browser";
+export const CHATGPT_BROWSER_EXTRA_RESOURCES = [
   {
-    from: WINDOWS_CHATGPT_BROWSER_RESOURCE_SOURCE_DIR,
+    from: CHATGPT_BROWSER_RESOURCE_SOURCE_DIR,
     to: "chatgpt-browser",
   },
 ] as const;
@@ -2980,7 +3009,9 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
       ...(platform === "linux" ? LINUX_BROWSER_SECRET_EXTRA_RESOURCES : []),
       ...(platform === "win" ? WINDOWS_SERVER_EXTRA_RESOURCES : []),
       ...(platform === "win" && wslRuntimeBundled ? WSL_RUNTIME_EXTRA_RESOURCES : []),
-      ...(platform === "win" && arch === "x64" ? WINDOWS_CHATGPT_BROWSER_EXTRA_RESOURCES : []),
+      ...((platform === "win" || platform === "linux") && arch === "x64"
+        ? CHATGPT_BROWSER_EXTRA_RESOURCES
+        : []),
     ],
   };
   const updateChannel = resolveDesktopUpdateChannel(version);
@@ -3088,6 +3119,9 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
       category: "Development",
       synopsis: "Desktop GUI for coding agents",
       maintainer: "T3 Tools <hello@t3.codes>",
+      ...(arch === "x64"
+        ? { appArmorProfile: "apps/desktop/resources/linux/t3-chatgpt-browser.apparmor" }
+        : {}),
       protocols: [
         {
           name: "T3 Code",
@@ -3357,10 +3391,11 @@ export const stageWindowsServerSidecar = Effect.fn("stageWindowsServerSidecar")(
   );
 });
 
-export const stageWindowsChatGptBrowserResources = Effect.fn("stageWindowsChatGptBrowserResources")(
+export const stageChatGptBrowserResources = Effect.fn("stageChatGptBrowserResources")(
   function* (input: {
     readonly repoRoot: string;
     readonly stageProdResourcesDir: string;
+    readonly target: "windows-x64" | "linux-x64";
     readonly environment?: NodeJS.ProcessEnv;
     readonly platform?: NodeJS.Platform;
   }) {
@@ -3372,9 +3407,10 @@ export const stageWindowsChatGptBrowserResources = Effect.fn("stageWindowsChatGp
     const providerManifest = path.join(providerSource, "extension/manifest.json");
     const providerStat = yield* fs.stat(providerManifest).pipe(Effect.orElseSucceed(() => null));
     if (providerStat?.type !== "File") {
-      return yield* new WindowsChatGptBrowserResourceMissingError({
+      return yield* new ChatGptBrowserResourceMissingError({
         resource: "provider",
         resourcePath: providerManifest,
+        target: input.target,
       });
     }
 
@@ -3392,12 +3428,16 @@ export const stageWindowsChatGptBrowserResources = Effect.fn("stageWindowsChatGp
     const chromiumSource = playwrightRoot
       ? path.join(playwrightRoot, CHATGPT_BROWSER_CHROMIUM_DIRECTORY)
       : CHATGPT_BROWSER_CHROMIUM_DIRECTORY;
-    const chromiumExecutable = path.join(chromiumSource, "chrome-win64/chrome.exe");
+    const chromiumExecutable = path.join(
+      chromiumSource,
+      input.target === "windows-x64" ? "chrome-win64/chrome.exe" : "chrome-linux64/chrome",
+    );
     const chromiumStat = yield* fs.stat(chromiumExecutable).pipe(Effect.orElseSucceed(() => null));
     if (chromiumStat?.type !== "File") {
-      return yield* new WindowsChatGptBrowserResourceMissingError({
+      return yield* new ChatGptBrowserResourceMissingError({
         resource: "chromium",
         resourcePath: chromiumExecutable,
+        target: input.target,
       });
     }
 
@@ -3413,6 +3453,55 @@ export const stageWindowsChatGptBrowserResources = Effect.fn("stageWindowsChatGp
     ]);
   },
 );
+
+export const validateLinuxPackagedPayload = Effect.fn(
+  "desktopArtifact.validateLinuxPackagedPayload",
+)(function* (input: { readonly stageDistDir: string; readonly targetArch: typeof BuildArch.Type }) {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const packagedAppDir = path.join(input.stageDistDir, "linux-unpacked");
+  const packagedStat = yield* fs.stat(packagedAppDir).pipe(Effect.orElseSucceed(() => null));
+  if (packagedStat?.type !== "Directory") {
+    return yield* new LinuxPackagedPayloadValidationError({
+      reason: "packaged-app-missing",
+      packagedAppDir,
+    });
+  }
+  if (input.targetArch !== "x64") return { packagedAppDir, chatGptBrowserFileCount: 0 } as const;
+
+  const resourcesDir = path.join(packagedAppDir, "resources");
+  const requiredFiles = [
+    "chatgpt-browser/provider/extension/manifest.json",
+    `chatgpt-browser/chromium/${CHATGPT_BROWSER_CHROMIUM_DIRECTORY}/chrome-linux64/chrome`,
+    "apparmor-profile",
+  ] as const;
+  const missingFiles: string[] = [];
+  for (const relativePath of requiredFiles) {
+    const stat = yield* fs
+      .stat(path.join(resourcesDir, ...relativePath.split("/")))
+      .pipe(Effect.orElseSucceed(() => null));
+    if (stat?.type !== "File") missingFiles.push(relativePath);
+  }
+  if (missingFiles.length > 0) {
+    return yield* new LinuxPackagedPayloadValidationError({
+      reason: "chatgpt-browser-missing",
+      packagedAppDir,
+      missingFiles,
+    });
+  }
+  const chatGptBrowserFileCount = yield* countPayloadFiles(
+    path.join(resourcesDir, "chatgpt-browser"),
+  );
+  if (chatGptBrowserFileCount > LINUX_CHATGPT_BROWSER_FILE_LIMIT) {
+    return yield* new LinuxPackagedPayloadValidationError({
+      reason: "chatgpt-browser-file-limit-exceeded",
+      packagedAppDir,
+      fileCount: chatGptBrowserFileCount,
+      fileLimit: LINUX_CHATGPT_BROWSER_FILE_LIMIT,
+    });
+  }
+  return { packagedAppDir, chatGptBrowserFileCount } as const;
+});
 
 function collectUnpackedAsarFiles(
   directory: DirectoryRecord,
@@ -4080,10 +4169,11 @@ const buildDesktopArtifactUnlocked = Effect.fn("buildDesktopArtifactUnlocked")(f
   // electron-builder is filtering out stageResourcesDir directory in the AppImage for production
   const stageProdResourcesDir = path.join(stageAppDir, "apps/desktop/prod-resources");
   yield* fs.copy(stageResourcesDir, stageProdResourcesDir);
-  if (options.platform === "win" && options.arch === "x64") {
-    yield* stageWindowsChatGptBrowserResources({
+  if ((options.platform === "win" || options.platform === "linux") && options.arch === "x64") {
+    yield* stageChatGptBrowserResources({
       repoRoot,
       stageProdResourcesDir,
+      target: options.platform === "win" ? "windows-x64" : "linux-x64",
     });
   }
 
@@ -4332,6 +4422,12 @@ const buildDesktopArtifactUnlocked = Effect.fn("buildDesktopArtifactUnlocked")(f
       distPath: stageDistDir,
       platform: options.platform,
       arch: options.arch,
+    });
+  }
+  if (options.platform === "linux") {
+    yield* validateLinuxPackagedPayload({
+      stageDistDir,
+      targetArch: options.arch,
     });
   }
 

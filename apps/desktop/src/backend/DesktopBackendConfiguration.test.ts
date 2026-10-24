@@ -318,6 +318,41 @@ describe("DesktopBackendConfiguration", () => {
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   );
 
+  it.effect("resolvePrimary points packaged Linux at loose managed browser resources", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const baseDir = yield* fileSystem.makeTempDirectoryScoped({
+        prefix: "t3-desktop-linux-browser-resource-test-",
+      });
+      const resourcesPath = path.join(baseDir, "resources");
+      const config = yield* Effect.gen(function* () {
+        const configuration = yield* DesktopBackendConfiguration.DesktopBackendConfiguration;
+        return yield* configuration.resolvePrimary;
+      }).pipe(
+        Effect.provide(
+          layerBackendConfiguration().pipe(
+            Layer.provideMerge(layerServerExposure),
+            Layer.provideMerge(DesktopAppSettings.layerTest()),
+            Layer.provideMerge(DesktopWslEnvironment.layerTest()),
+            Layer.provideMerge(DesktopWslServerTree.layerTest()),
+            Layer.provideMerge(
+              layerEnvironment(baseDir, {
+                appPath: `${resourcesPath}/app.asar`,
+                platform: "linux",
+                resourcesPath,
+              }),
+            ),
+          ),
+        ),
+      );
+      assert.equal(
+        config.env.T3CODE_CHATGPT_BROWSER_RESOURCES_DIR,
+        path.join(resourcesPath, "chatgpt-browser"),
+      );
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
+
   it.effect("resolveWsl pins a default-tracking run to the concrete default distro", () =>
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;

@@ -47,8 +47,10 @@ import {
   ancestorNodeModulesPaths,
   copyDirectoryPreservingSymlinks,
   LinuxBrowserSecretHostError,
+  LinuxPackagedPayloadValidationError,
   stageBrowserSecret,
-  stageWindowsChatGptBrowserResources,
+  stageChatGptBrowserResources,
+  validateLinuxPackagedPayload,
   validateWindowsPackagedPayload,
   validateBundledClientPublicConfig,
   verifyPackagedBundleIsSelfContained,
@@ -611,6 +613,44 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
     }),
   );
 
+  it.effect("packages the managed ChatGPT browser as a Linux x64 resource", () =>
+    Effect.gen(function* () {
+      const x64 = yield* createBuildConfig(
+        "linux",
+        "AppImage",
+        "1.2.3",
+        false,
+        false,
+        undefined,
+        undefined,
+        false,
+        "x64",
+      );
+      const arm64 = yield* createBuildConfig(
+        "linux",
+        "AppImage",
+        "1.2.3",
+        false,
+        false,
+        undefined,
+        undefined,
+        false,
+        "arm64",
+      );
+      const managedBrowserResource = {
+        from: "apps/desktop/prod-resources/chatgpt-browser",
+        to: "chatgpt-browser",
+      };
+      assert.deepInclude(x64.extraResources as ReadonlyArray<unknown>, managedBrowserResource);
+      assert.notDeepInclude(arm64.extraResources as ReadonlyArray<unknown>, managedBrowserResource);
+      assert.equal(
+        (x64.linux as { readonly appArmorProfile?: string }).appArmorProfile,
+        "apps/desktop/resources/linux/t3-chatgpt-browser.apparmor",
+      );
+      assert.isUndefined((arm64.linux as { readonly appArmorProfile?: string }).appArmorProfile);
+    }),
+  );
+
   it.effect("stages the pinned managed ChatGPT browser from provider assets and Playwright", () =>
     Effect.scoped(
       Effect.gen(function* () {
@@ -638,9 +678,10 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
         );
         yield* fs.writeFileString(chromiumExecutable, "chromium");
 
-        yield* stageWindowsChatGptBrowserResources({
+        yield* stageChatGptBrowserResources({
           repoRoot,
           stageProdResourcesDir,
+          target: "windows-x64",
           environment: { PLAYWRIGHT_BROWSERS_PATH: playwrightRoot },
           platform: "win32",
         });
@@ -660,6 +701,107 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
           ),
           "chromium",
         );
+      }),
+    ),
+  );
+
+  it.effect(
+    "stages the pinned full Chromium Linux x64 payload with the exact executable layout",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const fs = yield* FileSystem.FileSystem;
+          const path = yield* Path.Path;
+          const root = yield* fs.makeTempDirectoryScoped({
+            prefix: "t3-managed-browser-linux-stage-",
+          });
+          const repoRoot = path.join(root, "repo");
+          const providerManifest = path.join(
+            repoRoot,
+            "packages/provider-chatgpt-browser/assets/extension/manifest.json",
+          );
+          const playwrightRoot = path.join(root, "playwright");
+          const chromiumExecutable = path.join(
+            playwrightRoot,
+            "chromium-1223/chrome-linux64/chrome",
+          );
+          const stageProdResourcesDir = path.join(root, "stage/apps/desktop/prod-resources");
+          yield* fs.makeDirectory(path.dirname(providerManifest), { recursive: true });
+          yield* fs.makeDirectory(path.dirname(chromiumExecutable), { recursive: true });
+          yield* fs.writeFileString(
+            providerManifest,
+            '{"manifest_version":3,"version":"2.1.39.1"}\n',
+          );
+          yield* fs.writeFileString(chromiumExecutable, "chromium-linux");
+
+          yield* stageChatGptBrowserResources({
+            repoRoot,
+            stageProdResourcesDir,
+            target: "linux-x64",
+            environment: { PLAYWRIGHT_BROWSERS_PATH: playwrightRoot },
+            platform: "linux",
+          });
+
+          assert.equal(
+            yield* fs.readFileString(
+              path.join(
+                stageProdResourcesDir,
+                "chatgpt-browser/chromium/chromium-1223/chrome-linux64/chrome",
+              ),
+            ),
+            "chromium-linux",
+          );
+        }),
+      ),
+  );
+
+  it.effect("validates the Linux x64 packaged managed browser payload", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-linux-payload-" });
+        const stageDistDir = path.join(root, "dist");
+        const resourcesDir = path.join(stageDistDir, "linux-unpacked/resources");
+        const manifest = path.join(
+          resourcesDir,
+          "chatgpt-browser/provider/extension/manifest.json",
+        );
+        const browser = path.join(
+          resourcesDir,
+          "chatgpt-browser/chromium/chromium-1223/chrome-linux64/chrome",
+        );
+        const appArmorProfile = path.join(resourcesDir, "apparmor-profile");
+        yield* fs.makeDirectory(path.dirname(manifest), { recursive: true });
+        yield* fs.makeDirectory(path.dirname(browser), { recursive: true });
+        yield* fs.makeDirectory(path.dirname(appArmorProfile), { recursive: true });
+        yield* fs.writeFileString(manifest, "{}\n");
+        yield* fs.writeFileString(browser, "chromium");
+        yield* fs.writeFileString(appArmorProfile, "profile t3-chatgpt-browser {}\n");
+
+        const result = yield* validateLinuxPackagedPayload({ stageDistDir, targetArch: "x64" });
+        assert.equal(result.packagedAppDir, path.join(stageDistDir, "linux-unpacked"));
+
+        yield* fs.remove(browser);
+        const error = yield* validateLinuxPackagedPayload({
+          stageDistDir,
+          targetArch: "x64",
+        }).pipe(Effect.flip);
+        assert.instanceOf(error, LinuxPackagedPayloadValidationError);
+        assert.equal(error.reason, "chatgpt-browser-missing");
+        assert.deepStrictEqual(error.missingFiles, [
+          "chatgpt-browser/chromium/chromium-1223/chrome-linux64/chrome",
+        ]);
+
+        yield* fs.writeFileString(browser, "chromium");
+        yield* fs.remove(appArmorProfile);
+        const appArmorError = yield* validateLinuxPackagedPayload({
+          stageDistDir,
+          targetArch: "x64",
+        }).pipe(Effect.flip);
+        assert.instanceOf(appArmorError, LinuxPackagedPayloadValidationError);
+        assert.equal(appArmorError.reason, "chatgpt-browser-missing");
+        assert.deepStrictEqual(appArmorError.missingFiles, ["apparmor-profile"]);
       }),
     ),
   );

@@ -1,0 +1,12 @@
+# Package-owned AppArmor profile for the pinned managed ChatGPT browser.
+# electron-builder installs this profile for FPM packages on AppArmor-capable hosts.
+# The attachment glob covers the packaged managed Chromium executable while keeping
+# Chromium's user-namespace sandbox enabled.
+abi <abi/4.0>,
+include <tunables/global>
+
+profile t3-chatgpt-browser /**/resources/chatgpt-browser/chromium/chromium-1223/chrome-linux64/chrome flags=(unconfined) {
+  userns,
+
+  include if exists <local/t3-chatgpt-browser>
+}

@@ -554,7 +554,8 @@ const resolvePrimaryStartConfig = Effect.fn("desktop.backendConfiguration.resolv
         ELECTRON_RUN_AS_NODE: "1",
         T3CODE_CLI_PATH: Option.getOrUndefined(input.cliPath),
         T3CODE_CHATGPT_BROWSER_RESOURCES_DIR:
-          environment.isPackaged && environment.platform === "win32"
+          environment.isPackaged &&
+          (environment.platform === "win32" || environment.platform === "linux")
             ? environment.path.join(environment.resourcesPath, "chatgpt-browser")
             : undefined,
       },

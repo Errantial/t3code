@@ -16,6 +16,8 @@ async function fixtureRoot() {
   const provider = path.join(root, "provider");
   await fs.mkdir(path.join(chromium, "chrome-win64"), { recursive: true });
   await fs.writeFile(path.join(chromium, "chrome-win64", "chrome.exe"), "browser");
+  await fs.mkdir(path.join(chromium, "chrome-linux64"), { recursive: true });
+  await fs.writeFile(path.join(chromium, "chrome-linux64", "chrome"), "browser-linux");
   await fs.mkdir(path.join(provider, "extension"), { recursive: true });
   await fs.writeFile(
     path.join(provider, "extension", "manifest.json"),
@@ -65,6 +67,69 @@ describe("native ChatGPT browser release source", () => {
           environment: {},
         }),
       ).rejects.toThrow("pinned chromium-1223");
+    } finally {
+      await fs.rm(fixture.root, { recursive: true, force: true });
+    }
+  });
+
+  it("accepts the pinned Linux x64 full Chromium layout", async () => {
+    const fixture = await fixtureRoot();
+    try {
+      const release = await resolveNativeChatGptBrowserReleaseSource({
+        platform: "linux",
+        architecture: "x64",
+        chromiumDirectory: fixture.chromium,
+        chromiumRevision: `chromium-${CHATGPT_BROWSER_CHROMIUM_REVISION}`,
+        providerAssetsDirectory: fixture.provider,
+        environment: {},
+      });
+      expect(release.identity.target).toBe("linux-x64");
+      expect(release.browserExecutableRelativePath).toBe("chrome-linux64/chrome");
+      expect(release.browserArgs).toBeUndefined();
+    } finally {
+      await fs.rm(fixture.root, { recursive: true, force: true });
+    }
+  });
+
+  it("uses packaged Linux resources ahead of any Playwright cache", async () => {
+    const fixture = await fixtureRoot();
+    const packaged = path.join(fixture.root, "packaged");
+    const packagedProvider = path.join(packaged, "provider");
+    const packagedChromium = path.join(packaged, "chromium", "chromium-1223");
+    try {
+      await fs.cp(fixture.provider, packagedProvider, { recursive: true });
+      await fs.cp(fixture.chromium, packagedChromium, { recursive: true });
+      const release = await resolveNativeChatGptBrowserReleaseSource({
+        platform: "linux",
+        architecture: "x64",
+        environment: {
+          T3CODE_CHATGPT_BROWSER_RESOURCES_DIR: packaged,
+          PLAYWRIGHT_BROWSERS_PATH: fixture.root,
+        },
+      });
+      expect(release.browserSourceDirectory).toBe(packagedChromium);
+      expect(release.providerSourceDirectory).toBe(packagedProvider);
+      expect(release.browserExecutableRelativePath).toBe("chrome-linux64/chrome");
+    } finally {
+      await fs.rm(fixture.root, { recursive: true, force: true });
+    }
+  });
+
+  it("does not fall back to Playwright when packaged Linux resources are incomplete", async () => {
+    const fixture = await fixtureRoot();
+    const packaged = path.join(fixture.root, "packaged-incomplete");
+    try {
+      await fs.cp(fixture.provider, path.join(packaged, "provider"), { recursive: true });
+      await expect(
+        resolveNativeChatGptBrowserReleaseSource({
+          platform: "linux",
+          architecture: "x64",
+          environment: {
+            T3CODE_CHATGPT_BROWSER_RESOURCES_DIR: packaged,
+            PLAYWRIGHT_BROWSERS_PATH: fixture.root,
+          },
+        }),
+      ).rejects.toThrow("Configured managed Chromium directory does not exist");
     } finally {
       await fs.rm(fixture.root, { recursive: true, force: true });
     }
