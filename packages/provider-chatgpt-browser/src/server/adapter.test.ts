@@ -171,6 +171,20 @@ describe("ChatGPT Browser ProviderAdapterV2", () => {
         );
 
         expect(fake.calls.sentOperationIds).toEqual([operationId]);
+        expect(fake.calls.callOrder.slice(0, 2)).toEqual(["feature", "send"]);
+        expect(fake.calls.featureMessages[0]).toMatchObject({
+          type: "feature.message",
+          feature: "chatgpt-browser.s8",
+          providerOperationId: operationId,
+          payload: {
+            kind: "operation.configure",
+            selection: {
+              requestedModel: "default",
+              selectedModel: "gpt-6-thinking",
+              selectedReasoningEffort: "medium",
+            },
+          },
+        });
         expect(fake.calls.replayAfter).toEqual([0]);
         expect(fake.calls.finalReadOffsets).toEqual([0]);
         const finalMessage = events.findLast((event) => event.type === "message.updated");

@@ -219,7 +219,7 @@ export function createProviderV1Client({ chrome, fetch: fetcher, ports, peer }) 
   async function browserCall(pathname, body) {
     await load();
     if (
-      !/^\/provider-v1\/browser\/(?:status|input|events|drain|stop\/(?:redeem|ack))$/.test(pathname)
+      !/^\/provider-v1\/browser\/(?:status|input|events|drain|feature|stop\/(?:redeem|ack))$/.test(pathname)
     ) {
       return { ok: false, status: 400, data: { error: "invalid_provider_browser_route" } };
     }

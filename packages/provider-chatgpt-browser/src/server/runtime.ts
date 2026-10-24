@@ -26,6 +26,13 @@ import {
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 
+import {
+  CHATGPT_BROWSER_S8_FEATURE,
+  type ChatGptBrowserS8FeaturePayload,
+  type ChatGptBrowserS8FeatureTransport,
+} from "./features.ts";
+import type { ChatGptBrowserProviderV1FeatureMessage } from "@t3tools/provider-core/server/chatgptBrowserProviderV1";
+
 export interface ChatGptBrowserProviderSecretsPort {
   readonly read: (key: string) => Promise<Uint8Array | null>;
   readonly write: (key: string, value: Uint8Array) => Promise<void>;
@@ -69,6 +76,12 @@ export interface ChatGptBrowserProviderBrowserSession {
     providerOperationId: ChatGptBrowserProviderOperationId,
     signal: AbortSignal,
   ) => Promise<void>;
+  readonly feature?: (
+    message: ChatGptBrowserProviderV1FeatureMessage<
+      typeof CHATGPT_BROWSER_S8_FEATURE,
+      ChatGptBrowserS8FeaturePayload
+    >,
+  ) => Promise<unknown>;
   readonly close: () => Promise<void>;
 }
 
@@ -514,7 +527,7 @@ function interruptible<A>(
 }
 
 export interface DurableChatGptBrowserRuntime {
-  readonly transport: ChatGptBrowserProviderV1Transport;
+  readonly transport: ChatGptBrowserProviderV1Transport & ChatGptBrowserS8FeatureTransport;
   readonly acceptObservation: (
     observation: ChatGptBrowserProviderBrowserObservation,
   ) => Promise<void>;
@@ -607,7 +620,7 @@ export function makeDurableChatGptBrowserRuntime(input: {
     }
   };
 
-  const transport: ChatGptBrowserProviderV1Transport = {
+  const transport: ChatGptBrowserProviderV1Transport & ChatGptBrowserS8FeatureTransport = {
     identity: Effect.succeed(browser.identity),
     send: (request) =>
       interruptible("operation.send", async (signal) =>
@@ -791,6 +804,16 @@ export function makeDurableChatGptBrowserRuntime(input: {
         const record = await loadAndSync(request.providerOperationId, signal);
         return finalChunk(record, request.offset, request.limit);
       }),
+    feature: (message) =>
+      interruptible("feature.message", async () => {
+        if (message.feature !== CHATGPT_BROWSER_S8_FEATURE) {
+          throw providerFailure("invalid_state", "Unsupported ChatGPT Browser feature message.");
+        }
+        if (!browser.feature) {
+          throw providerFailure("invalid_state", "ChatGPT Browser feature transport is unavailable.");
+        }
+        return await browser.feature(message);
+      }),
   };
 
   const acceptObservation = (observation: ChatGptBrowserProviderBrowserObservation) =>
@@ -807,7 +830,7 @@ export function makeDurableChatGptBrowserTransport(input: {
   readonly stateDirectory: string;
   readonly browser: ChatGptBrowserProviderBrowserSession;
   readonly settlement: ChatGptBrowserProviderSettlementPort;
-}): ChatGptBrowserProviderV1Transport {
+}): ChatGptBrowserProviderV1Transport & ChatGptBrowserS8FeatureTransport {
   return makeDurableChatGptBrowserRuntime(input).transport;
 }
 

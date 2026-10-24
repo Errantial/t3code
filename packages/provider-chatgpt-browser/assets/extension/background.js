@@ -1541,6 +1541,16 @@ async function nativeProviderCall(pathname, body) {
   return reply;
 }
 
+function nativeProviderOperationForConversation(conversationId) {
+  const matches = nativeProviderOperationSummaries().filter(
+    (row) =>
+      row?.conversationId === conversationId &&
+      row.state !== "drained" &&
+      typeof row.providerOperationId === "string",
+  );
+  return matches.length === 1 ? matches[0] : null;
+}
+
 async function drainNativeProviderJournal() {
   if (nativeProviderDrain) return nativeProviderDrain;
   const work = (async () => {
@@ -5960,7 +5970,6 @@ const HANDLERS = {
     const native = nativeProviderOperations[id];
     if (native) {
       if (
-        typeof message.attachmentId === "string" ||
         typeof message.response === "string" ||
         typeof message.partial === "string" ||
         message.recoveryAction ||
@@ -5968,6 +5977,17 @@ const HANDLERS = {
         message.silenceBusyTurnId
       ) {
         return { ok: false, error: "provider_native_feature_unsupported" };
+      }
+      if (typeof message.attachmentId === "string") {
+        const reply = await nativeProviderCall("/provider-v1/browser/input", {
+          providerOperationId: native.providerOperationId,
+          id,
+          owner,
+          conversationId,
+          attachmentId: message.attachmentId,
+          offset: message.offset,
+        });
+        return ownsDocument(source) ? reply : { ok: false, error: "stale_document" };
       }
       const reply = await nativeProviderCall("/provider-v1/browser/input", {
         providerOperationId: native.providerOperationId,
@@ -6657,6 +6677,22 @@ const HANDLERS = {
     if (!ownsDocument(source)) return { ok: false, error: "stale_document" };
     await noteTabConversation(source, message.conversationId);
     if (!ownsDocument(source)) return { ok: false, error: "stale_document" };
+    const native = nativeProviderOperationForConversation(message.conversationId);
+    if (native) {
+      const reply = await nativeProviderCall("/provider-v1/browser/feature", {
+        providerOperationId: native.providerOperationId,
+        payload: {
+          kind: "approval.observe",
+          documentId: String(source.documentId || ""),
+          conversationId: message.conversationId,
+          ...(message.approvalCard ? { card: message.approvalCard } : {}),
+          ...(message.approvalResult ? { result: message.approvalResult } : {}),
+        },
+      });
+      return ownsDocument(source) && reply?.ok && reply.data?.ok === true
+        ? { ok: true, data: reply.data.data || {} }
+        : { ok: false, error: "provider_native_approval_unavailable" };
+    }
     // Goal drafts are conversation-scoped in the app but browser writes are tab-scoped. Tell
     // the app which tab is polling so two tabs showing the same chat cannot both receive and
     // submit one ready Goal draft.

@@ -16477,7 +16477,12 @@
       if (limitation) return fail(limitation);
       if (
         !intoRunningTurn() &&
-        !(await CLF_DOM.selectModelSettings(input.model, input.reasoningEffort, onTarget))
+        !(await CLF_DOM.selectModelSettings(
+          input.model,
+          input.reasoningEffort,
+          onTarget,
+          input.exactModelSelection === true,
+        ))
       )
         return fail(
           providerLimitation() ||

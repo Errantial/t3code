@@ -1,11 +1,14 @@
 import {
   ProviderDriverKind,
   type OrchestrationV2ConversationMessage,
+  type OrchestrationV2ExecutionNode,
   type OrchestrationV2ProviderCapabilities,
   type OrchestrationV2ProviderFailure,
   type OrchestrationV2ProviderSession,
   type OrchestrationV2ProviderThread,
   type OrchestrationV2ProviderTurn,
+  type OrchestrationV2RuntimeRequest,
+  type OrchestrationV2TurnItem,
 } from "@t3tools/contracts";
 import {
   CHATGPT_BROWSER_PROVIDER_V1_FINAL_CONTENT_MAX_UTF16,
@@ -33,6 +36,14 @@ import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
 
+import {
+  CHATGPT_BROWSER_S8_FEATURE,
+  prepareChatGptBrowserAttachments,
+  resolveChatGptBrowserSelection,
+  s8FeatureMessage,
+  type ChatGptBrowserS8ApprovalSnapshot,
+  type ChatGptBrowserS8FeatureTransport,
+} from "./features.ts";
 import {
   ChatGptBrowserOperationStore,
   type ChatGptBrowserOperationStoreError,
@@ -84,12 +95,12 @@ export const ChatGptBrowserProviderCapabilitiesV2 = {
     supportsDynamicToolCallbacks: false,
   },
   approvals: {
-    supportsCommandApproval: false,
+    supportsCommandApproval: true,
     supportsFileReadApproval: false,
     supportsFileChangeApproval: false,
     supportsApplyPatchApproval: false,
     approvalsHaveNativeRequestIds: false,
-    approvalCallbacksAreLiveOnly: false,
+    approvalCallbacksAreLiveOnly: true,
     approvalsCanOriginateFromSubagents: false,
   },
   planning: {
@@ -137,6 +148,15 @@ export interface ChatGptBrowserAdapterV2Options {
   readonly instanceId: ProviderAdapter.ProviderAdapterV2["Service"]["instanceId"];
   readonly defaultCwd: string;
   readonly host: ChatGptBrowserHostPort;
+  readonly resolveAttachmentPath?: (attachment: ProviderAdapter.ProviderAdapterV2TurnMessage["attachments"][number]) => string | null;
+}
+
+interface ActiveApproval {
+  readonly documentId: string;
+  readonly cardId: string;
+  readonly request: OrchestrationV2RuntimeRequest;
+  readonly node: OrchestrationV2ExecutionNode;
+  readonly turnItem: Extract<OrchestrationV2TurnItem, { type: "approval_request" }>;
 }
 
 interface ActiveTurn {
@@ -153,6 +173,8 @@ interface ActiveTurn {
     | undefined;
   interruptRequested: boolean;
   finished: boolean;
+  nextItemOrdinal: number;
+  approval?: ActiveApproval;
 }
 
 const isTransportError = Schema.is(ChatGptBrowserProviderV1Error);
@@ -205,9 +227,12 @@ export const makeChatGptBrowserAdapterV2 = Effect.fn("makeChatGptBrowserAdapterV
           "ChatGPT Browser does not expose dedicated Plan mode in provider-v1",
         );
       }
-      if (input.modelSelection.model !== "default") {
+      try {
+        resolveChatGptBrowserSelection(input.modelSelection);
+      } catch (cause) {
         return yield* protocolError(
-          "ChatGPT Browser model selection is not available in provider-v1",
+          "ChatGPT Browser model or reasoning selection is unsupported",
+          cause,
         );
       }
 
@@ -224,6 +249,8 @@ export const makeChatGptBrowserAdapterV2 = Effect.fn("makeChatGptBrowserAdapterV
       );
       yield* Effect.addFinalizer(() => hostSession.close.pipe(Effect.ignore));
       const transport = hostSession.transport;
+      const featureTransport = transport as ChatGptBrowserProviderV1Transport &
+        Partial<ChatGptBrowserS8FeatureTransport>;
       const identity = yield* transport.identity.pipe(
         Effect.mapError(
           (cause) =>
@@ -241,6 +268,17 @@ export const makeChatGptBrowserAdapterV2 = Effect.fn("makeChatGptBrowserAdapterV
           cause: "ChatGPT Browser provider-v1 transport is not ready.",
         });
       }
+      if (
+        !identity.features.includes(CHATGPT_BROWSER_S8_FEATURE) ||
+        typeof featureTransport.feature !== "function"
+      ) {
+        return yield* new ProviderAdapter.ProviderAdapterOpenSessionError({
+          driver: CHATGPT_BROWSER_DRIVER_KIND,
+          providerSessionId: input.providerSessionId,
+          cause: "ChatGPT Browser S8 feature transport is unavailable.",
+        });
+      }
+      const feature = featureTransport.feature;
 
       const now = yield* DateTime.now;
       let session: OrchestrationV2ProviderSession = {
@@ -447,6 +485,34 @@ export const makeChatGptBrowserAdapterV2 = Effect.fn("makeChatGptBrowserAdapterV
         if (turn.assistantMessage?.streaming) {
           yield* updateAssistant(turn, turn.assistantMessage.text, false);
         }
+        if (turn.approval) {
+          yield* emit({
+            type: "runtime_request.updated",
+            driver: CHATGPT_BROWSER_DRIVER_KIND,
+            threadId: turn.input.threadId,
+            runtimeRequest: {
+              ...turn.approval.request,
+              status: "expired",
+              resolvedAt: completedAt,
+            },
+          });
+          yield* emit({
+            type: "node.updated",
+            driver: CHATGPT_BROWSER_DRIVER_KIND,
+            node: { ...turn.approval.node, status: "cancelled", completedAt },
+          });
+          yield* emit({
+            type: "turn_item.updated",
+            driver: CHATGPT_BROWSER_DRIVER_KIND,
+            turnItem: {
+              ...turn.approval.turnItem,
+              status: "cancelled",
+              completedAt,
+              updatedAt: completedAt,
+            },
+          });
+          delete turn.approval;
+        }
         turn.providerTurn = { ...turn.providerTurn, status, completedAt };
         yield* emit({
           type: "provider_turn.updated",
@@ -471,7 +537,7 @@ export const makeChatGptBrowserAdapterV2 = Effect.fn("makeChatGptBrowserAdapterV
             nodeId: turn.input.rootNodeId,
             providerThreadId: turn.providerTurn.providerThreadId,
             providerTurnId: turn.providerTurn.id,
-            itemOrdinal: 1,
+            itemOrdinal: turn.nextItemOrdinal++,
             failure,
             occurredAt: completedAt,
           });
@@ -665,6 +731,187 @@ export const makeChatGptBrowserAdapterV2 = Effect.fn("makeChatGptBrowserAdapterV
         );
       });
 
+      const publishApproval = Effect.fnUntraced(function* (
+        turn: ActiveTurn,
+        snapshot: ChatGptBrowserS8ApprovalSnapshot,
+      ) {
+        const approval = snapshot.approval;
+        if (!approval) {
+          if (turn.approval) {
+            const expiredAt = yield* DateTime.now;
+            yield* emit({
+              type: "runtime_request.updated",
+              driver: CHATGPT_BROWSER_DRIVER_KIND,
+              threadId: turn.input.threadId,
+              runtimeRequest: {
+                ...turn.approval.request,
+                status: "expired",
+                resolvedAt: expiredAt,
+              },
+            });
+            yield* emit({
+              type: "node.updated",
+              driver: CHATGPT_BROWSER_DRIVER_KIND,
+              node: { ...turn.approval.node, status: "cancelled", completedAt: expiredAt },
+            });
+            yield* emit({
+              type: "turn_item.updated",
+              driver: CHATGPT_BROWSER_DRIVER_KIND,
+              turnItem: {
+                ...turn.approval.turnItem,
+                status: "cancelled",
+                completedAt: expiredAt,
+                updatedAt: expiredAt,
+              },
+            });
+            delete turn.approval;
+          }
+          return;
+        }
+        const same =
+          turn.approval?.documentId === approval.documentId &&
+          turn.approval.cardId === approval.cardId;
+        if (!same) {
+          if (turn.approval) {
+            const staleAt = yield* DateTime.now;
+            yield* emit({
+              type: "runtime_request.updated",
+              driver: CHATGPT_BROWSER_DRIVER_KIND,
+              threadId: turn.input.threadId,
+              runtimeRequest: {
+                ...turn.approval.request,
+                status: "expired",
+                resolvedAt: staleAt,
+              },
+            });
+          }
+          const createdAt = yield* DateTime.now;
+          const nativeRequestId = `${approval.documentId}:${approval.cardId}`;
+          const requestId = yield* idAllocator.allocate.runtimeRequest({
+            driver: CHATGPT_BROWSER_DRIVER_KIND,
+            providerTurnId: turn.providerTurn.id,
+            nativeRequestId,
+          });
+          const nodeId = idAllocator.derive.approvalNode({ requestId });
+          const node: OrchestrationV2ExecutionNode = {
+            id: nodeId,
+            threadId: turn.input.threadId,
+            runId: turn.input.runId,
+            parentNodeId: turn.input.rootNodeId,
+            rootNodeId: turn.input.rootNodeId,
+            kind: "approval_request",
+            status: "waiting",
+            countsForRun: false,
+            providerThreadId: turn.providerTurn.providerThreadId,
+            providerTurnId: turn.providerTurn.id,
+            nativeItemRef: {
+              driver: CHATGPT_BROWSER_DRIVER_KIND,
+              nativeId: nativeRequestId,
+              strength: "weak",
+            },
+            runtimeRequestId: requestId,
+            checkpointScopeId: null,
+            startedAt: createdAt,
+            completedAt: null,
+          };
+          const request: OrchestrationV2RuntimeRequest = {
+            id: requestId,
+            nodeId,
+            providerTurnId: turn.providerTurn.id,
+            nativeRequestRef: {
+              driver: CHATGPT_BROWSER_DRIVER_KIND,
+              nativeId: nativeRequestId,
+              strength: "weak",
+            },
+            kind: "permission",
+            status: "pending",
+            responseCapability: { type: "live", providerSessionId: input.providerSessionId },
+            createdAt,
+            resolvedAt: null,
+          };
+          const turnItem: ActiveApproval["turnItem"] = {
+            id: idAllocator.derive.approvalTurnItem({ requestId }),
+            threadId: turn.input.threadId,
+            runId: turn.input.runId,
+            nodeId,
+            providerThreadId: turn.providerTurn.providerThreadId,
+            providerTurnId: turn.providerTurn.id,
+            nativeItemRef: node.nativeItemRef,
+            parentItemId: null,
+            ordinal: turn.nextItemOrdinal++,
+            status: "waiting",
+            title: null,
+            startedAt: createdAt,
+            completedAt: null,
+            updatedAt: createdAt,
+            type: "approval_request",
+            requestId,
+            requestKind: "permission",
+            prompt: approval.lines.join("\n"),
+            options: [
+              { decision: "accept", label: approval.allow ? "Allow" : "Continue" },
+              { decision: "decline", label: "Deny" },
+            ],
+          };
+          turn.approval = { documentId: approval.documentId, cardId: approval.cardId, request, node, turnItem };
+          yield* emit({ type: "node.updated", driver: CHATGPT_BROWSER_DRIVER_KIND, node });
+          yield* emit({
+            type: "runtime_request.updated",
+            driver: CHATGPT_BROWSER_DRIVER_KIND,
+            threadId: turn.input.threadId,
+            runtimeRequest: request,
+          });
+          yield* emit({ type: "turn_item.updated", driver: CHATGPT_BROWSER_DRIVER_KIND, turnItem });
+        }
+        if (approval.outcome && turn.approval) {
+          const completedAt = yield* DateTime.now;
+          const clicked = approval.outcome === "clicked";
+          yield* emit({
+            type: "runtime_request.updated",
+            driver: CHATGPT_BROWSER_DRIVER_KIND,
+            threadId: turn.input.threadId,
+            runtimeRequest: {
+              ...turn.approval.request,
+              status: clicked ? "resolved" : "expired",
+              resolvedAt: completedAt,
+            },
+          });
+          yield* emit({
+            type: "node.updated",
+            driver: CHATGPT_BROWSER_DRIVER_KIND,
+            node: {
+              ...turn.approval.node,
+              status: clicked ? "completed" : "cancelled",
+              completedAt,
+            },
+          });
+          yield* emit({
+            type: "turn_item.updated",
+            driver: CHATGPT_BROWSER_DRIVER_KIND,
+            turnItem: {
+              ...turn.approval.turnItem,
+              status: clicked ? "completed" : "cancelled",
+              completedAt,
+              updatedAt: completedAt,
+            },
+          });
+          delete turn.approval;
+        }
+      });
+
+      const watchApprovals = Effect.fnUntraced(function* (turn: ActiveTurn) {
+        while (!turn.finished && active === turn) {
+          const snapshot = yield* feature(
+            s8FeatureMessage(turn.operationId, { kind: "approval.read" }),
+          ).pipe(
+            Effect.map((value) => value as ChatGptBrowserS8ApprovalSnapshot),
+            Effect.catch(() => Effect.succeed(undefined)),
+          );
+          if (snapshot) yield* publishApproval(turn, snapshot);
+          yield* Effect.sleep("200 millis");
+        }
+      });
+
       const start = Effect.fnUntraced(function* (args: ProviderAdapter.ProviderAdapterV2TurnInput) {
         if (thread?.id !== args.providerThread.id) {
           return yield* protocolError("ChatGPT Browser turn targeted an unbound provider thread");
@@ -672,12 +919,13 @@ export const makeChatGptBrowserAdapterV2 = Effect.fn("makeChatGptBrowserAdapterV
         if (active !== undefined) {
           return yield* protocolError("ChatGPT Browser already has an active operation");
         }
-        if (args.message.attachments.length > 0) {
-          return yield* protocolError("ChatGPT Browser provider-v1 does not support attachments");
-        }
-        if (args.modelSelection.model !== "default") {
+        let selection;
+        try {
+          selection = resolveChatGptBrowserSelection(args.modelSelection);
+        } catch (cause) {
           return yield* protocolError(
-            "ChatGPT Browser model selection is not available in provider-v1",
+            "ChatGPT Browser model or reasoning selection is unsupported",
+            cause,
           );
         }
 
@@ -727,6 +975,26 @@ export const makeChatGptBrowserAdapterV2 = Effect.fn("makeChatGptBrowserAdapterV
               "ChatGPT Browser exact operation is unknown during recovery; missing provider state is not proof browser work never started",
             );
           }
+          const attachments = yield* Effect.tryPromise({
+            try: () =>
+              prepareChatGptBrowserAttachments({
+                attachments: args.message.attachments,
+                resolvePath: options.resolveAttachmentPath ?? (() => null),
+              }),
+            catch: (cause) =>
+              protocolError("ChatGPT Browser attachment preparation failed", cause),
+          });
+          yield* feature(
+            s8FeatureMessage(operationId, {
+              kind: "operation.configure",
+              selection,
+              attachments,
+            }),
+          ).pipe(
+            Effect.mapError((cause) =>
+              protocolError("ChatGPT Browser S8 operation configuration failed", cause),
+            ),
+          );
           const receipt = yield* transport.send({
             type: "operation.send",
             providerOperationId: operationId,
@@ -778,6 +1046,7 @@ export const makeChatGptBrowserAdapterV2 = Effect.fn("makeChatGptBrowserAdapterV
           terminal: undefined,
           interruptRequested: recovery.cancelRequested,
           finished: false,
+          nextItemOrdinal: 1,
         };
         active = turn;
         yield* updateSession("running");
@@ -801,6 +1070,7 @@ export const makeChatGptBrowserAdapterV2 = Effect.fn("makeChatGptBrowserAdapterV
             return yield* protocolError("ChatGPT Browser cancel returned a different operation");
           }
         }
+        yield* watchApprovals(turn).pipe(Effect.forkIn(scope));
         yield* consumeOperation(turn, persisted.consumerHighWater).pipe(
           Effect.catch((cause) => failBackground(turn, cause)),
           Effect.forkIn(scope),
@@ -889,14 +1159,45 @@ export const makeChatGptBrowserAdapterV2 = Effect.fn("makeChatGptBrowserAdapterV
               ),
             ),
         ),
-        respondToRuntimeRequest: (args) =>
-          Effect.fail(
-            new ProviderAdapter.ProviderAdapterRuntimeRequestResponseError({
-              driver: CHATGPT_BROWSER_DRIVER_KIND,
-              requestId: args.requestId,
-              cause: "ChatGPT Browser provider-v1 does not expose runtime requests.",
-            }),
-          ),
+        respondToRuntimeRequest: Effect.fn("ChatGptBrowserAdapterV2.respondToRuntimeRequest")(
+          function* (args) {
+            const turn = active;
+            const approval = turn?.approval;
+            if (!turn || !approval || approval.request.id !== args.requestId) {
+              return yield* new ProviderAdapter.ProviderAdapterRuntimeRequestResponseError({
+                driver: CHATGPT_BROWSER_DRIVER_KIND,
+                requestId: args.requestId,
+                cause: "ChatGPT Browser approval request is no longer active.",
+              });
+            }
+            if (args.decision !== "accept" && args.decision !== "decline") {
+              return yield* new ProviderAdapter.ProviderAdapterRuntimeRequestResponseError({
+                driver: CHATGPT_BROWSER_DRIVER_KIND,
+                requestId: args.requestId,
+                cause: "ChatGPT Browser approvals support only one-time Allow or Deny.",
+              });
+            }
+            const token = `${String(args.requestId)}:${approval.cardId}`.slice(0, 64);
+            yield* feature(
+              s8FeatureMessage(turn.operationId, {
+                kind: "approval.answer",
+                documentId: approval.documentId,
+                cardId: approval.cardId,
+                token,
+                choice: args.decision === "accept" ? "allow" : "deny",
+              }),
+            ).pipe(
+              Effect.mapError(
+                (cause) =>
+                  new ProviderAdapter.ProviderAdapterRuntimeRequestResponseError({
+                    driver: CHATGPT_BROWSER_DRIVER_KIND,
+                    requestId: args.requestId,
+                    cause,
+                  }),
+              ),
+            );
+          },
+        ),
         readThreadSnapshot: (args) =>
           Effect.fail(
             new ProviderAdapter.ProviderAdapterReadThreadSnapshotError({

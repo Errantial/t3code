@@ -16,6 +16,10 @@ import * as Stream from "effect/Stream";
 
 import { ChatGptBrowserSettings } from "../settings.ts";
 import { CHATGPT_BROWSER_DRIVER_KIND, makeChatGptBrowserAdapterV2 } from "./adapter.ts";
+import {
+  CHATGPT_BROWSER_OBSERVED_MODELS,
+  CHATGPT_BROWSER_REASONING_OPTION,
+} from "./features.ts";
 import { ChatGptBrowserHost } from "./host.ts";
 import { ChatGptBrowserOperationStore } from "./operationRecovery.ts";
 
@@ -91,15 +95,29 @@ export const ChatGptBrowserDriver: ProviderDriver<ChatGptBrowserSettings, ChatGp
           ? { message: "ChatGPT Browser is not ready on this environment." }
           : {}),
         setup: { canAuthenticate: false, canInstall: false },
-        models: [
-          {
-            slug: "default",
-            name: "Default",
-            isCustom: false,
-            isDefault: true,
-            capabilities: null,
+        models: CHATGPT_BROWSER_OBSERVED_MODELS.map(({ model, reasoningEffort }, index) => ({
+          slug: model,
+          name: model === "gpt-6-thinking" ? "GPT-6 Thinking" : "GPT-6",
+          isCustom: false,
+          isDefault: index === 0,
+          capabilities: {
+            optionDescriptors: [
+              {
+                id: CHATGPT_BROWSER_REASONING_OPTION,
+                label: "Reasoning effort",
+                type: "select" as const,
+                currentValue: reasoningEffort,
+                options: [
+                  {
+                    id: reasoningEffort,
+                    label: reasoningEffort === "none" ? "None" : "Medium",
+                    isDefault: true,
+                  },
+                ],
+              },
+            ],
           },
-        ],
+        })),
         slashCommands: [],
         skills: [],
       };
@@ -114,6 +132,7 @@ export const ChatGptBrowserDriver: ProviderDriver<ChatGptBrowserSettings, ChatGp
         instanceId,
         defaultCwd: providerHost.paths.cwd,
         host: hostPort,
+        resolveAttachmentPath: providerHost.resolveAttachmentPath,
       });
       return {
         instanceId,

@@ -6,6 +6,7 @@ import { ProviderSessionId, RunAttemptId } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import { chatGptBrowserProviderOperationIdForAttempt } from "@t3tools/provider-core/server/chatgptBrowserProviderV1";
 
+import { CHATGPT_BROWSER_S8_FEATURE } from "./features.ts";
 import { startNativeChatGptBrowserBroker } from "./nativeBrowser.ts";
 
 const peerHeaders = {
@@ -62,7 +63,312 @@ function requestJson<T>(input: {
   });
 }
 
+async function startReadyBroker() {
+  const secrets = new Map<string, Uint8Array>();
+  const broker = await startNativeChatGptBrowserBroker({
+    ports: [0],
+    readyTimeoutMs: 5_000,
+    secrets: {
+      read: async (key) => secrets.get(key) ?? null,
+      write: async (key, value) => {
+        secrets.set(key, value);
+      },
+      delete: async (key) => {
+        secrets.delete(key);
+      },
+    },
+  });
+  const pair = await requestJson<{ token: string }>({
+    port: broker.port,
+    path: "/provider-v1/pair",
+    body: { reuse: true },
+  });
+  const headers = { authorization: `Bearer ${pair.body.token}` };
+  await requestJson({
+    port: broker.port,
+    path: "/provider-v1/browser/status",
+    headers,
+    body: { operations: [], after: 0, wait: false },
+  });
+  const session = await broker.waitForSession();
+  return { broker, headers, session };
+}
+
 describe("native ChatGPT browser broker", () => {
+  it("rejects an approval answer after the browser document changes", async () => {
+    const { broker, headers, session } = await startReadyBroker();
+    try {
+      const providerOperationId = chatGptBrowserProviderOperationIdForAttempt(
+        RunAttemptId.make("attempt-native-stale-approval"),
+      );
+      const controller = new AbortController();
+      await session.sendExact(
+        {
+          type: "operation.send",
+          providerOperationId,
+          providerSessionId: ProviderSessionId.make("provider-session-stale-approval"),
+          text: "approval please",
+        },
+        controller.signal,
+      );
+      const pending = await requestJson<{ inputs: Array<{ id: string }> }>({
+        port: broker.port,
+        path: "/provider-v1/browser/status",
+        headers,
+        body: { operations: [], after: 0, wait: false },
+      });
+      const id = pending.body.inputs[0]!.id;
+      const owner = "1:approval-document:0";
+      const conversationId = "44444444-4444-4444-4444-444444444444";
+      await requestJson({
+        port: broker.port,
+        path: "/provider-v1/browser/input",
+        headers,
+        body: { providerOperationId, id, owner, conversationId },
+      });
+      await requestJson({
+        port: broker.port,
+        path: "/provider-v1/browser/input",
+        headers,
+        body: { providerOperationId, id, owner, conversationId, authorize: true },
+      });
+      await requestJson({
+        port: broker.port,
+        path: "/provider-v1/browser/input",
+        headers,
+        body: {
+          providerOperationId,
+          id,
+          owner,
+          conversationId,
+          messageId: "user-approval-test",
+          ack: true,
+        },
+      });
+
+      const observe = (documentId: string, cardId: string) =>
+        requestJson({
+          port: broker.port,
+          path: "/provider-v1/browser/feature",
+          headers,
+          body: {
+            providerOperationId,
+            payload: {
+              kind: "approval.observe",
+              documentId,
+              conversationId,
+              card: { id: cardId, lines: ["Allow this action?"], allow: true },
+            },
+          },
+        });
+      expect((await observe("document-a", "card-a")).status).toBe(200);
+      expect((await observe("document-b", "card-b")).status).toBe(200);
+
+      await expect(
+        session.feature!({
+          type: "feature.message",
+          feature: CHATGPT_BROWSER_S8_FEATURE,
+          providerOperationId,
+          payload: {
+            kind: "approval.answer",
+            documentId: "document-a",
+            cardId: "card-a",
+            token: "stale-token",
+            choice: "allow",
+          },
+        }),
+      ).rejects.toThrow("provider_approval_stale");
+    } finally {
+      await broker.close();
+    }
+  });
+
+  it("prevents a document reload from re-claiming an attachment upload", async () => {
+    const { broker, headers, session } = await startReadyBroker();
+    try {
+      const providerOperationId = chatGptBrowserProviderOperationIdForAttempt(
+        RunAttemptId.make("attempt-native-attachment-reload"),
+      );
+      await session.feature!({
+        type: "feature.message",
+        feature: CHATGPT_BROWSER_S8_FEATURE,
+        providerOperationId,
+        payload: {
+          kind: "operation.configure",
+          selection: {
+            requestedModel: "gpt-6-thinking",
+            selectedModel: "gpt-6-thinking",
+            requestedReasoningEffort: "medium",
+            selectedReasoningEffort: "medium",
+          },
+          attachments: [
+            {
+              id: "attachment-one",
+              name: "one.txt",
+              mimeType: "text/plain",
+              size: 3,
+              sha256: "7692c3ad3540bb803c020b3aee66cd8887123234ea0c6e7143c0add73ff431ed",
+              bytesBase64: Buffer.from("one").toString("base64"),
+            },
+          ],
+        },
+      });
+      await session.sendExact(
+        {
+          type: "operation.send",
+          providerOperationId,
+          providerSessionId: ProviderSessionId.make("provider-session-attachment-reload"),
+          text: "send file",
+        },
+        new AbortController().signal,
+      );
+      const pending = await requestJson<{ inputs: Array<{ id: string }> }>({
+        port: broker.port,
+        path: "/provider-v1/browser/status",
+        headers,
+        body: { operations: [], after: 0, wait: false },
+      });
+      const id = pending.body.inputs[0]!.id;
+      const first = await requestJson({
+        port: broker.port,
+        path: "/provider-v1/browser/input",
+        headers,
+        body: { providerOperationId, id, owner: "document-a", conversationId: null },
+      });
+      expect(first.status).toBe(200);
+      const chunk = await requestJson<{ chunk: string }>({
+        port: broker.port,
+        path: "/provider-v1/browser/input",
+        headers,
+        body: {
+          providerOperationId,
+          id,
+          owner: "document-a",
+          conversationId: null,
+          attachmentId: "attachment-one",
+          offset: 0,
+        },
+      });
+      expect(Buffer.from(chunk.body.chunk, "base64").toString()).toBe("one");
+      const reloaded = await requestJson<{ error: string }>({
+        port: broker.port,
+        path: "/provider-v1/browser/input",
+        headers,
+        body: { providerOperationId, id, owner: "document-b", conversationId: null },
+      });
+      expect(reloaded.status).toBe(409);
+      expect(reloaded.body.error).toBe("input_document_changed");
+    } finally {
+      await broker.close();
+    }
+  });
+
+  it("does not allow attachment upload to repeat after Send when the ACK is lost", async () => {
+    const { broker, headers, session } = await startReadyBroker();
+    try {
+      const providerOperationId = chatGptBrowserProviderOperationIdForAttempt(
+        RunAttemptId.make("attempt-native-attachment-lost-ack"),
+      );
+      await session.feature!({
+        type: "feature.message",
+        feature: CHATGPT_BROWSER_S8_FEATURE,
+        providerOperationId,
+        payload: {
+          kind: "operation.configure",
+          selection: {
+            requestedModel: "gpt-6",
+            selectedModel: "gpt-6",
+            requestedReasoningEffort: "none",
+            selectedReasoningEffort: "none",
+          },
+          attachments: [
+            {
+              id: "attachment-two",
+              name: "two.txt",
+              mimeType: "text/plain",
+              size: 3,
+              sha256: "3fc4ccfe745870e2c0d99f71f30ff0656c8dedd41cc1d7d3d376b0dbe685e2f3",
+              bytesBase64: Buffer.from("two").toString("base64"),
+            },
+          ],
+        },
+      });
+      await session.sendExact(
+        {
+          type: "operation.send",
+          providerOperationId,
+          providerSessionId: ProviderSessionId.make("provider-session-attachment-lost-ack"),
+          text: "send file once",
+        },
+        new AbortController().signal,
+      );
+      const pending = await requestJson<{ inputs: Array<{ id: string }> }>({
+        port: broker.port,
+        path: "/provider-v1/browser/status",
+        headers,
+        body: { operations: [], after: 0, wait: false },
+      });
+      const id = pending.body.inputs[0]!.id;
+      const owner = "document-send";
+      await requestJson({
+        port: broker.port,
+        path: "/provider-v1/browser/input",
+        headers,
+        body: { providerOperationId, id, owner, conversationId: null },
+      });
+      const firstChunk = await requestJson({
+        port: broker.port,
+        path: "/provider-v1/browser/input",
+        headers,
+        body: {
+          providerOperationId,
+          id,
+          owner,
+          conversationId: null,
+          attachmentId: "attachment-two",
+          offset: 0,
+        },
+      });
+      expect(firstChunk.status).toBe(200);
+      expect(
+        (
+          await requestJson({
+            port: broker.port,
+            path: "/provider-v1/browser/input",
+            headers,
+            body: { providerOperationId, id, owner, conversationId: null, authorize: true },
+          })
+        ).status,
+      ).toBe(200);
+
+      const retryClaim = await requestJson<{ error: string }>({
+        port: broker.port,
+        path: "/provider-v1/browser/input",
+        headers,
+        body: { providerOperationId, id, owner, conversationId: null },
+      });
+      expect(retryClaim.status).toBe(409);
+      expect(retryClaim.body.error).toBe("input_send_ambiguous");
+      const retryChunk = await requestJson<{ error: string }>({
+        port: broker.port,
+        path: "/provider-v1/browser/input",
+        headers,
+        body: {
+          providerOperationId,
+          id,
+          owner,
+          conversationId: null,
+          attachmentId: "attachment-two",
+          offset: 0,
+        },
+      });
+      expect(retryChunk.status).toBe(409);
+      expect(retryChunk.body.error).toBe("input_not_owned");
+    } finally {
+      await broker.close();
+    }
+  });
+
   it("fails closed on protocol mismatch and missing provider bearer", async () => {
     const secrets = new Map<string, Uint8Array>();
     const broker = await startNativeChatGptBrowserBroker({

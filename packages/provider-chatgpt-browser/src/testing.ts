@@ -10,6 +10,8 @@ import {
 } from "@t3tools/provider-core/server/chatgptBrowserProviderV1";
 import * as Effect from "effect/Effect";
 
+import type { ChatGptBrowserS8FeatureTransport } from "./server/features.ts";
+
 export interface FakeChatGptBrowserProviderV1Script {
   readonly providerSessionId: ProviderSessionId;
   readonly events: ReadonlyArray<ChatGptBrowserProviderV1CoreEvent>;
@@ -27,12 +29,14 @@ export interface FakeChatGptBrowserProviderV1Calls {
   readonly cancelledOperationIds: Array<ChatGptBrowserProviderOperationId>;
   readonly replayAfter: Array<number>;
   readonly finalReadOffsets: Array<number>;
+  readonly featureMessages: Array<unknown>;
+  readonly callOrder: Array<"feature" | "send">;
 }
 
 export function makeFakeChatGptBrowserProviderV1Transport(
   script: FakeChatGptBrowserProviderV1Script,
 ): {
-  readonly transport: ChatGptBrowserProviderV1Transport;
+  readonly transport: ChatGptBrowserProviderV1Transport & ChatGptBrowserS8FeatureTransport;
   readonly calls: FakeChatGptBrowserProviderV1Calls;
 } {
   const calls: FakeChatGptBrowserProviderV1Calls = {
@@ -41,6 +45,8 @@ export function makeFakeChatGptBrowserProviderV1Transport(
     cancelledOperationIds: [],
     replayAfter: [],
     finalReadOffsets: [],
+    featureMessages: [],
+    callOrder: [],
   };
   let operationId: ChatGptBrowserProviderOperationId | undefined = script.initialOperationId;
   const highWater = script.events.at(-1)?.sequence ?? ChatGptBrowserProviderV1EventSequence.make(0);
@@ -98,7 +104,7 @@ export function makeFakeChatGptBrowserProviderV1Transport(
     extensionVersion: "0.0.0-test",
     extensionBuildId: "test-build",
     ready: true,
-    features: [],
+    features: ["chatgpt-browser.s8"],
   } as unknown as ChatGptBrowserProviderV1ProtocolIdentity;
 
   return {
@@ -107,6 +113,7 @@ export function makeFakeChatGptBrowserProviderV1Transport(
       identity: Effect.succeed(identity),
       send: (request) =>
         Effect.gen(function* () {
+          calls.callOrder.push("send");
           calls.sentOperationIds.push(request.providerOperationId);
           operationId = request.providerOperationId;
           if (script.sendError !== undefined) return yield* Effect.fail(script.sendError);
@@ -164,6 +171,12 @@ export function makeFakeChatGptBrowserProviderV1Transport(
             contentHash: finalContentHash,
             complete: nextOffset === finalText.length,
           };
+        }),
+      feature: (message: unknown) =>
+        Effect.sync(() => {
+          calls.callOrder.push("feature");
+          calls.featureMessages.push(message);
+          return { ok: true };
         }),
     },
   };

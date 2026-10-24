@@ -4202,7 +4202,7 @@ var CLF_DOM = (() => {
     if (!closed) failure("picker_close_failed");
     return restored && closed && stillCurrent() && result.size ? [...result.values()] : null;
   }
-  async function selectModelSettings(model, effort, stillCurrent = () => true) {
+  async function selectModelSettings(model, effort, stillCurrent = () => true, exactEffort = false) {
     if (!model && !effort) return true;
     const ui = modelPickerAccess(stillCurrent),
       original = await ui.open();
@@ -4265,6 +4265,7 @@ var CLF_DOM = (() => {
        */
       let wantedEffort = effort;
       if (effort && offered.length && !offered.some((entry) => entry.choice.effort === effort)) {
+        if (exactEffort) return false;
         const ladder = ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"];
         const target = ladder.indexOf(effort);
         const efforts = [...new Set(offered.map((entry) => entry.choice.effort))].filter((value) =>

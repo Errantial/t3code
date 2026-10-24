@@ -19,6 +19,14 @@ import type {
   ChatGptBrowserProviderBrowserSession,
   ChatGptBrowserProviderSecretsPort,
 } from "./runtime.ts";
+import {
+  CHATGPT_BROWSER_S8_FEATURE,
+  type ChatGptBrowserS8ApprovalSnapshot,
+  type ChatGptBrowserS8AttachmentPayload,
+  type ChatGptBrowserS8FeaturePayload,
+  type ChatGptBrowserS8OperationConfigurePayload,
+  type ChatGptBrowserS8SelectionEvidence,
+} from "./features.ts";
 
 export const CHATGPT_BROWSER_NATIVE_PROVIDER_PORTS = [
   8765, 8766, 8767, 8768, 8769, 18_765, 18_766, 18_767, 18_768, 18_769, 38_765, 38_766, 38_767,
@@ -53,6 +61,23 @@ interface OperationRecord {
   authorized: boolean;
   cancelRequested: boolean;
   stopAck?: "sent" | "failed";
+  s8?: {
+    configuration?: ChatGptBrowserS8OperationConfigurePayload;
+    selection?: ChatGptBrowserS8SelectionEvidence;
+    approvalGeneration: number;
+    approval?: {
+      documentId: string;
+      cardId: string;
+      lines: ReadonlyArray<string>;
+      allow: boolean;
+      outcome?: string;
+    };
+    approvalAnswer?: {
+      cardId: string;
+      token: string;
+      choice: "allow" | "deny";
+    };
+  };
   version: number;
 }
 
@@ -334,11 +359,129 @@ export async function startNativeChatGptBrowserBroker(
       nativeIdentity: {},
       authorized: false,
       cancelRequested: false,
+      s8: { approvalGeneration: 0 },
       version: 0,
     };
     operations.set(providerOperationId, record);
     wake(providerOperationId);
     return record;
+  };
+
+  const s8State = (record: OperationRecord) => (record.s8 ??= { approvalGeneration: 0 });
+
+  const approvalSnapshot = (record: OperationRecord): ChatGptBrowserS8ApprovalSnapshot => {
+    const state = s8State(record);
+    return {
+      generation: state.approvalGeneration,
+      ...(state.approval ? { approval: { ...state.approval } } : {}),
+      ...(state.approvalAnswer ? { approvalAnswer: { ...state.approvalAnswer } } : {}),
+    };
+  };
+
+  const handleFeature = (
+    providerOperationId: string | undefined,
+    payload: ChatGptBrowserS8FeaturePayload,
+  ): unknown => {
+    if (!providerOperationId) throw new Error("provider_feature_operation_required");
+    const record = getOrCreate(providerOperationId);
+    const state = s8State(record);
+    if (payload.kind === "operation.configure") {
+      const serialized = JSON.stringify(payload);
+      if (state.configuration && JSON.stringify(state.configuration) !== serialized) {
+        throw new Error("provider_feature_configuration_conflict");
+      }
+      state.configuration = payload;
+      state.selection = { ...payload.selection };
+      touch(record);
+      return { ok: true, selection: state.selection };
+    }
+    if (payload.kind === "operation.read") {
+      return {
+        selection: state.selection,
+        attachments: state.configuration?.attachments.map(({ id, name, mimeType, size, sha256 }) => ({
+          id,
+          name,
+          mimeType,
+          size,
+          sha256,
+        })) ?? [],
+      };
+    }
+    if (payload.kind === "approval.read") return approvalSnapshot(record);
+    if (payload.kind === "approval.answer") {
+      const approval = state.approval;
+      if (
+        !approval ||
+        approval.documentId !== payload.documentId ||
+        approval.cardId !== payload.cardId ||
+        approval.outcome !== undefined
+      ) {
+        throw new Error("provider_approval_stale");
+      }
+      state.approvalAnswer = {
+        cardId: payload.cardId,
+        token: payload.token,
+        choice: payload.choice,
+      };
+      state.approvalGeneration += 1;
+      touch(record);
+      return approvalSnapshot(record);
+    }
+    if (record.nativeIdentity.conversationId !== payload.conversationId) {
+      throw new Error("provider_approval_conversation_mismatch");
+    }
+    const previousDocument = state.approval?.documentId;
+    if (previousDocument && previousDocument !== payload.documentId) {
+      delete state.approval;
+      delete state.approvalAnswer;
+      state.approvalGeneration += 1;
+    }
+    if (payload.card) {
+      const sameCard =
+        state.approval?.documentId === payload.documentId && state.approval.cardId === payload.card.id;
+      if (!sameCard) {
+        state.approval = {
+          documentId: payload.documentId,
+          cardId: payload.card.id,
+          lines: payload.card.lines.slice(0, 8),
+          allow: payload.card.allow,
+        };
+        delete state.approvalAnswer;
+        state.approvalGeneration += 1;
+      }
+    } else if (state.approval?.documentId === payload.documentId && !payload.result) {
+      delete state.approval;
+      delete state.approvalAnswer;
+      state.approvalGeneration += 1;
+    }
+    if (payload.result && state.approvalAnswer?.token === payload.result.token && state.approval) {
+      state.approval = { ...state.approval, outcome: payload.result.outcome };
+      delete state.approvalAnswer;
+      state.approvalGeneration += 1;
+    }
+    touch(record);
+    return approvalSnapshot(record);
+  };
+
+  const attachmentChunk = (
+    record: OperationRecord,
+    attachmentId: string,
+    offset: number,
+  ): { readonly chunk: string } => {
+    const attachment = record.s8?.configuration?.attachments.find(
+      (candidate: ChatGptBrowserS8AttachmentPayload) => candidate.id === attachmentId,
+    );
+    if (!attachment || !Number.isSafeInteger(offset) || offset < 0 || offset >= attachment.size) {
+      throw new Error("provider_attachment_chunk_invalid");
+    }
+    const bytes = Buffer.from(attachment.bytesBase64, "base64");
+    if (bytes.byteLength !== attachment.size) throw new Error("provider_attachment_size_invalid");
+    if (createHash("sha256").update(bytes).digest("hex") !== attachment.sha256) {
+      throw new Error("provider_attachment_hash_invalid");
+    }
+    return {
+      chunk: bytes.subarray(offset, Math.min(offset + 524_288, bytes.length)).toString("base64"),
+    };
   };
 
   const reconcileSummary = (summary: ExtensionOperationSummary) => {
@@ -412,7 +555,7 @@ export async function startNativeChatGptBrowserBroker(
       extensionVersion: browserPeer.extensionVersion,
       extensionBuildId: browserPeer.extensionBuildId,
       ready: true,
-      features: ["provider-v1-native-browser-v1"],
+      features: ["provider-v1-native-browser-v1", CHATGPT_BROWSER_S8_FEATURE],
     });
 
   const browserSession = (browserPeer: BrowserPeer): ChatGptBrowserProviderBrowserSession => ({
@@ -500,6 +643,7 @@ export async function startNativeChatGptBrowserBroker(
       if (!record) return Promise.reject(new Error("provider_operation_unknown"));
       return waitForOperationChange(providerOperationId, record.version, signal);
     },
+    feature: async (message) => handleFeature(message.providerOperationId, message.payload),
     close: async () => {
       await closeServer();
     },
@@ -530,6 +674,20 @@ export async function startNativeChatGptBrowserBroker(
         id: record.commandId,
         providerOperationId: record.providerOperationId,
         conversationId: record.nativeIdentity.conversationId ?? null,
+        ...(record.s8?.configuration
+          ? {
+              model: record.s8.configuration.selection.selectedModel,
+              reasoningEffort: record.s8.configuration.selection.selectedReasoningEffort,
+              attachments: record.s8.configuration.attachments.map(({ id, name, mimeType, size, sha256 }) => ({
+                id,
+                name,
+                mimeType,
+                size,
+                sha256,
+              })),
+              images: [],
+            }
+          : {}),
       }));
     const stopTurns = [...operations.values()]
       .filter(
@@ -571,6 +729,19 @@ export async function startNativeChatGptBrowserBroker(
     }
     const owner = cleanString(body.owner, 200);
     if (!owner) return { status: 400, body: { ok: false, error: "invalid_input_owner" } };
+    if (typeof body.attachmentId === "string") {
+      if (record.owner !== owner || record.authorized) {
+        return { status: 409, body: { ok: false, error: "input_not_owned" } };
+      }
+      try {
+        return {
+          status: 200,
+          body: { ok: true, ...attachmentChunk(record, body.attachmentId, Number(body.offset)) },
+        };
+      } catch {
+        return { status: 409, body: { ok: false, error: "attachment_unavailable" } };
+      }
+    }
     if (body.fail === true) {
       if (record.owner && record.owner !== owner)
         return { status: 409, body: { ok: false, error: "input_not_owned" } };
@@ -615,13 +786,39 @@ export async function startNativeChatGptBrowserBroker(
     }
     if (record.authorized)
       return { status: 409, body: { ok: false, error: "input_send_ambiguous" } };
+    if (
+      record.owner &&
+      record.owner !== owner &&
+      (record.s8?.configuration?.attachments.length ?? 0) > 0
+    ) {
+      return { status: 409, body: { ok: false, error: "input_document_changed" } };
+    }
     record.owner = owner;
     touch(record);
     return {
       status: 200,
       body: {
         ok: true,
-        input: { id: record.commandId, owner, text: record.text },
+        input: {
+          id: record.commandId,
+          owner,
+          text: record.text,
+          ...(record.s8?.configuration
+            ? {
+                model: record.s8.configuration.selection.selectedModel,
+                reasoningEffort: record.s8.configuration.selection.selectedReasoningEffort,
+                exactModelSelection: true,
+                attachments: record.s8.configuration.attachments.map(({ id, name, mimeType, size, sha256 }) => ({
+                  id,
+                  name,
+                  mimeType,
+                  size,
+                  sha256,
+                })),
+                images: [],
+              }
+            : {}),
+        },
         summary: extensionSummary(record),
       },
     };
@@ -705,6 +902,10 @@ export async function startNativeChatGptBrowserBroker(
         }
         if (messageId && !record.nativeIdentity.userMessageId)
           record.nativeIdentity = { ...record.nativeIdentity, userMessageId: messageId };
+        const sendModel = cleanString(entry.model, 80);
+        if (sendModel && record.s8?.selection) {
+          record.s8.selection = { ...record.s8.selection, sendModel };
+        }
         touched.add(record);
         continue;
       }
@@ -717,6 +918,10 @@ export async function startNativeChatGptBrowserBroker(
       ) {
         const text = typeof entry.text === "string" ? entry.text : undefined;
         if (text !== undefined) record.finalText = text;
+        const resolvedModel = cleanString(entry.resolvedModel, 80);
+        if (resolvedModel && record.s8?.selection) {
+          record.s8.selection = { ...record.s8.selection, resolvedModel };
+        }
         touched.add(record);
         continue;
       }
@@ -966,6 +1171,31 @@ export async function startNativeChatGptBrowserBroker(
       if (url.pathname === "/provider-v1/browser/input" && request.method === "POST") {
         const result = await handleInput(body);
         return json(response, result.status, result.body, origin);
+      }
+      if (url.pathname === "/provider-v1/browser/feature" && request.method === "POST") {
+        const providerOperationId = cleanString(body.providerOperationId, 512);
+        const payload = asRecord(body.payload) as ChatGptBrowserS8FeaturePayload | null;
+        if (!providerOperationId || !payload || typeof payload.kind !== "string") {
+          return json(response, 400, { ok: false, error: "bad_request" }, origin);
+        }
+        try {
+          return json(
+            response,
+            200,
+            { ok: true, data: handleFeature(providerOperationId, payload) },
+            origin,
+          );
+        } catch (cause) {
+          return json(
+            response,
+            409,
+            {
+              ok: false,
+              error: cause instanceof Error ? cause.message.slice(0, 128) : "feature_failed",
+            },
+            origin,
+          );
+        }
       }
       if (url.pathname === "/provider-v1/browser/events" && request.method === "POST") {
         return json(response, 200, await handleEvents(body), origin);
