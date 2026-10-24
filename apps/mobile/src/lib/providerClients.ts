@@ -1,5 +1,6 @@
 import { isProviderDriverKind } from "@t3tools/contracts";
 import { acpRegistryClient } from "@t3tools/provider-acp-registry/client";
+import { chatGptBrowserClient } from "@t3tools/provider-chatgpt-browser/client";
 import { makeProviderClientRegistry } from "@t3tools/provider-core/client";
 import { cursorClient } from "@t3tools/provider-cursor/client";
 import { grokClient } from "@t3tools/provider-grok/client";
@@ -14,6 +15,7 @@ const providerClients = makeProviderClientRegistry([
   openCodeClient,
   piClient,
   acpRegistryClient,
+  chatGptBrowserClient,
 ]);
 
 export function getProviderClient(driver: string | null | undefined) {

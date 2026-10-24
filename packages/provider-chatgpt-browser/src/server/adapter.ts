@@ -1,0 +1,795 @@
+import {
+  ProviderDriverKind,
+  type OrchestrationV2ConversationMessage,
+  type OrchestrationV2ProviderCapabilities,
+  type OrchestrationV2ProviderFailure,
+  type OrchestrationV2ProviderSession,
+  type OrchestrationV2ProviderThread,
+  type OrchestrationV2ProviderTurn,
+} from "@t3tools/contracts";
+import {
+  CHATGPT_BROWSER_PROVIDER_V1_FINAL_CONTENT_MAX_UTF16,
+  ChatGptBrowserProviderV1Error,
+  ChatGptBrowserProviderV1EventSequence,
+  chatGptBrowserProviderOperationIdForAttempt,
+  type ChatGptBrowserHostPort,
+  type ChatGptBrowserProviderOperationId,
+  type ChatGptBrowserProviderV1CoreEvent,
+  type ChatGptBrowserProviderV1TerminalStatus,
+  type ChatGptBrowserProviderV1Transport,
+} from "@t3tools/provider-core/server/chatgptBrowserProviderV1";
+import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
+import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
+import {
+  makeProviderFailure,
+  makeProviderFailureTurnItem,
+} from "@t3tools/provider-core/server/failure";
+import { turnScopedSelectionTransition } from "@t3tools/provider-core/server/selectionTransition";
+import * as Cause from "effect/Cause";
+import * as DateTime from "effect/DateTime";
+import * as Effect from "effect/Effect";
+import * as Queue from "effect/Queue";
+import * as Schema from "effect/Schema";
+import * as Semaphore from "effect/Semaphore";
+import * as Stream from "effect/Stream";
+
+export const CHATGPT_BROWSER_DRIVER_KIND = ProviderDriverKind.make("chatgptBrowser");
+
+export const ChatGptBrowserProviderCapabilitiesV2 = {
+  sessions: {
+    supportsMultipleProviderThreadsPerSession: false,
+    supportsModelSwitchInSession: false,
+    supportsProviderSwitchingViaHandoff: false,
+    supportsRuntimeModeSwitchInSession: false,
+    pendingRequestsSurviveRestart: false,
+  },
+  threads: {
+    canCreateEmptyThread: true,
+    canReadThreadSnapshot: false,
+    canRollbackThread: false,
+    canForkThread: false,
+    canForkFromTurn: false,
+    canForkFromSubagentThread: false,
+    exposesNativeThreadId: false,
+  },
+  turns: {
+    exposesNativeTurnId: false,
+    emitsTurnStarted: true,
+    emitsTurnCompleted: true,
+    supportsInterrupt: true,
+    supportsActiveSteering: false,
+    supportsSteeringByInterruptRestart: false,
+    supportsQueuedMessages: true,
+    terminalStatusQuality: "strong",
+  },
+  streaming: {
+    streamsAssistantText: true,
+    streamsReasoning: false,
+    streamsToolOutput: false,
+    streamsPlanText: false,
+    emitsMessageCompleted: true,
+  },
+  tools: {
+    exposesToolItemIds: false,
+    emitsToolStarted: false,
+    emitsToolCompleted: false,
+    emitsToolOutput: false,
+    supportsMcpTools: false,
+    supportsDynamicToolCallbacks: false,
+  },
+  approvals: {
+    supportsCommandApproval: false,
+    supportsFileReadApproval: false,
+    supportsFileChangeApproval: false,
+    supportsApplyPatchApproval: false,
+    approvalsHaveNativeRequestIds: false,
+    approvalCallbacksAreLiveOnly: false,
+    approvalsCanOriginateFromSubagents: false,
+  },
+  planning: {
+    emitsPlanUpdated: false,
+    emitsTodoList: false,
+    emitsProposedPlan: false,
+    supportsStructuredQuestions: false,
+    planDeltasHaveItemIds: false,
+  },
+  subagents: {
+    supportsSubagents: false,
+    exposesSubagentThreadIds: false,
+    emitsSubagentLifecycle: false,
+    canWaitForSubagents: false,
+    canCloseSubagents: false,
+    canForkSubagentThread: false,
+  },
+  context: {
+    acceptsSystemContext: false,
+    acceptsDeveloperContext: false,
+    acceptsSyntheticUserContext: false,
+    canGenerateSummaries: false,
+    canConsumeHandoffSummaries: false,
+    supportsDeltaHandoff: false,
+    supportsFullThreadHandoff: false,
+    maxRecommendedHandoffChars: null,
+  },
+  checkpointing: {
+    appCanCheckpointFilesystem: true,
+    supportsNestedCheckpointScopes: true,
+    providerCanRollbackConversation: false,
+    providerRollbackReturnsSnapshot: false,
+    providerCanReadConversationSnapshot: false,
+  },
+  identity: {
+    nativeThreadIds: "none",
+    nativeTurnIds: "none",
+    nativeItemIds: "none",
+    nativeRequestIds: "none",
+  },
+  runtimePolicy: { enforcement: "client-boundary" },
+} satisfies OrchestrationV2ProviderCapabilities;
+
+export interface ChatGptBrowserAdapterV2Options {
+  readonly instanceId: ProviderAdapter.ProviderAdapterV2["Service"]["instanceId"];
+  readonly defaultCwd: string;
+  readonly host: ChatGptBrowserHostPort;
+}
+
+interface ActiveTurn {
+  readonly input: ProviderAdapter.ProviderAdapterV2TurnInput;
+  readonly operationId: ChatGptBrowserProviderOperationId;
+  providerTurn: OrchestrationV2ProviderTurn;
+  assistantMessage: OrchestrationV2ConversationMessage | undefined;
+  terminal:
+    | {
+        readonly sequence: number;
+        readonly status: ChatGptBrowserProviderV1TerminalStatus;
+        readonly error?: ChatGptBrowserProviderV1Error;
+      }
+    | undefined;
+  interruptRequested: boolean;
+  finished: boolean;
+}
+
+const isTransportError = Schema.is(ChatGptBrowserProviderV1Error);
+
+function failureFromTransport(
+  error: ChatGptBrowserProviderV1Error,
+): OrchestrationV2ProviderFailure {
+  const failureClass =
+    error.code === "rate_limited"
+      ? "usage_limit"
+      : error.code === "auth_required"
+        ? "permission_error"
+        : error.code === "protocol_mismatch" || error.code === "invalid_state"
+          ? "validation_error"
+          : error.code === "browser_unavailable"
+            ? "transport_error"
+            : "provider_error";
+  return makeProviderFailure({
+    class: failureClass,
+    message: error.message,
+    code: error.code,
+    retryable: error.retryable,
+  });
+}
+
+function transportFailureBreaksThread(error: ChatGptBrowserProviderV1Error): boolean {
+  return error.code === "protocol_mismatch" || error.code === "browser_unavailable";
+}
+
+export const makeChatGptBrowserAdapterV2 = Effect.fn("makeChatGptBrowserAdapterV2")(function* (
+  options: ChatGptBrowserAdapterV2Options,
+) {
+  const idAllocator = yield* IdAllocator.IdAllocatorV2;
+  const protocolError = (detail: string, cause?: unknown) =>
+    new ProviderAdapter.ProviderAdapterProtocolError({
+      driver: CHATGPT_BROWSER_DRIVER_KIND,
+      detail,
+      ...(cause === undefined ? {} : { cause }),
+    });
+
+  return ProviderAdapter.ProviderAdapterV2.of({
+    instanceId: options.instanceId,
+    driver: CHATGPT_BROWSER_DRIVER_KIND,
+    getCapabilities: () => Effect.succeed(ChatGptBrowserProviderCapabilitiesV2),
+    planSelectionTransition: () => Effect.succeed(turnScopedSelectionTransition()),
+    openSession: Effect.fn("ChatGptBrowserAdapterV2.openSession")(function* (input) {
+      if (input.runtimePolicy.interactionMode === "plan") {
+        return yield* protocolError(
+          "ChatGPT Browser does not expose dedicated Plan mode in provider-v1",
+        );
+      }
+      if (input.modelSelection.model !== "default") {
+        return yield* protocolError(
+          "ChatGPT Browser model selection is not available in provider-v1",
+        );
+      }
+
+      const scope = yield* Effect.scope;
+      const hostSession = yield* options.host.open.pipe(
+        Effect.mapError(
+          (cause) =>
+            new ProviderAdapter.ProviderAdapterOpenSessionError({
+              driver: CHATGPT_BROWSER_DRIVER_KIND,
+              providerSessionId: input.providerSessionId,
+              cause,
+            }),
+        ),
+      );
+      yield* Effect.addFinalizer(() => hostSession.close.pipe(Effect.ignore));
+      const transport = hostSession.transport;
+      const identity = yield* transport.identity.pipe(
+        Effect.mapError(
+          (cause) =>
+            new ProviderAdapter.ProviderAdapterOpenSessionError({
+              driver: CHATGPT_BROWSER_DRIVER_KIND,
+              providerSessionId: input.providerSessionId,
+              cause,
+            }),
+        ),
+      );
+      if (!identity.ready) {
+        return yield* new ProviderAdapter.ProviderAdapterOpenSessionError({
+          driver: CHATGPT_BROWSER_DRIVER_KIND,
+          providerSessionId: input.providerSessionId,
+          cause: "ChatGPT Browser provider-v1 transport is not ready.",
+        });
+      }
+
+      const now = yield* DateTime.now;
+      let session: OrchestrationV2ProviderSession = {
+        id: input.providerSessionId,
+        driver: CHATGPT_BROWSER_DRIVER_KIND,
+        providerInstanceId: options.instanceId,
+        status: "ready",
+        cwd: input.runtimePolicy.cwd ?? options.defaultCwd,
+        model: input.modelSelection.model,
+        capabilities: ChatGptBrowserProviderCapabilitiesV2,
+        createdAt: now,
+        updatedAt: now,
+        lastError: null,
+      };
+      let thread: OrchestrationV2ProviderThread | undefined;
+      let active: ActiveTurn | undefined;
+      const events = yield* Queue.unbounded<
+        ProviderAdapter.ProviderAdapterV2Event,
+        ProviderAdapter.ProviderAdapterV2Error | Cause.Done
+      >();
+      const commands = yield* Semaphore.make(1);
+
+      const emit = (event: ProviderAdapter.ProviderAdapterV2Event) =>
+        Queue.offer(events, event).pipe(Effect.asVoid);
+      const updateSession = Effect.fnUntraced(function* (
+        status: OrchestrationV2ProviderSession["status"],
+        lastError: string | null = null,
+      ) {
+        session = { ...session, status, lastError, updatedAt: yield* DateTime.now };
+        yield* emit({
+          type: "provider_session.updated",
+          driver: CHATGPT_BROWSER_DRIVER_KIND,
+          providerSession: session,
+        });
+      });
+      const updateThread = Effect.fnUntraced(function* (
+        patch: Partial<OrchestrationV2ProviderThread>,
+      ) {
+        if (thread === undefined) return;
+        thread = { ...thread, ...patch, updatedAt: yield* DateTime.now };
+        yield* emit({
+          type: "provider_thread.updated",
+          driver: CHATGPT_BROWSER_DRIVER_KIND,
+          providerThread: thread,
+        });
+      });
+      const ensureBoundThread = Effect.fnUntraced(function* (
+        args: ProviderAdapter.ProviderAdapterV2EnsureThreadInput,
+      ) {
+        const timestamp = yield* DateTime.now;
+        const existing = args.existingProviderThread;
+        thread = existing
+          ? {
+              ...existing,
+              providerSessionId: input.providerSessionId,
+              status: "idle",
+              updatedAt: timestamp,
+            }
+          : {
+              id: idAllocator.derive.providerThread({
+                driver: CHATGPT_BROWSER_DRIVER_KIND,
+                providerInstanceId: options.instanceId,
+                nativeThreadId: `app-thread:${args.threadId}`,
+              }),
+              driver: CHATGPT_BROWSER_DRIVER_KIND,
+              providerInstanceId: options.instanceId,
+              providerSessionId: input.providerSessionId,
+              appThreadId: args.threadId,
+              ownerNodeId: null,
+              nativeThreadRef: null,
+              nativeConversationHeadRef: null,
+              status: "idle",
+              firstRunOrdinal: null,
+              lastRunOrdinal: null,
+              handoffIds: [],
+              forkedFrom: null,
+              createdAt: timestamp,
+              updatedAt: timestamp,
+            };
+        yield* emit({
+          type: "provider_thread.updated",
+          driver: CHATGPT_BROWSER_DRIVER_KIND,
+          providerThread: thread,
+        });
+        return thread;
+      });
+
+      const updateAssistant = Effect.fnUntraced(function* (
+        turn: ActiveTurn,
+        text: string,
+        streaming: boolean,
+      ) {
+        const timestamp = yield* DateTime.now;
+        const previous = turn.assistantMessage;
+        const message: OrchestrationV2ConversationMessage = {
+          id:
+            previous?.id ??
+            idAllocator.derive.messageFromProviderItem({
+              driver: CHATGPT_BROWSER_DRIVER_KIND,
+              nativeItemId: `assistant:${turn.operationId}`,
+            }),
+          threadId: turn.input.threadId,
+          runId: turn.input.runId,
+          nodeId: turn.input.rootNodeId,
+          role: "assistant",
+          text,
+          attachments: [],
+          streaming,
+          createdBy: "agent",
+          creationSource: "provider",
+          createdAt: previous?.createdAt ?? timestamp,
+          updatedAt: timestamp,
+        };
+        turn.assistantMessage = message;
+        yield* emit({
+          type: "message.updated",
+          driver: CHATGPT_BROWSER_DRIVER_KIND,
+          message,
+        });
+      });
+
+      const readFinalText = Effect.fnUntraced(function* (
+        transport: ChatGptBrowserProviderV1Transport,
+        turn: ActiveTurn,
+        event: Extract<ChatGptBrowserProviderV1CoreEvent["payload"], { type: "assistant.final" }>,
+      ) {
+        let offset = 0;
+        let text = "";
+        do {
+          const remaining = Math.max(2, event.contentLength - offset);
+          const limit = Math.min(CHATGPT_BROWSER_PROVIDER_V1_FINAL_CONTENT_MAX_UTF16, remaining);
+          const chunk = yield* transport.readFinalContent({
+            type: "assistant.read_final",
+            providerOperationId: turn.operationId,
+            offset,
+            limit,
+          });
+          if (
+            chunk.providerOperationId !== turn.operationId ||
+            chunk.offset !== offset ||
+            chunk.contentHash !== event.contentHash ||
+            chunk.totalLength !== event.contentLength
+          ) {
+            return yield* protocolError(
+              "ChatGPT Browser final content identity changed during read",
+            );
+          }
+          const nextOffset = offset + chunk.text.length;
+          if (nextOffset > event.contentLength || (!chunk.complete && nextOffset === offset)) {
+            return yield* protocolError("ChatGPT Browser final content read did not make progress");
+          }
+          if (!chunk.complete && nextOffset === event.contentLength) {
+            return yield* protocolError(
+              "ChatGPT Browser final content reached its declared length without completing",
+            );
+          }
+          text += chunk.text;
+          offset = nextOffset;
+          if (chunk.complete) {
+            if (offset !== event.contentLength) {
+              return yield* protocolError(
+                "ChatGPT Browser final content length did not match its event",
+              );
+            }
+            break;
+          }
+        } while (offset < event.contentLength);
+        if (offset !== event.contentLength) {
+          return yield* protocolError(
+            "ChatGPT Browser final content ended before its declared length",
+          );
+        }
+        return text;
+      });
+
+      const finishTurn = Effect.fnUntraced(function* (
+        turn: ActiveTurn,
+        status: "completed" | "cancelled" | "interrupted" | "failed",
+        failure?: OrchestrationV2ProviderFailure,
+        disposition: "reusable" | "broken" = "reusable",
+      ) {
+        if (turn.finished || active !== turn) return;
+        turn.finished = true;
+        const completedAt = yield* DateTime.now;
+        if (turn.assistantMessage?.streaming) {
+          yield* updateAssistant(turn, turn.assistantMessage.text, false);
+        }
+        turn.providerTurn = { ...turn.providerTurn, status, completedAt };
+        yield* emit({
+          type: "provider_turn.updated",
+          driver: CHATGPT_BROWSER_DRIVER_KIND,
+          threadId: turn.input.threadId,
+          providerTurn: turn.providerTurn,
+        });
+        yield* updateThread({
+          status: disposition === "broken" ? "error" : "idle",
+          lastRunOrdinal: turn.input.runOrdinal,
+        });
+        yield* updateSession(
+          disposition === "broken" ? "error" : "ready",
+          failure?.message ?? null,
+        );
+        active = undefined;
+        if (status === "failed" && failure !== undefined) {
+          const failureItem = makeProviderFailureTurnItem({
+            driver: CHATGPT_BROWSER_DRIVER_KIND,
+            threadId: turn.input.threadId,
+            runId: turn.input.runId,
+            nodeId: turn.input.rootNodeId,
+            providerThreadId: turn.providerTurn.providerThreadId,
+            providerTurnId: turn.providerTurn.id,
+            itemOrdinal: 1,
+            failure,
+            occurredAt: completedAt,
+          });
+          yield* emit({
+            type: "turn_item.updated",
+            driver: CHATGPT_BROWSER_DRIVER_KIND,
+            turnItem: failureItem,
+          });
+          yield* emit({
+            type: "turn.terminal",
+            driver: CHATGPT_BROWSER_DRIVER_KIND,
+            providerThreadId: turn.providerTurn.providerThreadId,
+            providerTurnId: turn.providerTurn.id,
+            runOrdinal: turn.input.runOrdinal,
+            failureItemOrdinal: failureItem.ordinal,
+            status: "failed",
+            failure,
+            threadDisposition: disposition,
+          });
+          return;
+        }
+        yield* emit({
+          type: "turn.terminal",
+          driver: CHATGPT_BROWSER_DRIVER_KIND,
+          providerThreadId: turn.providerTurn.providerThreadId,
+          providerTurnId: turn.providerTurn.id,
+          runOrdinal: turn.input.runOrdinal,
+          status: status === "failed" ? "cancelled" : status,
+          failure: null,
+          threadDisposition: disposition,
+        });
+      });
+
+      const consumeOperation = Effect.fnUntraced(function* (turn: ActiveTurn) {
+        let cursor = ChatGptBrowserProviderV1EventSequence.make(0);
+        let drained = false;
+        while (!drained) {
+          const page = yield* transport.replay({
+            type: "events.replay",
+            providerOperationId: turn.operationId,
+            after: cursor,
+          });
+          if (page.providerOperationId !== turn.operationId) {
+            return yield* protocolError("ChatGPT Browser replay returned a different operation");
+          }
+          let pageAdvanced = false;
+          for (const event of page.events) {
+            if (
+              drained ||
+              event.providerOperationId !== turn.operationId ||
+              event.sequence <= cursor ||
+              event.sequence > page.highWater
+            ) {
+              return yield* protocolError("ChatGPT Browser replay event order is invalid");
+            }
+            pageAdvanced = true;
+            cursor = event.sequence;
+            switch (event.payload.type) {
+              case "assistant.delta":
+                yield* updateAssistant(
+                  turn,
+                  `${turn.assistantMessage?.text ?? ""}${event.payload.text}`,
+                  true,
+                );
+                break;
+              case "assistant.final":
+                yield* updateAssistant(
+                  turn,
+                  yield* readFinalText(transport, turn, event.payload),
+                  false,
+                );
+                break;
+              case "operation.terminal":
+                if (turn.terminal !== undefined) {
+                  return yield* protocolError(
+                    "ChatGPT Browser replay emitted more than one terminal event",
+                  );
+                }
+                turn.terminal = {
+                  sequence: event.sequence,
+                  status: event.payload.status,
+                  ...(event.payload.error === undefined ? {} : { error: event.payload.error }),
+                };
+                break;
+              case "operation.drained":
+                if (
+                  turn.terminal === undefined ||
+                  event.payload.terminalSequence !== turn.terminal.sequence
+                ) {
+                  return yield* protocolError(
+                    "ChatGPT Browser drain did not reference the observed terminal event",
+                  );
+                }
+                drained = true;
+                break;
+            }
+          }
+          if (page.highWater < cursor) {
+            return yield* protocolError("ChatGPT Browser replay high-water moved backwards");
+          }
+          if (!drained && !pageAdvanced) {
+            const snapshot = yield* transport.queryOperation({
+              type: "operation.query",
+              providerOperationId: turn.operationId,
+            });
+            if (snapshot.providerOperationId !== turn.operationId) {
+              return yield* protocolError("ChatGPT Browser query returned a different operation");
+            }
+            return yield* protocolError(
+              `ChatGPT Browser replay made no progress before drain (state ${snapshot.state})`,
+            );
+          }
+        }
+
+        const terminal = turn.terminal;
+        if (terminal === undefined) {
+          return yield* protocolError("ChatGPT Browser drained without a terminal event");
+        }
+        if (terminal.status === "failed") {
+          const failure = terminal.error
+            ? failureFromTransport(terminal.error)
+            : makeProviderFailure({
+                class: "provider_error",
+                message: "ChatGPT Browser operation failed.",
+              });
+          yield* finishTurn(
+            turn,
+            "failed",
+            failure,
+            terminal.error && transportFailureBreaksThread(terminal.error) ? "broken" : "reusable",
+          );
+        } else if (terminal.status === "cancelled") {
+          yield* finishTurn(turn, turn.interruptRequested ? "interrupted" : "cancelled");
+        } else {
+          yield* finishTurn(turn, "completed");
+        }
+      });
+
+      const failBackground = Effect.fnUntraced(function* (turn: ActiveTurn, cause: unknown) {
+        if (turn.finished || active !== turn) return;
+        const transportError = isTransportError(cause) ? cause : undefined;
+        const failure = transportError
+          ? failureFromTransport(transportError)
+          : makeProviderFailure({
+              class: "transport_error",
+              message: "ChatGPT Browser transport failed while replaying the operation.",
+              code: "transport_error",
+              retryable: false,
+            });
+        yield* finishTurn(
+          turn,
+          "failed",
+          failure,
+          transportError && !transportFailureBreaksThread(transportError) ? "reusable" : "broken",
+        );
+      });
+
+      const start = Effect.fnUntraced(function* (args: ProviderAdapter.ProviderAdapterV2TurnInput) {
+        if (thread?.id !== args.providerThread.id) {
+          return yield* protocolError("ChatGPT Browser turn targeted an unbound provider thread");
+        }
+        if (active !== undefined) {
+          return yield* protocolError("ChatGPT Browser already has an active operation");
+        }
+        if (args.message.attachments.length > 0) {
+          return yield* protocolError("ChatGPT Browser provider-v1 does not support attachments");
+        }
+        if (args.modelSelection.model !== "default") {
+          return yield* protocolError(
+            "ChatGPT Browser model selection is not available in provider-v1",
+          );
+        }
+
+        const operationId = chatGptBrowserProviderOperationIdForAttempt(args.attemptId);
+        const receipt = yield* transport.send({
+          type: "operation.send",
+          providerOperationId: operationId,
+          providerSessionId: input.providerSessionId,
+          text: args.message.text,
+        });
+        if (
+          receipt.providerOperationId !== operationId ||
+          receipt.providerSessionId !== input.providerSessionId
+        ) {
+          return yield* protocolError(
+            "ChatGPT Browser send receipt identity did not match the request",
+          );
+        }
+
+        const startedAt = yield* DateTime.now;
+        const providerTurn: OrchestrationV2ProviderTurn = {
+          id: idAllocator.derive.providerTurn({
+            driver: CHATGPT_BROWSER_DRIVER_KIND,
+            nativeTurnId: operationId,
+          }),
+          providerThreadId: args.providerThread.id,
+          nodeId: args.rootNodeId,
+          runAttemptId: args.attemptId,
+          nativeTurnRef: null,
+          ordinal: args.providerTurnOrdinal,
+          status: "running",
+          startedAt,
+          completedAt: null,
+        };
+        const turn: ActiveTurn = {
+          input: args,
+          operationId,
+          providerTurn,
+          assistantMessage: undefined,
+          terminal: undefined,
+          interruptRequested: false,
+          finished: false,
+        };
+        active = turn;
+        yield* updateSession("running");
+        yield* updateThread({
+          status: "active",
+          firstRunOrdinal: thread?.firstRunOrdinal ?? args.runOrdinal,
+          lastRunOrdinal: args.runOrdinal,
+        });
+        yield* emit({
+          type: "provider_turn.updated",
+          driver: CHATGPT_BROWSER_DRIVER_KIND,
+          threadId: args.threadId,
+          providerTurn,
+        });
+        yield* consumeOperation(turn).pipe(
+          Effect.catch((cause) => failBackground(turn, cause)),
+          Effect.forkIn(scope),
+        );
+      });
+
+      yield* Effect.addFinalizer(() => Queue.end(events).pipe(Effect.ignore));
+
+      return {
+        instanceId: options.instanceId,
+        driver: CHATGPT_BROWSER_DRIVER_KIND,
+        providerSessionId: input.providerSessionId,
+        providerSession: session,
+        events: Stream.fromQueue(events),
+        ensureThread: (args) =>
+          ensureBoundThread(args).pipe(
+            commands.withPermits(1),
+            Effect.mapError(
+              (cause) =>
+                new ProviderAdapter.ProviderAdapterEnsureThreadError({
+                  driver: CHATGPT_BROWSER_DRIVER_KIND,
+                  threadId: args.threadId,
+                  cause,
+                }),
+            ),
+          ),
+        resumeThread: (args) =>
+          Effect.fail(
+            new ProviderAdapter.ProviderAdapterResumeThreadError({
+              driver: CHATGPT_BROWSER_DRIVER_KIND,
+              providerSessionId: input.providerSessionId,
+              providerThreadId: args.providerThread.id,
+              cause: "ChatGPT Browser restart reconciliation is not part of provider-v1 S1.",
+            }),
+          ),
+        startTurn: (args) =>
+          start(args).pipe(
+            commands.withPermits(1),
+            Effect.mapError(
+              (cause) =>
+                new ProviderAdapter.ProviderAdapterTurnStartError({
+                  driver: CHATGPT_BROWSER_DRIVER_KIND,
+                  threadId: args.threadId,
+                  providerThreadId: args.providerThread.id,
+                  runId: args.runId,
+                  cause,
+                }),
+            ),
+          ),
+        steerTurn: (args) =>
+          Effect.fail(
+            new ProviderAdapter.ProviderAdapterSteerRunUnsupportedError({
+              driver: CHATGPT_BROWSER_DRIVER_KIND,
+              providerThreadId: args.providerThread.id,
+            }),
+          ),
+        interruptTurn: Effect.fn("ChatGptBrowserAdapterV2.interruptTurn")(
+          function* (args) {
+            const turn = active;
+            if (turn === undefined || turn.providerTurn.id !== args.providerTurnId) {
+              return yield* protocolError("ChatGPT Browser turn is no longer active");
+            }
+            turn.interruptRequested = true;
+            const snapshot = yield* transport.cancel({
+              type: "operation.cancel",
+              providerOperationId: turn.operationId,
+            });
+            if (snapshot.providerOperationId !== turn.operationId) {
+              return yield* protocolError("ChatGPT Browser cancel returned a different operation");
+            }
+          },
+          (effect, args) =>
+            effect.pipe(
+              Effect.mapError(
+                (cause) =>
+                  new ProviderAdapter.ProviderAdapterInterruptError({
+                    driver: CHATGPT_BROWSER_DRIVER_KIND,
+                    providerThreadId: args.providerThread.id,
+                    providerTurnId: args.providerTurnId,
+                    cause,
+                  }),
+              ),
+            ),
+        ),
+        respondToRuntimeRequest: (args) =>
+          Effect.fail(
+            new ProviderAdapter.ProviderAdapterRuntimeRequestResponseError({
+              driver: CHATGPT_BROWSER_DRIVER_KIND,
+              requestId: args.requestId,
+              cause: "ChatGPT Browser provider-v1 does not expose runtime requests.",
+            }),
+          ),
+        readThreadSnapshot: (args) =>
+          Effect.fail(
+            new ProviderAdapter.ProviderAdapterReadThreadSnapshotError({
+              driver: CHATGPT_BROWSER_DRIVER_KIND,
+              providerThreadId: args.providerThread.id,
+              cause: "ChatGPT Browser provider-v1 does not expose thread snapshots.",
+            }),
+          ),
+        rollbackThread: (args) =>
+          Effect.fail(
+            new ProviderAdapter.ProviderAdapterRollbackThreadError({
+              driver: CHATGPT_BROWSER_DRIVER_KIND,
+              providerThreadId: args.providerThread.id,
+              checkpointId: args.target.checkpointId,
+              cause: "ChatGPT Browser provider-v1 does not expose conversation rollback.",
+            }),
+          ),
+        forkThread: (args) =>
+          Effect.fail(
+            new ProviderAdapter.ProviderAdapterForkThreadError({
+              driver: CHATGPT_BROWSER_DRIVER_KIND,
+              providerThreadId: args.sourceProviderThread.id,
+              cause: "ChatGPT Browser provider-v1 does not expose native conversation forks.",
+            }),
+          ),
+      } satisfies ProviderAdapter.ProviderAdapterV2SessionRuntime;
+    }),
+  });
+});

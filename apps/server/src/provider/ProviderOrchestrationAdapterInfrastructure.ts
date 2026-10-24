@@ -5,6 +5,10 @@ import * as CodexAdapterV2 from "../orchestration-v2/Adapters/CodexAdapterV2.ts"
 import * as CursorAgentSdk from "@t3tools/provider-cursor/server/CursorAgentSdk";
 import * as CursorSdk from "@t3tools/provider-cursor/server/CursorSdk";
 import * as CursorKeychain from "@t3tools/provider-cursor/server/CursorKeychain";
+import {
+  ChatGptBrowserHost,
+  layerUnavailableChatGptBrowserHost,
+} from "@t3tools/provider-chatgpt-browser/server";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ProviderContinuationRequests from "@t3tools/provider-core/server/ProviderContinuationRequests";
 
@@ -14,6 +18,7 @@ export type ProviderOrchestrationAdapterInfrastructure =
   | CursorAgentSdk.CursorAgentSdkRunner
   | CursorSdk.CursorSdk
   | CursorKeychain.CursorKeychain
+  | ChatGptBrowserHost
   | IdAllocator.IdAllocatorV2;
 
 /**
@@ -26,6 +31,7 @@ export const layer = Layer.mergeAll(
   CodexAdapterV2.layerAppServerClientFactory,
   CursorAgentSdk.layer.pipe(Layer.provideMerge(CursorSdk.layer)),
   CursorKeychain.layer,
+  layerUnavailableChatGptBrowserHost,
   IdAllocator.layer,
   ProviderContinuationRequests.layer,
 );
