@@ -47,6 +47,7 @@ const makeAdapter = (
 const makeInstance = (
   instanceId: ProviderInstanceId,
   orchestrationAdapter: ProviderAdapter.ProviderAdapterV2["Service"],
+  operationConcurrency?: ProviderInstance["operationConcurrency"],
 ): ProviderInstance => ({
   instanceId,
   driverKind: driver,
@@ -56,6 +57,7 @@ const makeInstance = (
   },
   displayName: String(instanceId),
   enabled: true,
+  ...(operationConcurrency === undefined ? {} : { operationConcurrency }),
   snapshot: {} as ProviderInstance["snapshot"],
   orchestrationAdapter,
   textGeneration: {} as ProviderInstance["textGeneration"],
@@ -64,7 +66,7 @@ const makeInstance = (
 const personalAdapter = makeAdapter(personalId);
 const workAdapter = makeAdapter(workId);
 const instances = [
-  makeInstance(personalId, personalAdapter),
+  makeInstance(personalId, personalAdapter, { scope: "driver", supportedConcurrency: 1 }),
   makeInstance(workId, workAdapter),
 ] as const;
 const layerInstanceRegistry = Layer.succeed(ProviderInstanceRegistry.ProviderInstanceRegistry, {
@@ -86,6 +88,11 @@ it.effect("routes two configured instances of the same driver independently", ()
     assert.strictEqual(yield* registry.get(personalId), personalAdapter);
     assert.strictEqual(yield* registry.get(workId), workAdapter);
     assert.deepEqual(yield* registry.list(), [personalId, workId]);
+    assert.deepEqual(yield* registry.getOperationConcurrency!(personalId), {
+      scope: "driver",
+      supportedConcurrency: 1,
+    });
+    assert.isUndefined(yield* registry.getOperationConcurrency!(workId));
   }).pipe(Effect.provide(layerTest)),
 );
 

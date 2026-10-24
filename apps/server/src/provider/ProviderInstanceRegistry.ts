@@ -155,7 +155,12 @@ const buildEntry = Effect.fn("ProviderInstanceRegistry.buildEntry")(function* <R
   return {
     kind: "live" as const,
     live: {
-      instance: createResult.success,
+      instance: {
+        ...createResult.success,
+        ...(driver.metadata.operationConcurrency === undefined
+          ? {}
+          : { operationConcurrency: driver.metadata.operationConcurrency }),
+      },
       scope: childScope,
       entry,
     },

@@ -42,6 +42,7 @@ import * as ProviderContinuationService from "../ProviderContinuationService.ts"
 import * as ProviderEventIngestor from "../ProviderEventIngestor.ts";
 import * as ProviderRuntimeRecoveryService from "../ProviderRuntimeRecoveryService.ts";
 import * as ProviderSessionManager from "../ProviderSessionManager.ts";
+import * as ProviderOperationAdmission from "../ProviderOperationAdmission.ts";
 import * as CommandOutputRecorder from "./CommandOutputRecorder.ts";
 import * as ProviderSwitchService from "../ProviderSwitchService.ts";
 import * as ProviderTurnControlService from "../ProviderTurnControlService.ts";
@@ -369,6 +370,7 @@ export function layerWithRegistry<Error>(
         McpProviderSessions.layer,
         McpSessionRegistryTestkit.layer,
         layerProviderEventIngestorProvided,
+        ProviderOperationAdmission.layer,
         layerStores,
       ),
     ),

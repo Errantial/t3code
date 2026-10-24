@@ -50,8 +50,10 @@ import * as ProviderEventIngestor from "./ProviderEventIngestor.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import * as ThreadCommandExecutor from "./ThreadCommandExecutor.ts";
 import * as ProviderSessionManager from "./ProviderSessionManager.ts";
+import * as ProviderOperationAdmission from "./ProviderOperationAdmission.ts";
 import * as CommandOutputHub from "./CommandOutputHub.ts";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
+import type { ProviderOperationConcurrencyPolicy } from "@t3tools/provider-core/server/driver";
 
 const layerTestDatabase = SqlitePersistence.layerMemory;
 const layerTestStores = Layer.merge(EventStore.layer, ProjectionStore.layer).pipe(
@@ -307,6 +309,41 @@ function makeProviderThread(input: {
   };
 }
 
+const startProviderTurn = Effect.fnUntraced(function* (input: {
+  readonly runtime: ProviderAdapter.ProviderAdapterV2SessionRuntime;
+  readonly projectionStore: ProjectionStore.ProjectionStoreV2["Service"];
+  readonly idAllocator: IdAllocator.IdAllocatorV2["Service"];
+  readonly threadId: ThreadId;
+  readonly providerSessionId: ProviderSessionId;
+  readonly providerThread: OrchestrationV2ProviderThread;
+  readonly runOrdinal?: number;
+}) {
+  const runOrdinal = input.runOrdinal ?? 1;
+  const runId = input.idAllocator.derive.run({ threadId: input.threadId, ordinal: runOrdinal });
+  return yield* input.runtime.startTurn({
+    appThread: (yield* input.projectionStore.getThreadProjection(input.threadId)).thread,
+    threadId: input.threadId,
+    runId,
+    runOrdinal,
+    providerTurnOrdinal: runOrdinal,
+    attemptId: input.idAllocator.derive.runAttempt({ runId, attemptOrdinal: 1 }),
+    rootNodeId: input.idAllocator.derive.rootNode({ runId }),
+    providerThread: input.providerThread,
+    message: {
+      createdBy: "user",
+      creationSource: "web",
+      messageId: yield* input.idAllocator.allocate.message({
+        threadId: input.threadId,
+        ordinal: runOrdinal,
+      }),
+      text: "turn",
+      attachments: [],
+    },
+    modelSelection,
+    runtimePolicy,
+  });
+});
+
 function unimplemented(detail: string) {
   return Effect.fail(
     new ProviderAdapter.ProviderAdapterProtocolError({
@@ -332,7 +369,7 @@ const makeProviderAdapter = Effect.fnUntraced(function* (
     readonly hasPendingBackgroundWorkForThread?: Effect.Effect<boolean>;
     readonly backgroundTasksEndWithProcess?: boolean;
     readonly hangSessionScopeClose?: boolean;
-    readonly startTurn?: Effect.Effect<void>;
+    readonly startTurn?: Effect.Effect<void, ProviderAdapter.ProviderAdapterV2Error>;
     readonly beforeUnload?: Effect.Effect<void>;
     readonly spawnBeforeOpen?: boolean;
     readonly scopeCloseReached?: Deferred.Deferred<void>;
@@ -481,12 +518,13 @@ function layerTest(input: {
   readonly hasPendingBackgroundWorkForThread?: Effect.Effect<boolean>;
   readonly backgroundTasksEndWithProcess?: boolean;
   readonly hangSessionScopeClose?: boolean;
-  readonly startTurn?: Effect.Effect<void>;
+  readonly startTurn?: Effect.Effect<void, ProviderAdapter.ProviderAdapterV2Error>;
   readonly beforeUnload?: Effect.Effect<void>;
   readonly spawnBeforeOpen?: boolean;
   readonly scopeCloseReached?: Deferred.Deferred<void>;
   readonly serverSettingsLayer?: ReturnType<typeof ServerSettings.layerTest>;
   readonly projectServiceLayer?: Layer.Layer<ProjectService.ProjectService>;
+  readonly operationConcurrency?: ProviderOperationConcurrencyPolicy;
 }) {
   const layerConfiguredEventSink =
     input.flakyReleaseWrites !== undefined
@@ -522,7 +560,27 @@ function layerTest(input: {
       ...(input.scopeCloseReached === undefined
         ? {}
         : { scopeCloseReached: input.scopeCloseReached }),
-    }).pipe(Effect.map(ProviderAdapterRegistry.layerSingle)),
+    }).pipe(
+      Effect.map((adapter) =>
+        Layer.succeed(
+          ProviderAdapterRegistry.ProviderAdapterRegistryV2,
+          ProviderAdapterRegistry.ProviderAdapterRegistryV2.of({
+            get: (instanceId) =>
+              instanceId === adapter.instanceId
+                ? Effect.succeed(adapter)
+                : Effect.fail(
+                    new ProviderAdapterRegistry.ProviderAdapterRegistryLookupError({ instanceId }),
+                  ),
+            list: () => Effect.succeed([adapter.instanceId]),
+            ...(input.operationConcurrency === undefined
+              ? {}
+              : {
+                  getOperationConcurrency: () => Effect.succeed(input.operationConcurrency),
+                }),
+          }),
+        ),
+      ),
+    ),
   );
   const layerConfiguredMcpRegistry =
     input.pauseResolve === undefined
@@ -560,6 +618,7 @@ function layerTest(input: {
           layerConfiguredEventSink,
           IdAllocator.layer,
           layerProviderEventIngestorTest,
+          ProviderOperationAdmission.layer,
           layerConfiguredMcpRegistry,
           layerTestStores,
           ...(input.serverSettingsLayer === undefined ? [] : [input.serverSettingsLayer]),
@@ -893,6 +952,348 @@ it.effect("ProviderSessionManagerV2 opens independent sessions concurrently", ()
           state,
           idleTimeoutMs: 60_000,
           beforeOpen,
+        }),
+      ),
+    );
+  }),
+);
+
+it.effect(
+  "ProviderSessionManagerV2 cancels a queued admitted turn without provider Stop and releases on terminal",
+  () =>
+    Effect.gen(function* () {
+      const state = yield* Ref.make(emptyState);
+      const starts = yield* Ref.make(0);
+      const firstStarted = yield* Deferred.make<void>();
+      const nextStarted = yield* Deferred.make<void>();
+      const providerStart = Ref.modify(starts, (count) => [count + 1, count + 1] as const).pipe(
+        Effect.flatMap((count) =>
+          Deferred.succeed(count === 1 ? firstStarted : nextStarted, undefined),
+        ),
+        Effect.asVoid,
+      );
+
+      yield* Effect.gen(function* () {
+        const eventSink = yield* EventSink.EventSinkV2;
+        const idAllocator = yield* IdAllocator.IdAllocatorV2;
+        const projectionStore = yield* ProjectionStore.ProjectionStoreV2;
+        const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+        const now = yield* DateTime.now;
+        const threadA = ThreadId.make("thread-provider-admission-terminal-a");
+        const threadB = ThreadId.make("thread-provider-admission-terminal-b");
+        const sessionA = yield* idAllocator.allocate.providerSession({
+          providerInstanceId: modelSelection.instanceId,
+          threadId: threadA,
+        });
+        const sessionB = yield* idAllocator.allocate.providerSession({
+          providerInstanceId: modelSelection.instanceId,
+          threadId: threadB,
+        });
+        yield* eventSink.write({
+          events: [
+            yield* makeThreadCreatedEvent({ idAllocator, threadId: threadA, now }),
+            yield* makeThreadCreatedEvent({ idAllocator, threadId: threadB, now }),
+          ],
+        });
+        const runtimeA = yield* manager.open({
+          threadId: threadA,
+          providerSessionId: sessionA,
+          modelSelection,
+          runtimePolicy,
+          // ChatGPT Browser recovery re-enters this same decorated startTurn
+          // after reopening its persisted session. The returned provider start
+          // can be a journal recovery rather than a new send, but it still owns
+          // the operation budget until the recovered terminal event drains.
+          resumeFromSession: makeProviderSession({ providerSessionId: sessionA, now }),
+        });
+        const runtimeB = yield* manager.open({
+          threadId: threadB,
+          providerSessionId: sessionB,
+          modelSelection,
+          runtimePolicy,
+        });
+        const providerThreadA = makeProviderThread({
+          idAllocator,
+          threadId: threadA,
+          providerSessionId: sessionA,
+          now,
+          nativeThreadId: "provider-admission-terminal-a",
+        });
+        const providerThreadB = makeProviderThread({
+          idAllocator,
+          threadId: threadB,
+          providerSessionId: sessionB,
+          now,
+          nativeThreadId: "provider-admission-terminal-b",
+        });
+
+        yield* startProviderTurn({
+          runtime: runtimeA,
+          projectionStore,
+          idAllocator,
+          threadId: threadA,
+          providerSessionId: sessionA,
+          providerThread: providerThreadA,
+        });
+        yield* Deferred.await(firstStarted);
+
+        const queued = yield* startProviderTurn({
+          runtime: runtimeB,
+          projectionStore,
+          idAllocator,
+          threadId: threadB,
+          providerSessionId: sessionB,
+          providerThread: providerThreadB,
+        }).pipe(Effect.forkChild);
+        yield* Fiber.interrupt(queued);
+        assert.equal(yield* Ref.get(starts), 1);
+        assert.equal((yield* Ref.get(state)).interruptCount, 0);
+
+        const queue = (yield* Ref.get(state)).eventQueues.get(String(sessionA));
+        assert.isDefined(queue);
+        yield* Queue.offer(queue!, {
+          type: "turn.terminal",
+          driver: CODEX_DRIVER,
+          providerThreadId: providerThreadA.id,
+          providerTurnId: idAllocator.derive.providerTurn({
+            driver: CODEX_DRIVER,
+            nativeTurnId: "provider-admission-terminal-a",
+          }),
+          runOrdinal: 1,
+          status: "completed",
+          failure: null,
+          threadDisposition: "reusable",
+        });
+
+        yield* startProviderTurn({
+          runtime: runtimeB,
+          projectionStore,
+          idAllocator,
+          threadId: threadB,
+          providerSessionId: sessionB,
+          providerThread: providerThreadB,
+          runOrdinal: 2,
+        });
+        yield* Deferred.await(nextStarted);
+        assert.equal(yield* Ref.get(starts), 2);
+        assert.equal((yield* Ref.get(state)).interruptCount, 0);
+      }).pipe(
+        Effect.provide(
+          layerTest({
+            state,
+            idleTimeoutMs: 60_000,
+            operationConcurrency: { scope: "driver", supportedConcurrency: 1 },
+            startTurn: providerStart,
+          }),
+        ),
+      );
+    }),
+);
+
+it.effect("ProviderSessionManagerV2 releases provider admission on start failure", () =>
+  Effect.gen(function* () {
+    const state = yield* Ref.make(emptyState);
+    const starts = yield* Ref.make(0);
+    const secondStarted = yield* Deferred.make<void>();
+    const providerStart = Ref.modify(starts, (count) => [count + 1, count + 1] as const).pipe(
+      Effect.flatMap((count) =>
+        count === 1
+          ? Effect.fail(
+              new ProviderAdapter.ProviderAdapterProtocolError({
+                driver: CODEX_DRIVER,
+                detail: "start failed",
+              }),
+            )
+          : Deferred.succeed(secondStarted, undefined).pipe(Effect.asVoid),
+      ),
+    );
+    yield* Effect.gen(function* () {
+      const eventSink = yield* EventSink.EventSinkV2;
+      const idAllocator = yield* IdAllocator.IdAllocatorV2;
+      const projectionStore = yield* ProjectionStore.ProjectionStoreV2;
+      const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+      const now = yield* DateTime.now;
+      const threadA = ThreadId.make("thread-provider-admission-failure-a");
+      const threadB = ThreadId.make("thread-provider-admission-failure-b");
+      const sessionA = yield* idAllocator.allocate.providerSession({
+        providerInstanceId: modelSelection.instanceId,
+        threadId: threadA,
+      });
+      const sessionB = yield* idAllocator.allocate.providerSession({
+        providerInstanceId: modelSelection.instanceId,
+        threadId: threadB,
+      });
+      yield* eventSink.write({
+        events: [
+          yield* makeThreadCreatedEvent({ idAllocator, threadId: threadA, now }),
+          yield* makeThreadCreatedEvent({ idAllocator, threadId: threadB, now }),
+        ],
+      });
+      const runtimeA = yield* manager.open({
+        threadId: threadA,
+        providerSessionId: sessionA,
+        modelSelection,
+        runtimePolicy,
+      });
+      const runtimeB = yield* manager.open({
+        threadId: threadB,
+        providerSessionId: sessionB,
+        modelSelection,
+        runtimePolicy,
+      });
+      yield* Effect.flip(
+        startProviderTurn({
+          runtime: runtimeA,
+          projectionStore,
+          idAllocator,
+          threadId: threadA,
+          providerSessionId: sessionA,
+          providerThread: makeProviderThread({
+            idAllocator,
+            threadId: threadA,
+            providerSessionId: sessionA,
+            now,
+            nativeThreadId: "provider-admission-failure-a",
+          }),
+        }),
+      );
+      yield* startProviderTurn({
+        runtime: runtimeB,
+        projectionStore,
+        idAllocator,
+        threadId: threadB,
+        providerSessionId: sessionB,
+        providerThread: makeProviderThread({
+          idAllocator,
+          threadId: threadB,
+          providerSessionId: sessionB,
+          now,
+          nativeThreadId: "provider-admission-failure-b",
+        }),
+      });
+      yield* Deferred.await(secondStarted);
+      assert.equal(yield* Ref.get(starts), 2);
+    }).pipe(
+      Effect.provide(
+        layerTest({
+          state,
+          idleTimeoutMs: 60_000,
+          operationConcurrency: { scope: "driver", supportedConcurrency: 1 },
+          startTurn: providerStart,
+        }),
+      ),
+    );
+  }),
+);
+
+it.effect("ProviderSessionManagerV2 releases provider admission on session teardown", () =>
+  Effect.gen(function* () {
+    const state = yield* Ref.make(emptyState);
+    const starts = yield* Ref.make(0);
+    const secondStarted = yield* Deferred.make<void>();
+    const providerStart = Ref.modify(starts, (count) => [count + 1, count + 1] as const).pipe(
+      Effect.flatMap((count) =>
+        count === 2 ? Deferred.succeed(secondStarted, undefined).pipe(Effect.asVoid) : Effect.void,
+      ),
+    );
+    yield* Effect.gen(function* () {
+      const eventSink = yield* EventSink.EventSinkV2;
+      const idAllocator = yield* IdAllocator.IdAllocatorV2;
+      const projectionStore = yield* ProjectionStore.ProjectionStoreV2;
+      const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+      const now = yield* DateTime.now;
+      const threadA = ThreadId.make("thread-provider-admission-teardown-a");
+      const threadB = ThreadId.make("thread-provider-admission-teardown-b");
+      const sessionA = yield* idAllocator.allocate.providerSession({
+        providerInstanceId: modelSelection.instanceId,
+        threadId: threadA,
+      });
+      const sessionB = yield* idAllocator.allocate.providerSession({
+        providerInstanceId: modelSelection.instanceId,
+        threadId: threadB,
+      });
+      yield* eventSink.write({
+        events: [
+          yield* makeThreadCreatedEvent({ idAllocator, threadId: threadA, now }),
+          yield* makeThreadCreatedEvent({ idAllocator, threadId: threadB, now }),
+        ],
+      });
+      const runtimeA = yield* manager.open({
+        threadId: threadA,
+        providerSessionId: sessionA,
+        modelSelection,
+        runtimePolicy,
+      });
+      const runtimeB = yield* manager.open({
+        threadId: threadB,
+        providerSessionId: sessionB,
+        modelSelection,
+        runtimePolicy,
+      });
+      yield* startProviderTurn({
+        runtime: runtimeA,
+        projectionStore,
+        idAllocator,
+        threadId: threadA,
+        providerSessionId: sessionA,
+        providerThread: makeProviderThread({
+          idAllocator,
+          threadId: threadA,
+          providerSessionId: sessionA,
+          now,
+          nativeThreadId: "provider-admission-teardown-a",
+        }),
+      });
+      const queued = yield* startProviderTurn({
+        runtime: runtimeB,
+        projectionStore,
+        idAllocator,
+        threadId: threadB,
+        providerSessionId: sessionB,
+        providerThread: makeProviderThread({
+          idAllocator,
+          threadId: threadB,
+          providerSessionId: sessionB,
+          now,
+          nativeThreadId: "provider-admission-teardown-b",
+        }),
+      }).pipe(Effect.forkChild);
+      yield* manager.close(sessionB);
+      const queuedExit = yield* Fiber.await(queued);
+      assert.isTrue(Exit.isFailure(queuedExit) && Cause.hasInterruptsOnly(queuedExit.cause));
+      assert.equal(yield* Ref.get(starts), 1);
+      const reopenedRuntimeB = yield* manager.open({
+        threadId: threadB,
+        providerSessionId: sessionB,
+        modelSelection,
+        runtimePolicy,
+      });
+      const restarted = yield* startProviderTurn({
+        runtime: reopenedRuntimeB,
+        projectionStore,
+        idAllocator,
+        threadId: threadB,
+        providerSessionId: sessionB,
+        providerThread: makeProviderThread({
+          idAllocator,
+          threadId: threadB,
+          providerSessionId: sessionB,
+          now,
+          nativeThreadId: "provider-admission-teardown-b-reopened",
+        }),
+        runOrdinal: 2,
+      }).pipe(Effect.forkChild);
+      yield* manager.close(sessionA);
+      yield* Deferred.await(secondStarted);
+      yield* Fiber.join(restarted);
+      assert.equal(yield* Ref.get(starts), 2);
+    }).pipe(
+      Effect.provide(
+        layerTest({
+          state,
+          idleTimeoutMs: 60_000,
+          operationConcurrency: { scope: "driver", supportedConcurrency: 1 },
+          startTurn: providerStart,
         }),
       ),
     );

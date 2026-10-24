@@ -17,6 +17,7 @@ import * as Cause from "effect/Cause";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
+import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
@@ -50,7 +51,12 @@ import * as CommandOutputHub from "./CommandOutputHub.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ProviderEventIngestor from "./ProviderEventIngestor.ts";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
+import {
+  providerOperationConcurrencyKey,
+  type ProviderOperationConcurrencyPolicy,
+} from "@t3tools/provider-core/server/driver";
 import * as ProviderAdapterRegistry from "./ProviderAdapterRegistry.ts";
+import * as ProviderOperationAdmission from "./ProviderOperationAdmission.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
 
 const DEFAULT_IDLE_TIMEOUT_MS = 30 * 60 * 1000;
@@ -204,6 +210,7 @@ interface LiveSessionEntry {
     ReadonlyMap<number, Queue.Queue<ProviderSessionEventSignal, Cause.Done>>
   >;
   readonly requestEventPermit: Semaphore.Semaphore;
+  readonly operationAdmissionClosed: Deferred.Deferred<void>;
   readonly scope: Scope.Closeable;
   readonly idleGeneration: number;
   readonly busyTurns: ReadonlySet<string>;
@@ -307,11 +314,13 @@ export const layerWithOptions = (
   | ProjectionStore.ProjectionStoreV2
   | ProviderEventIngestor.ProviderEventIngestorV2
   | ProviderAdapterRegistry.ProviderAdapterRegistryV2
+  | ProviderOperationAdmission.ProviderOperationAdmission
 > =>
   Layer.effect(
     ProviderSessionManagerV2,
     Effect.gen(function* () {
       const registry = yield* ProviderAdapterRegistry.ProviderAdapterRegistryV2;
+      const operationAdmission = yield* ProviderOperationAdmission.ProviderOperationAdmission;
       const fileSystem = yield* FileSystem.FileSystem;
       const mcpSessionRegistry = yield* McpSessionRegistry.McpSessionRegistry;
       const mcpSessions = yield* McpProviderSessions.McpProviderSessions;
@@ -388,6 +397,39 @@ export const layerWithOptions = (
           }),
       );
       const sessions = yield* Ref.make(new Map<string, LiveSessionEntry>());
+      const operationAdmissionLeases = yield* Ref.make(
+        new Map<
+          string,
+          {
+            readonly providerSessionId: ProviderSessionId;
+            readonly release: Effect.Effect<void>;
+          }
+        >(),
+      );
+      const admissionOperationId = (
+        providerSessionId: ProviderSessionId,
+        providerThreadId: ProviderThreadId,
+        runOrdinal: number,
+      ) => `${providerSessionId}\u0000${providerThreadId}\u0000${runOrdinal}`;
+      const releaseOperationAdmission = (operationId: string) =>
+        Ref.modify(operationAdmissionLeases, (current) => {
+          const lease = current.get(operationId);
+          if (lease === undefined) return [undefined, current] as const;
+          const next = new Map(current);
+          next.delete(operationId);
+          return [lease, next] as const;
+        }).pipe(Effect.flatMap((lease) => lease?.release ?? Effect.void));
+      const releaseSessionOperationAdmissions = (providerSessionId: ProviderSessionId) =>
+        Ref.modify(operationAdmissionLeases, (current) => {
+          const releases: Array<Effect.Effect<void>> = [];
+          const next = new Map(current);
+          for (const [operationId, lease] of current) {
+            if (lease.providerSessionId !== providerSessionId) continue;
+            releases.push(lease.release);
+            next.delete(operationId);
+          }
+          return [releases, next] as const;
+        }).pipe(Effect.flatMap((releases) => Effect.all(releases, { discard: true })));
       // One retry per released entry, so a later release with the same id
       // cannot drop cleanup for threads only the earlier session served.
       const releaseRecordRetries = yield* FiberSet.make();
@@ -1007,6 +1049,8 @@ export const layerWithOptions = (
               onNone: () => Effect.void,
               onSome: (entry) =>
                 Effect.gen(function* () {
+                  yield* Deferred.succeed(entry.operationAdmissionClosed, undefined);
+                  yield* releaseSessionOperationAdmissions(input.providerSessionId);
                   const releasedBackgroundTasks = yield* readReleasedBackgroundTasks({
                     entry,
                     reason: input.reason,
@@ -1714,6 +1758,8 @@ export const layerWithOptions = (
 
       const decorateRuntime = (
         runtime: ProviderAdapter.ProviderAdapterV2SessionRuntime,
+        operationConcurrency: ProviderOperationConcurrencyPolicy | undefined,
+        operationAdmissionClosed: Deferred.Deferred<void>,
         eventSubscribers: Ref.Ref<
           ReadonlyMap<number, Queue.Queue<ProviderSessionEventSignal, Cause.Done>>
         >,
@@ -1854,20 +1900,62 @@ export const layerWithOptions = (
               ),
               Effect.andThen(
                 Effect.acquireUseRelease(
-                  observeActivity(
-                    providerSessionId,
-                    markBusy(
+                  Effect.gen(function* () {
+                    const operationId = admissionOperationId(
                       providerSessionId,
-                      busyTurnKey(input.providerThread.id, input.runOrdinal),
-                    ),
-                  ),
+                      input.providerThread.id,
+                      input.runOrdinal,
+                    );
+                    if (operationConcurrency !== undefined) {
+                      const lease = yield* operationAdmission
+                        .acquire({
+                          key: providerOperationConcurrencyKey({
+                            policy: operationConcurrency,
+                            driverKind: runtime.driver,
+                            instanceId: runtime.instanceId,
+                          }),
+                          supportedConcurrency: operationConcurrency.supportedConcurrency,
+                          operationId,
+                          ownerKey: `${providerSessionId}\u0000${input.providerThread.id}`,
+                        })
+                        .pipe(
+                          Effect.raceFirst(
+                            Deferred.await(operationAdmissionClosed).pipe(
+                              Effect.andThen(Effect.interrupt),
+                            ),
+                          ),
+                        );
+                      yield* Ref.update(operationAdmissionLeases, (current) =>
+                        new Map(current).set(operationId, {
+                          providerSessionId,
+                          release: lease.release,
+                        }),
+                      );
+                    }
+                    yield* observeActivity(
+                      providerSessionId,
+                      markBusy(
+                        providerSessionId,
+                        busyTurnKey(input.providerThread.id, input.runOrdinal),
+                      ),
+                    ).pipe(Effect.onError(() => releaseOperationAdmission(operationId)));
+                    return operationId;
+                  }),
                   () =>
                     runtime.startTurn(input).pipe(turnMetrics("send", input.modelSelection.model)),
-                  (_, exit) =>
+                  (operationId, exit) =>
                     Exit.isFailure(exit)
-                      ? observeActivity(
-                          providerSessionId,
-                          markIdle(providerSessionId, input.providerThread.id, input.runOrdinal),
+                      ? releaseOperationAdmission(operationId).pipe(
+                          Effect.andThen(
+                            observeActivity(
+                              providerSessionId,
+                              markIdle(
+                                providerSessionId,
+                                input.providerThread.id,
+                                input.runOrdinal,
+                              ),
+                            ),
+                          ),
                         )
                       : Effect.void,
                 ),
@@ -1955,10 +2043,20 @@ export const layerWithOptions = (
             return observeActivity(
               entry.runtime.providerSessionId,
               event.type === "turn.terminal"
-                ? markIdle(
-                    entry.runtime.providerSessionId,
-                    event.providerThreadId,
-                    event.runOrdinal,
+                ? releaseOperationAdmission(
+                    admissionOperationId(
+                      entry.runtime.providerSessionId,
+                      event.providerThreadId,
+                      event.runOrdinal,
+                    ),
+                  ).pipe(
+                    Effect.andThen(
+                      markIdle(
+                        entry.runtime.providerSessionId,
+                        event.providerThreadId,
+                        event.runOrdinal,
+                      ),
+                    ),
                   )
                 : touchActivity(entry.runtime.providerSessionId, { providerActivity: true }),
             ).pipe(
@@ -2148,6 +2246,19 @@ export const layerWithOptions = (
                     }),
                 ),
               );
+              const operationConcurrency =
+                registry.getOperationConcurrency === undefined
+                  ? undefined
+                  : yield* registry.getOperationConcurrency(input.modelSelection.instanceId).pipe(
+                      Effect.mapError(
+                        (cause) =>
+                          new ProviderSessionOpenError({
+                            instanceId: input.modelSelection.instanceId,
+                            providerSessionId: input.providerSessionId,
+                            cause,
+                          }),
+                      ),
+                    );
               const prepared = yield* prepareMcpSession(
                 input.threadId,
                 input.modelSelection.instanceId,
@@ -2218,7 +2329,13 @@ export const layerWithOptions = (
               const eventSubscribers = yield* Ref.make<
                 ReadonlyMap<number, Queue.Queue<ProviderSessionEventSignal, Cause.Done>>
               >(new Map());
-              const exposedRuntime = decorateRuntime(runtime, eventSubscribers);
+              const operationAdmissionClosed = yield* Deferred.make<void>();
+              const exposedRuntime = decorateRuntime(
+                runtime,
+                operationConcurrency,
+                operationAdmissionClosed,
+                eventSubscribers,
+              );
               const now = yield* Clock.currentTimeMillis;
               const entry: LiveSessionEntry = {
                 attachedThreadIds: new Set([input.threadId]),
@@ -2234,6 +2351,7 @@ export const layerWithOptions = (
                 exposedRuntime,
                 eventSubscribers,
                 requestEventPermit: yield* Semaphore.make(1),
+                operationAdmissionClosed,
                 scope: sessionScope,
                 idleGeneration: 0,
                 busyTurns: new Set(),

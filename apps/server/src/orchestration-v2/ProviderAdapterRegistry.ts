@@ -19,6 +19,7 @@ import {
   type AnyProviderAdapterDriver,
 } from "@t3tools/provider-core/server/adapterDriver";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
+import type { ProviderOperationConcurrencyPolicy } from "@t3tools/provider-core/server/driver";
 
 const isProviderSetupError = Schema.is(ProviderSetupError);
 
@@ -50,6 +51,12 @@ export interface ProviderAdapterRegistryV2Shape {
     instanceId: ProviderInstanceId,
   ) => Effect.Effect<ProviderAdapter.ProviderAdapterV2["Service"], ProviderAdapterRegistryV2Error>;
   readonly list: () => Effect.Effect<ReadonlyArray<ProviderInstanceId>>;
+  readonly getOperationConcurrency?: (
+    instanceId: ProviderInstanceId,
+  ) => Effect.Effect<
+    ProviderOperationConcurrencyPolicy | undefined,
+    ProviderAdapterRegistryV2Error
+  >;
   readonly getMetadata?: (instanceId: ProviderInstanceId) => Effect.Effect<
     {
       readonly driver: ProviderAdapter.ProviderAdapterV2["Service"]["driver"];
@@ -136,6 +143,15 @@ export const layerFromProviderInstanceRegistry: Layer.Layer<
         instances.listInstances.pipe(
           Effect.map((available) => available.map((instance) => instance.instanceId)),
         ),
+      getOperationConcurrency: Effect.fn("ProviderAdapterRegistry.getOperationConcurrency")(
+        function* (instanceId) {
+          const instance = yield* instances.getInstance(instanceId);
+          if (instance === undefined) {
+            return yield* new ProviderAdapterRegistryLookupError({ instanceId });
+          }
+          return instance.operationConcurrency;
+        },
+      ),
       getMetadata: Effect.fn("ProviderAdapterRegistry.getMetadata")(function* (instanceId) {
         const instance = yield* instances.getInstance(instanceId);
         if (instance === undefined) {
