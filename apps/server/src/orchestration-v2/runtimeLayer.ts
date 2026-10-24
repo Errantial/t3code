@@ -17,6 +17,7 @@ import * as ManagedProjectFolders from "../project/ManagedProjectFolders.ts";
 import * as CheckpointCaptureService from "./CheckpointCaptureService.ts";
 import * as CheckpointService from "./CheckpointService.ts";
 import * as CheckpointRollbackService from "./CheckpointRollbackService.ts";
+import * as ChatGptBrowserOperationStore from "./ChatGptBrowserOperationStore.ts";
 import * as CommandPolicy from "./CommandPolicy.ts";
 import * as CommandReceiptStore from "./CommandReceiptStore.ts";
 import * as ContextHandoffService from "./ContextHandoffService.ts";
@@ -78,6 +79,7 @@ const layerStores = Layer.mergeAll(
   ProjectStore.layer,
   layerCommandReceiptStoreProvided,
   EffectOutbox.layer,
+  ChatGptBrowserOperationStore.layer,
   TurnItemPositionStore.layer,
 );
 
@@ -177,7 +179,9 @@ const layerProviderTurnStartServiceProvided = ProviderTurnStartService.layer.pip
 );
 
 const layerProviderTurnControlServiceProvided = ProviderTurnControlService.layer.pipe(
-  Layer.provide(Layer.merge(ProjectionStore.layer, layerProviderSessionManagerProvided)),
+  Layer.provide(
+    Layer.mergeAll(ProjectionStore.layer, layerProviderSessionManagerProvided, layerStores),
+  ),
 );
 const layerRuntimeRequestServiceProvided = RuntimeRequestService.layer.pipe(
   Layer.provide(Layer.merge(ProjectionStore.layer, layerProviderSessionManagerProvided)),
@@ -203,6 +207,7 @@ const layerCheckpointCaptureServiceProvided = CheckpointCaptureService.layer.pip
       layerEventSinkProvided,
       IdAllocator.layer,
       ProjectionStore.layer,
+      ChatGptBrowserOperationStore.layer,
     ),
   ),
 );
@@ -331,6 +336,7 @@ const layerProviderRuntimeRecoveryProvided = ProviderRuntimeRecoveryService.laye
       layerEventSinkProvided,
       IdAllocator.layer,
       ProjectionStore.layer,
+      ChatGptBrowserOperationStore.layer,
     ),
   ),
 );

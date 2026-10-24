@@ -44,6 +44,7 @@ import * as CheckpointService from "./CheckpointService.ts";
 import * as EventSink from "./EventSink.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
+import { checkpointChatGptBrowserProviderEvent } from "@t3tools/provider-chatgpt-browser/server";
 import * as ProviderEventIngestor from "./ProviderEventIngestor.ts";
 import type { ProjectionStoreV2Error } from "./ProjectionStore.ts";
 import {
@@ -1427,6 +1428,11 @@ export const layer: Layer.Layer<
                 yield* finalizeRootRun(event);
               }
               yield* trackChildLifecycle(event, deliveredEvent !== null);
+              // ChatGPT Browser keeps its provider-event cursor in T3-owned durable state. The
+              // adapter tags only events whose semantic state is reconstructible from this point;
+              // run this after the normalized event/final run writes above have committed so the
+              // cursor can never outrun T3's durable projection.
+              yield* checkpointChatGptBrowserProviderEvent(event);
             }),
           ),
           Stream.takeUntilEffect(() => shouldStopProviderEventIngestion),

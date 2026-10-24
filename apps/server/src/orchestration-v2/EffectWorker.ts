@@ -151,6 +151,19 @@ export const layerExecutor: Layer.Layer<
                     }),
                 ),
               );
+          case "chatgpt-browser-operation.recover":
+            return providerTurnStart
+              .start({ threadId: effect.threadId, runId: effect.request.runId, willRetry })
+              .pipe(
+                Effect.mapError(
+                  (cause) =>
+                    new OrchestrationEffectExecutionError({
+                      effectId: effect.id,
+                      effectType: effect.request.type,
+                      cause,
+                    }),
+                ),
+              );
           case "provider-turn.interrupt": {
             const request = effect.request;
             return providerTurnControl

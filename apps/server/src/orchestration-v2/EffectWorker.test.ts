@@ -200,6 +200,26 @@ it.effect("settles a stopped run when its adapter has already lost the native tu
   }),
 );
 
+it.effect("restarts a durable ChatGPT Browser operation through the same run start path", () =>
+  Effect.gen(function* () {
+    const now = yield* DateTime.now;
+    const events = yield* Ref.make<ReadonlyArray<string>>([]);
+    const layer = layerExecutorFor({ events });
+    const effect: EffectOutbox.OrchestrationEffectV2 = {
+      ...restartEffect(now, { type: "detach" }),
+      id: `effect:chatgpt-browser-operation-recover:${runId}`,
+      request: { type: "chatgpt-browser-operation.recover", runId },
+    };
+
+    yield* Effect.gen(function* () {
+      const executor = yield* EffectWorker.OrchestrationEffectExecutorV2;
+      yield* executor.execute(effect);
+    }).pipe(Effect.provide(layer));
+
+    assert.deepEqual(yield* Ref.get(events), ["start"]);
+  }),
+);
+
 const lockedIndexMessage =
   "Git's index is locked. Wait for other Git operations to finish, then try again.";
 const rollbackCheckpointId = CheckpointId.make("checkpoint:effect-worker-rollback");

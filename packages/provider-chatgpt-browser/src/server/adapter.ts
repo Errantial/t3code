@@ -33,6 +33,12 @@ import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
 
+import {
+  ChatGptBrowserOperationStore,
+  type ChatGptBrowserOperationStoreError,
+  registerChatGptBrowserProviderEventCheckpoint,
+} from "./operationRecovery.ts";
+
 export const CHATGPT_BROWSER_DRIVER_KIND = ProviderDriverKind.make("chatgptBrowser");
 
 export const ChatGptBrowserProviderCapabilitiesV2 = {
@@ -180,6 +186,7 @@ export const makeChatGptBrowserAdapterV2 = Effect.fn("makeChatGptBrowserAdapterV
   options: ChatGptBrowserAdapterV2Options,
 ) {
   const idAllocator = yield* IdAllocator.IdAllocatorV2;
+  const operationStore = yield* ChatGptBrowserOperationStore;
   const protocolError = (detail: string, cause?: unknown) =>
     new ProviderAdapter.ProviderAdapterProtocolError({
       driver: CHATGPT_BROWSER_DRIVER_KIND,
@@ -256,8 +263,15 @@ export const makeChatGptBrowserAdapterV2 = Effect.fn("makeChatGptBrowserAdapterV
       >();
       const commands = yield* Semaphore.make(1);
 
-      const emit = (event: ProviderAdapter.ProviderAdapterV2Event) =>
-        Queue.offer(events, event).pipe(Effect.asVoid);
+      const emit = (
+        event: ProviderAdapter.ProviderAdapterV2Event,
+        checkpoint?: Effect.Effect<void, ChatGptBrowserOperationStoreError>,
+      ) =>
+        Effect.sync(() => {
+          if (checkpoint !== undefined) {
+            registerChatGptBrowserProviderEventCheckpoint(event, checkpoint);
+          }
+        }).pipe(Effect.andThen(Queue.offer(events, event)), Effect.asVoid);
       const updateSession = Effect.fnUntraced(function* (
         status: OrchestrationV2ProviderSession["status"],
         lastError: string | null = null,
@@ -325,6 +339,7 @@ export const makeChatGptBrowserAdapterV2 = Effect.fn("makeChatGptBrowserAdapterV
         turn: ActiveTurn,
         text: string,
         streaming: boolean,
+        checkpointSequence?: ChatGptBrowserProviderV1EventSequence,
       ) {
         const timestamp = yield* DateTime.now;
         const previous = turn.assistantMessage;
@@ -348,11 +363,21 @@ export const makeChatGptBrowserAdapterV2 = Effect.fn("makeChatGptBrowserAdapterV
           updatedAt: timestamp,
         };
         turn.assistantMessage = message;
-        yield* emit({
+        const event: ProviderAdapter.ProviderAdapterV2Event = {
           type: "message.updated",
           driver: CHATGPT_BROWSER_DRIVER_KIND,
           message,
-        });
+        };
+        yield* emit(
+          event,
+          checkpointSequence === undefined
+            ? undefined
+            : operationStore.advanceHighWater({
+                attemptId: turn.input.attemptId,
+                providerOperationId: turn.operationId,
+                sequence: checkpointSequence,
+              }),
+        );
       });
 
       const readFinalText = Effect.fnUntraced(function* (
@@ -414,6 +439,7 @@ export const makeChatGptBrowserAdapterV2 = Effect.fn("makeChatGptBrowserAdapterV
         status: "completed" | "cancelled" | "interrupted" | "failed",
         failure?: OrchestrationV2ProviderFailure,
         disposition: "reusable" | "broken" = "reusable",
+        checkpointSequence?: ChatGptBrowserProviderV1EventSequence,
       ) {
         if (turn.finished || active !== turn) return;
         turn.finished = true;
@@ -454,7 +480,7 @@ export const makeChatGptBrowserAdapterV2 = Effect.fn("makeChatGptBrowserAdapterV
             driver: CHATGPT_BROWSER_DRIVER_KIND,
             turnItem: failureItem,
           });
-          yield* emit({
+          const terminalEvent: ProviderAdapter.ProviderAdapterV2Event = {
             type: "turn.terminal",
             driver: CHATGPT_BROWSER_DRIVER_KIND,
             providerThreadId: turn.providerTurn.providerThreadId,
@@ -464,10 +490,20 @@ export const makeChatGptBrowserAdapterV2 = Effect.fn("makeChatGptBrowserAdapterV
             status: "failed",
             failure,
             threadDisposition: disposition,
-          });
+          };
+          yield* emit(
+            terminalEvent,
+            checkpointSequence === undefined
+              ? undefined
+              : operationStore.advanceHighWater({
+                  attemptId: turn.input.attemptId,
+                  providerOperationId: turn.operationId,
+                  sequence: checkpointSequence,
+                }),
+          );
           return;
         }
-        yield* emit({
+        const terminalEvent: ProviderAdapter.ProviderAdapterV2Event = {
           type: "turn.terminal",
           driver: CHATGPT_BROWSER_DRIVER_KIND,
           providerThreadId: turn.providerTurn.providerThreadId,
@@ -476,12 +512,26 @@ export const makeChatGptBrowserAdapterV2 = Effect.fn("makeChatGptBrowserAdapterV
           status: status === "failed" ? "cancelled" : status,
           failure: null,
           threadDisposition: disposition,
-        });
+        };
+        yield* emit(
+          terminalEvent,
+          checkpointSequence === undefined
+            ? undefined
+            : operationStore.advanceHighWater({
+                attemptId: turn.input.attemptId,
+                providerOperationId: turn.operationId,
+                sequence: checkpointSequence,
+              }),
+        );
       });
 
-      const consumeOperation = Effect.fnUntraced(function* (turn: ActiveTurn) {
-        let cursor = ChatGptBrowserProviderV1EventSequence.make(0);
+      const consumeOperation = Effect.fnUntraced(function* (
+        turn: ActiveTurn,
+        initialCursor: ChatGptBrowserProviderV1EventSequence,
+      ) {
+        let cursor = initialCursor;
         let drained = false;
+        let drainedSequence: ChatGptBrowserProviderV1EventSequence | undefined;
         while (!drained) {
           const page = yield* transport.replay({
             type: "events.replay",
@@ -496,11 +546,14 @@ export const makeChatGptBrowserAdapterV2 = Effect.fn("makeChatGptBrowserAdapterV
             if (
               drained ||
               event.providerOperationId !== turn.operationId ||
-              event.sequence <= cursor ||
               event.sequence > page.highWater
             ) {
               return yield* protocolError("ChatGPT Browser replay event order is invalid");
             }
+            // Replay is cursor-based, but an implementation can defensively include an already
+            // committed row. T3's durable consumer high-water is authoritative for this process;
+            // stale/duplicate rows at or below it have no work left to project.
+            if (event.sequence <= cursor) continue;
             pageAdvanced = true;
             cursor = event.sequence;
             switch (event.payload.type) {
@@ -516,6 +569,7 @@ export const makeChatGptBrowserAdapterV2 = Effect.fn("makeChatGptBrowserAdapterV
                   turn,
                   yield* readFinalText(transport, turn, event.payload),
                   false,
+                  event.sequence,
                 );
                 break;
               case "operation.terminal":
@@ -540,6 +594,7 @@ export const makeChatGptBrowserAdapterV2 = Effect.fn("makeChatGptBrowserAdapterV
                   );
                 }
                 drained = true;
+                drainedSequence = event.sequence;
                 break;
             }
           }
@@ -576,11 +631,18 @@ export const makeChatGptBrowserAdapterV2 = Effect.fn("makeChatGptBrowserAdapterV
             "failed",
             failure,
             terminal.error && transportFailureBreaksThread(terminal.error) ? "broken" : "reusable",
+            drainedSequence,
           );
         } else if (terminal.status === "cancelled") {
-          yield* finishTurn(turn, turn.interruptRequested ? "interrupted" : "cancelled");
+          yield* finishTurn(
+            turn,
+            turn.interruptRequested ? "interrupted" : "cancelled",
+            undefined,
+            "reusable",
+            drainedSequence,
+          );
         } else {
-          yield* finishTurn(turn, "completed");
+          yield* finishTurn(turn, "completed", undefined, "reusable", drainedSequence);
         }
       });
 
@@ -620,18 +682,56 @@ export const makeChatGptBrowserAdapterV2 = Effect.fn("makeChatGptBrowserAdapterV
         }
 
         const operationId = chatGptBrowserProviderOperationIdForAttempt(args.attemptId);
-        const receipt = yield* transport.send({
-          type: "operation.send",
+        const recovery = yield* operationStore.prepare({
+          attemptId: args.attemptId,
           providerOperationId: operationId,
           providerSessionId: input.providerSessionId,
-          text: args.message.text,
+          providerThreadId: args.providerThread.id,
         });
+        const snapshot = yield* transport.queryOperation({
+          type: "operation.query",
+          providerOperationId: operationId,
+        });
+        if (snapshot.providerOperationId !== operationId) {
+          return yield* protocolError("ChatGPT Browser query returned a different operation");
+        }
         if (
-          receipt.providerOperationId !== operationId ||
-          receipt.providerSessionId !== input.providerSessionId
+          snapshot.state !== "unknown" &&
+          snapshot.providerSessionId !== input.providerSessionId
+        ) {
+          return yield* protocolError("ChatGPT Browser operation belongs to a different session");
+        }
+        if (snapshot.state === "unknown") {
+          if (recovery.cancelRequested) {
+            return yield* protocolError(
+              "ChatGPT Browser operation is unknown after durable cancellation was requested; recovery will not create new browser work",
+            );
+          }
+          const receipt = yield* transport.send({
+            type: "operation.send",
+            providerOperationId: operationId,
+            providerSessionId: input.providerSessionId,
+            text: args.message.text,
+          });
+          if (
+            receipt.providerOperationId !== operationId ||
+            receipt.providerSessionId !== input.providerSessionId
+          ) {
+            return yield* protocolError(
+              "ChatGPT Browser send receipt identity did not match the request",
+            );
+          }
+        }
+
+        const persisted = yield* operationStore.get(args.attemptId);
+        if (
+          persisted === undefined ||
+          persisted.providerOperationId !== operationId ||
+          persisted.providerSessionId !== input.providerSessionId ||
+          persisted.providerThreadId !== args.providerThread.id
         ) {
           return yield* protocolError(
-            "ChatGPT Browser send receipt identity did not match the request",
+            "ChatGPT Browser durable operation identity changed during recovery",
           );
         }
 
@@ -656,7 +756,7 @@ export const makeChatGptBrowserAdapterV2 = Effect.fn("makeChatGptBrowserAdapterV
           providerTurn,
           assistantMessage: undefined,
           terminal: undefined,
-          interruptRequested: false,
+          interruptRequested: recovery.cancelRequested,
           finished: false,
         };
         active = turn;
@@ -672,7 +772,16 @@ export const makeChatGptBrowserAdapterV2 = Effect.fn("makeChatGptBrowserAdapterV
           threadId: args.threadId,
           providerTurn,
         });
-        yield* consumeOperation(turn).pipe(
+        if (recovery.cancelRequested) {
+          const cancelled = yield* transport.cancel({
+            type: "operation.cancel",
+            providerOperationId: operationId,
+          });
+          if (cancelled.providerOperationId !== operationId) {
+            return yield* protocolError("ChatGPT Browser cancel returned a different operation");
+          }
+        }
+        yield* consumeOperation(turn, persisted.consumerHighWater).pipe(
           Effect.catch((cause) => failBackground(turn, cause)),
           Effect.forkIn(scope),
         );
@@ -735,6 +844,10 @@ export const makeChatGptBrowserAdapterV2 = Effect.fn("makeChatGptBrowserAdapterV
               return yield* protocolError("ChatGPT Browser turn is no longer active");
             }
             turn.interruptRequested = true;
+            yield* operationStore.requestCancel({
+              attemptId: turn.input.attemptId,
+              providerOperationId: turn.operationId,
+            });
             const snapshot = yield* transport.cancel({
               type: "operation.cancel",
               providerOperationId: turn.operationId,

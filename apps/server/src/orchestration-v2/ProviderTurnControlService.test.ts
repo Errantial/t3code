@@ -25,6 +25,12 @@ import * as Stream from "effect/Stream";
 import { CodexProviderCapabilitiesV2 } from "./Adapters/CodexAdapterV2.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
+import {
+  CHATGPT_BROWSER_DRIVER_KIND,
+  ChatGptBrowserOperationStore,
+  layerMemoryChatGptBrowserOperationStore,
+} from "@t3tools/provider-chatgpt-browser/server";
+import { chatGptBrowserProviderOperationIdForAttempt } from "@t3tools/provider-core/server/chatgptBrowserProviderV1";
 import * as ProviderSessionManager from "./ProviderSessionManager.ts";
 import * as ProviderTurnControlService from "./ProviderTurnControlService.ts";
 
@@ -99,7 +105,7 @@ function makeProjection(input: {
         nodeId,
         runAttemptId: input.attemptId,
         nativeTurnRef: {
-          driver,
+          driver: input.providerThread.driver,
           nativeId: "native-turn:restart-session",
           strength: "strong",
         },
@@ -329,4 +335,95 @@ it.effect(
       assert.equal(interrupted?.id, providerThreadId);
       assert.equal(interrupted?.nativeThreadRef?.nativeId, "native-thread:restart-session");
     }),
+);
+
+it.effect("keeps exact ChatGPT Browser cancellation pending when the live adapter is missing", () =>
+  Effect.gen(function* () {
+    const now = yield* DateTime.now;
+    const threadId = ThreadId.make("thread:chatgpt-browser:missing-runtime");
+    const providerSessionId = ProviderSessionId.make(
+      "provider-session:chatgpt-browser:missing-runtime",
+    );
+    const providerThreadId = ProviderThreadId.make(
+      "provider-thread:chatgpt-browser:missing-runtime",
+    );
+    const providerTurnId = ProviderTurnId.make("provider-turn:chatgpt-browser:missing-runtime");
+    const attemptId = RunAttemptId.make("attempt:chatgpt-browser:missing-runtime");
+    const providerOperationId = chatGptBrowserProviderOperationIdForAttempt(attemptId);
+    const providerThread: OrchestrationV2ProviderThread = {
+      id: providerThreadId,
+      driver: CHATGPT_BROWSER_DRIVER_KIND,
+      providerInstanceId: ProviderInstanceId.make("chatgptBrowser"),
+      providerSessionId,
+      appThreadId: threadId,
+      ownerNodeId: null,
+      nativeThreadRef: null,
+      nativeConversationHeadRef: null,
+      status: "active",
+      firstRunOrdinal: 1,
+      lastRunOrdinal: 1,
+      handoffIds: [],
+      forkedFrom: null,
+      createdAt: now,
+      updatedAt: now,
+    };
+    const providerTurn = {
+      id: providerTurnId,
+      providerThreadId,
+      nodeId: NodeId.make("node:chatgpt-browser:missing-runtime"),
+      runAttemptId: attemptId,
+      nativeTurnRef: null,
+      ordinal: 1,
+      status: "running" as const,
+      startedAt: now,
+      completedAt: null,
+    };
+    const deps = Layer.mergeAll(
+      Layer.mock(ProjectionStore.ProjectionStoreV2)({
+        getProviderControlContext: () =>
+          Effect.succeed({
+            providerThread,
+            providerTurn,
+            attempt: { id: attemptId },
+            message: undefined,
+            run: undefined,
+          } as never),
+      }),
+      Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({
+        get: () => Effect.succeed(Option.none()),
+      }),
+      layerMemoryChatGptBrowserOperationStore,
+    );
+    const layer = ProviderTurnControlService.layer.pipe(Layer.provideMerge(deps));
+    yield* Effect.gen(function* () {
+      const store = yield* ChatGptBrowserOperationStore;
+      yield* store.prepare({
+        attemptId,
+        providerOperationId,
+        providerSessionId,
+        providerThreadId,
+      });
+      const control = yield* ProviderTurnControlService.ProviderTurnControlServiceV2;
+
+      const interrupt = yield* Effect.exit(
+        control.interrupt({ threadId, providerSessionId, providerThreadId, providerTurnId }),
+      );
+      const restart = yield* Effect.exit(
+        control.interruptAndAwaitTerminal({
+          threadId,
+          providerSessionId,
+          providerThreadId,
+          providerTurnId,
+          interruptedAttemptId: attemptId,
+        }),
+      );
+
+      assert.isTrue(Exit.isFailure(interrupt));
+      assert.isTrue(Exit.isFailure(restart));
+      assert.deepInclude(yield* store.get(attemptId), {
+        providerOperationId,
+        cancelRequested: true,
+      });
+    }).pipe(Effect.provide(layer));
+  }),
 );

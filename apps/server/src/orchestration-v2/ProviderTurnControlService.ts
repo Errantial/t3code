@@ -17,6 +17,11 @@ import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 
 import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
+import {
+  CHATGPT_BROWSER_DRIVER_KIND,
+  ChatGptBrowserOperationStore,
+} from "@t3tools/provider-chatgpt-browser/server";
+import { chatGptBrowserProviderOperationIdForAttempt } from "@t3tools/provider-core/server/chatgptBrowserProviderV1";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import * as ProviderSessionManager from "./ProviderSessionManager.ts";
 
@@ -90,6 +95,7 @@ export const layer: Layer.Layer<
   Effect.gen(function* () {
     const projections = yield* ProjectionStore.ProjectionStoreV2;
     const sessions = yield* ProviderSessionManager.ProviderSessionManagerV2;
+    const chatGptBrowserOperations = yield* Effect.serviceOption(ChatGptBrowserOperationStore);
 
     const load = Effect.fn("ProviderTurnControlService.load")(function* (input: {
       readonly threadId: ThreadId;
@@ -146,6 +152,56 @@ export const layer: Layer.Layer<
       }
       const session = yield* sessions.get(input.providerSessionId);
       if (Option.isNone(session)) {
+        if (
+          (input.operation === "interrupt" || input.operation === "restart") &&
+          providerTurn.status === "running" &&
+          providerThread.driver === CHATGPT_BROWSER_DRIVER_KIND
+        ) {
+          const attemptId = providerTurn.runAttemptId;
+          if (attemptId === null) {
+            return yield* new ProviderTurnControlError({
+              threadId: input.threadId,
+              operation: input.operation,
+              providerTurnId: input.providerTurnId,
+              cause: "ChatGPT Browser running turn has no exact run attempt identity.",
+            });
+          }
+          if (Option.isNone(chatGptBrowserOperations)) {
+            return yield* new ProviderTurnControlError({
+              threadId: input.threadId,
+              operation: input.operation,
+              providerTurnId: input.providerTurnId,
+              cause: "ChatGPT Browser exact-operation recovery store is unavailable.",
+            });
+          }
+          const operation = yield* chatGptBrowserOperations.value.get(attemptId);
+          const expectedOperationId = chatGptBrowserProviderOperationIdForAttempt(attemptId);
+          if (
+            operation === undefined ||
+            operation.providerOperationId !== expectedOperationId ||
+            operation.providerThreadId !== providerThread.id ||
+            operation.providerSessionId !== input.providerSessionId
+          ) {
+            return yield* new ProviderTurnControlError({
+              threadId: input.threadId,
+              operation: input.operation,
+              providerTurnId: input.providerTurnId,
+              cause:
+                "ChatGPT Browser exact operation cannot be proven while the adapter runtime is absent.",
+            });
+          }
+          yield* chatGptBrowserOperations.value.requestCancel({
+            attemptId,
+            providerOperationId: operation.providerOperationId,
+          });
+          return yield* new ProviderTurnControlError({
+            threadId: input.threadId,
+            operation: input.operation,
+            providerTurnId: input.providerTurnId,
+            cause:
+              "ChatGPT Browser exact cancellation is durably pending adapter recovery; missing runtime is not stop proof.",
+          });
+        }
         // Interrupt/restart against a already-released session must not fail
         // the durable effect (and retry 5x). The turn may still look running
         // in projection until recovery/finalization; there is no live adapter

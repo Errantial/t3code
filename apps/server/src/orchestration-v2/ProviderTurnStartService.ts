@@ -44,6 +44,7 @@ import {
 } from "@t3tools/provider-core/server/handoffBudget";
 import { deliverContextHandoffs } from "./ContextHandoffDelivery.ts";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
+import { CHATGPT_BROWSER_DRIVER_KIND } from "@t3tools/provider-chatgpt-browser/server";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import * as ProviderSessionManager from "./ProviderSessionManager.ts";
@@ -763,6 +764,17 @@ export const layer: Layer.Layer<
         );
         if (resumed._tag === "Success") {
           return resumed.success;
+        }
+
+        if (session.driver === CHATGPT_BROWSER_DRIVER_KIND) {
+          return yield* new ProviderTurnStartError({
+            runId,
+            cause: {
+              detail:
+                "ChatGPT Browser resume failed while an exact provider operation may still exist; fresh-session fallback is forbidden.",
+              resumeFailure: resumed.failure,
+            },
+          });
         }
 
         yield* Effect.logWarning("Provider resume failed; attempting a fresh native session", {

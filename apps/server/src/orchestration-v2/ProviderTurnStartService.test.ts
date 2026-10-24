@@ -42,6 +42,7 @@ import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import { CodexProviderCapabilitiesV2 } from "./Adapters/CodexAdapterV2.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
+import { CHATGPT_BROWSER_DRIVER_KIND } from "@t3tools/provider-chatgpt-browser/server";
 import * as ProviderSessionManager from "./ProviderSessionManager.ts";
 import * as ProviderTurnStart from "./ProviderTurnStartService.ts";
 import * as RunExecutionService from "./RunExecutionService.ts";
@@ -259,6 +260,7 @@ it.each([
 
 function makeLocalCommandHarness(input: {
   readonly text: string;
+  readonly driver?: ProviderDriverKind;
   readonly worktreePath?: string;
   readonly worktreesDir?: string;
   readonly fileSystem?: FileSystem.FileSystem;
@@ -312,7 +314,7 @@ function makeLocalCommandHarness(input: {
   };
   const providerThread: OrchestrationV2ThreadProjection["providerThreads"][number] = {
     id: providerThreadId,
-    driver: ProviderDriverKind.make("codex"),
+    driver: input.driver ?? ProviderDriverKind.make("codex"),
     providerInstanceId: newInstanceId,
     providerSessionId,
     appThreadId: threadId,
@@ -559,17 +561,20 @@ function makeLocalCommandHarness(input: {
       ),
     ),
   );
+  const resumeFallback = vi.fn(() =>
+    Effect.fail(
+      new ProviderAdapter.ProviderAdapterEventStreamError({
+        driver: providerThread.driver,
+        providerSessionId,
+        cause: "native thread is gone",
+      }),
+    ),
+  );
+  const ensureFallback = vi.fn(() => Effect.succeed(providerThread));
   const resumeFallbackSession = {
     driver: providerThread.driver,
-    resumeThread: () =>
-      Effect.fail(
-        new ProviderAdapter.ProviderAdapterEventStreamError({
-          driver: providerThread.driver,
-          providerSessionId,
-          cause: "native thread is gone",
-        }),
-      ),
-    ensureThread: () => Effect.succeed(providerThread),
+    resumeThread: resumeFallback,
+    ensureThread: ensureFallback,
   };
   const open = vi.fn(() =>
     input.interruptOpen === true
@@ -755,6 +760,8 @@ function makeLocalCommandHarness(input: {
     writeIfRunCurrent,
     startRootRun,
     interruptTurn,
+    resumeFallback,
+    ensureFallback,
     tryHandlePromptCommand,
     events,
     oldInstanceId,
@@ -773,6 +780,28 @@ function makeLocalCommandHarness(input: {
     }).pipe(Effect.provide(layer)),
   };
 }
+
+effectIt.effect("forbids ChatGPT Browser fresh-session fallback after resume ambiguity", () =>
+  Effect.gen(function* () {
+    const chatGpt = makeLocalCommandHarness({
+      text: "Continue",
+      driver: CHATGPT_BROWSER_DRIVER_KIND,
+      historyReadFailureAfterFallback: "history should never be read",
+    });
+    const generic = makeLocalCommandHarness({
+      text: "Continue",
+      historyReadFailureAfterFallback: "history read failed after generic fallback",
+    });
+
+    yield* Effect.result(chatGpt.startWithRetry);
+    yield* Effect.result(generic.startWithRetry);
+
+    expect(chatGpt.resumeFallback).toHaveBeenCalledOnce();
+    expect(chatGpt.ensureFallback).not.toHaveBeenCalled();
+    expect(generic.resumeFallback).toHaveBeenCalledOnce();
+    expect(generic.ensureFallback).toHaveBeenCalledOnce();
+  }),
+);
 
 effectIt.effect("recovers an abandoned failed turn before continuing its native conversation", () =>
   Effect.gen(function* () {

@@ -6,6 +6,16 @@ export {
 } from "./server/adapter.ts";
 export { ChatGptBrowserDriver, type ChatGptBrowserDriverEnv } from "./server/driver.ts";
 export {
+  ChatGptBrowserOperationStore,
+  ChatGptBrowserOperationStoreError,
+  checkpointChatGptBrowserProviderEvent,
+  layerMemory as layerMemoryChatGptBrowserOperationStore,
+  registerChatGptBrowserProviderEventCheckpoint,
+  samePreparedChatGptBrowserOperationIdentity,
+  type ChatGptBrowserOperationRecord,
+  type ChatGptBrowserOperationStoreShape,
+} from "./server/operationRecovery.ts";
+export {
   ChatGptBrowserHost,
   layerUnavailableChatGptBrowserHost,
   unavailableChatGptBrowserHost,

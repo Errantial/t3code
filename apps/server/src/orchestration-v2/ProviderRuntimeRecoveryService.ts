@@ -4,17 +4,23 @@ import {
   CommandId,
   type OrchestrationV2DomainEvent,
   type ProviderThreadId,
+  type RunId,
   type OrchestrationV2RestartCancelledBackgroundWork,
   type OrchestrationV2Subagent,
   type OrchestrationV2ThreadProjection,
   isOrchestrationV2WorkActive,
   ThreadId,
 } from "@t3tools/contracts";
+import {
+  CHATGPT_BROWSER_DRIVER_KIND,
+  ChatGptBrowserOperationStore,
+} from "@t3tools/provider-chatgpt-browser/server";
 import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 
 import * as EffectOutbox from "./EffectOutbox.ts";
@@ -174,6 +180,7 @@ export const make = Effect.gen(function* () {
   const eventSink = yield* EventSink.EventSinkV2;
   const ids = yield* IdAllocator.IdAllocatorV2;
   const outbox = yield* EffectOutbox.EffectOutboxV2;
+  const chatGptBrowserOperations = yield* Effect.serviceOption(ChatGptBrowserOperationStore);
   type RecoverySession = ProjectionStore.ProjectionRuntimeRecoveryState["providerSessions"][number];
   /**
    * A session shared by several threads (one Codex app server) is stopped by the
@@ -204,7 +211,59 @@ export const make = Effect.gen(function* () {
     ) {
       const now = yield* DateTime.now;
       const runs = [] as Array<OrchestrationV2ThreadProjection["runs"][number]>;
+      const exactRecoveryRunIds = new Set<RunId>();
+      const preservedChatGptBrowserRunIds = new Set<RunId>();
+      const preservedProviderThreadIds = new Set<ProviderThreadId>();
+      const preservedProviderSessionIds = new Set<string>();
       for (const run of nonterminalRuns(projection)) {
+        if (run.status === "starting" || run.status === "running") {
+          const providerThread = projection.providerThreads.find(
+            (candidate) => candidate.id === run.providerThreadId,
+          );
+          if (providerThread?.driver === CHATGPT_BROWSER_DRIVER_KIND) {
+            // Any unresolved ChatGPT Browser attempt is excluded from generic process-loss
+            // cancellation. If its exact durable operation cannot be proven, leave it blocked for
+            // explicit recovery instead of manufacturing a fresh session/operation.
+            preservedChatGptBrowserRunIds.add(run.id);
+            preservedProviderThreadIds.add(providerThread.id);
+            if (providerThread.providerSessionId !== null) {
+              preservedProviderSessionIds.add(providerThread.providerSessionId);
+            }
+
+            if (trigger !== "startup") continue;
+
+            const attempt = projection.attempts.find(
+              (candidate) => candidate.id === run.activeAttemptId,
+            );
+            if (
+              attempt !== undefined &&
+              providerThread.providerSessionId !== null &&
+              Option.isSome(chatGptBrowserOperations)
+            ) {
+              const operation = yield* chatGptBrowserOperations.value.get(attempt.id).pipe(
+                Effect.mapError(
+                  (cause) =>
+                    new ProviderRuntimeRecoveryError({
+                      operation: "reconcile",
+                      threadId: projection.thread.id,
+                      cause,
+                    }),
+                ),
+              );
+              const exactJournal =
+                operation !== undefined &&
+                operation.attemptId === attempt.id &&
+                operation.providerThreadId === providerThread.id &&
+                operation.providerSessionId === providerThread.providerSessionId;
+              const provenBeforeSend = run.status === "starting" && operation === undefined;
+              // A journaled attempt resumes the exact T3-owned operation id. A starting run with no
+              // journal is also safe because the adapter creates the journal before any query/send.
+              // Every other shape remains preserved but blocked.
+              if (exactJournal || provenBeforeSend) exactRecoveryRunIds.add(run.id);
+            }
+            continue;
+          }
+        }
         if (run.status === "waiting") {
           const checkpointEffects = yield* outbox
             .listByCommandId(CommandId.make(`command:effect:checkpoint.capture:${run.id}`))
@@ -262,6 +321,28 @@ export const make = Effect.gen(function* () {
           ),
         );
       const events: Array<OrchestrationV2DomainEvent> = [];
+      const exactRecoveryEffects: Array<EffectOutbox.PendingOrchestrationEffectV2> = [];
+      for (const runId of exactRecoveryRunIds) {
+        const run = projection.runs.find((candidate) => candidate.id === runId);
+        if (run === undefined) continue;
+        if (run.status !== "starting") {
+          events.push({
+            id: yield* allocateEventId(),
+            type: "run.updated",
+            threadId: projection.thread.id,
+            runId: run.id,
+            providerInstanceId: run.providerInstanceId,
+            occurredAt: now,
+            payload: { ...run, status: "starting", queuePosition: null, completedAt: null },
+          });
+        }
+        exactRecoveryEffects.push({
+          id: `effect:chatgpt-browser-operation-recover:${run.id}:${DateTime.formatIso(now)}`,
+          commandId,
+          threadId: projection.thread.id,
+          request: { type: "chatgpt-browser-operation.recover", runId: run.id },
+        });
+      }
       const cancelledBackgroundWork = new Map<
         ProviderThreadId,
         Array<OrchestrationV2RestartCancelledBackgroundWork>
@@ -554,6 +635,7 @@ export const make = Effect.gen(function* () {
         })),
       );
       for (const providerThread of projection.providerThreads ?? []) {
+        if (preservedProviderThreadIds.has(providerThread.id)) continue;
         const needsIdle = providerThread.status === "active";
         const needsRosterClear = providerThreadHasPendingBackgroundTasks(providerThread);
         if (!needsIdle && !needsRosterClear) {
@@ -588,7 +670,10 @@ export const make = Effect.gen(function* () {
         });
       }
       for (const session of projection.providerSessions.filter(
-        (candidate) => candidate.status !== "stopped" && candidate.status !== "error",
+        (candidate) =>
+          candidate.status !== "stopped" &&
+          candidate.status !== "error" &&
+          !preservedProviderSessionIds.has(candidate.id),
       )) {
         events.push({
           id: yield* allocateEventId(),
@@ -622,27 +707,33 @@ export const make = Effect.gen(function* () {
         });
       }
       const continuationRun =
-        continueAfterRestart && trigger === "startup"
+        preservedChatGptBrowserRunIds.size === 0 && continueAfterRestart && trigger === "startup"
           ? restartContinuationRun(
               { ...projection, providerSessions: sessionsLiveAtStart(projection, stoppedThisPass) },
               now,
             )
           : undefined;
-      const effects: Array<EffectOutbox.PendingOrchestrationEffectV2> = continuationRun
-        ? [
-            {
-              id: `effect:restart-continuation:${continuationRun.id}`,
-              commandId,
-              threadId: projection.thread.id,
-              request: { type: "provider-runtime.continue", sourceRunId: continuationRun.id },
-            },
-          ]
-        : [];
+      const effects: Array<EffectOutbox.PendingOrchestrationEffectV2> = [
+        ...exactRecoveryEffects,
+        ...(continuationRun
+          ? [
+              {
+                id: `effect:restart-continuation:${continuationRun.id}`,
+                commandId,
+                threadId: projection.thread.id,
+                request: { type: "provider-runtime.continue", sourceRunId: continuationRun.id },
+              },
+            ]
+          : []),
+      ];
       const stoppedSessions = projection.providerSessions.filter(
-        (candidate) => candidate.status !== "stopped" && candidate.status !== "error",
+        (candidate) =>
+          candidate.status !== "stopped" &&
+          candidate.status !== "error" &&
+          !preservedProviderSessionIds.has(candidate.id),
       ).length;
       let retiredEffects: number;
-      if (events.length === 0) {
+      if (events.length === 0 && effects.length === 0) {
         const retiredEffectIds = yield* outbox
           .cancelUnsettled({
             threadId: projection.thread.id,
@@ -692,6 +783,7 @@ export const make = Effect.gen(function* () {
         stoppedSessions,
         closedRequests: requests.length,
         retiredEffects,
+        preservedProviderSessionIds,
       };
     },
   );
@@ -729,7 +821,11 @@ export const make = Effect.gen(function* () {
           .continueThreadsAfterServerUpdate;
       const result = yield* reconcileProjection(projection, trigger, enabled, stoppedThisPass);
       for (const session of projection.providerSessions) {
-        if (session.status !== "stopped" && session.status !== "error") {
+        if (
+          session.status !== "stopped" &&
+          session.status !== "error" &&
+          !result.preservedProviderSessionIds.has(session.id)
+        ) {
           stoppedThisPass.set(session.id, session);
         }
       }

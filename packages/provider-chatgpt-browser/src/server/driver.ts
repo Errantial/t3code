@@ -17,6 +17,7 @@ import * as Stream from "effect/Stream";
 import { ChatGptBrowserSettings } from "../settings.ts";
 import { CHATGPT_BROWSER_DRIVER_KIND, makeChatGptBrowserAdapterV2 } from "./adapter.ts";
 import { ChatGptBrowserHost } from "./host.ts";
+import { ChatGptBrowserOperationStore } from "./operationRecovery.ts";
 
 const decodeSettings = Schema.decodeSync(ChatGptBrowserSettings);
 const MAINTENANCE = makeManualOnlyProviderMaintenanceCapabilities({
@@ -43,6 +44,7 @@ const makeUnsupportedTextGeneration = (): ProviderTextGeneration => {
 
 export type ChatGptBrowserDriverEnv =
   | ChatGptBrowserHost
+  | ChatGptBrowserOperationStore
   | IdAllocator.IdAllocatorV2
   | ProviderHost.ProviderHost;
 

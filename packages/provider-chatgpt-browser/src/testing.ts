@@ -13,6 +13,8 @@ import * as Effect from "effect/Effect";
 export interface FakeChatGptBrowserProviderV1Script {
   readonly providerSessionId: ProviderSessionId;
   readonly events: ReadonlyArray<ChatGptBrowserProviderV1CoreEvent>;
+  readonly initialOperationId?: ChatGptBrowserProviderOperationId;
+  readonly replayIncludesStale?: boolean;
   readonly finalText?: string;
   readonly finalContentHash?: string;
   readonly sendError?: ChatGptBrowserProviderV1Error;
@@ -21,6 +23,8 @@ export interface FakeChatGptBrowserProviderV1Script {
 
 export interface FakeChatGptBrowserProviderV1Calls {
   readonly sentOperationIds: Array<ChatGptBrowserProviderOperationId>;
+  readonly queriedOperationIds: Array<ChatGptBrowserProviderOperationId>;
+  readonly cancelledOperationIds: Array<ChatGptBrowserProviderOperationId>;
   readonly replayAfter: Array<number>;
   readonly finalReadOffsets: Array<number>;
 }
@@ -33,10 +37,12 @@ export function makeFakeChatGptBrowserProviderV1Transport(
 } {
   const calls: FakeChatGptBrowserProviderV1Calls = {
     sentOperationIds: [],
+    queriedOperationIds: [],
+    cancelledOperationIds: [],
     replayAfter: [],
     finalReadOffsets: [],
   };
-  let operationId: ChatGptBrowserProviderOperationId | undefined;
+  let operationId: ChatGptBrowserProviderOperationId | undefined = script.initialOperationId;
   const highWater = script.events.at(-1)?.sequence ?? ChatGptBrowserProviderV1EventSequence.make(0);
   const terminal = script.events.findLast((event) => event.payload.type === "operation.terminal");
   const drained = script.events.findLast((event) => event.payload.type === "operation.drained");
@@ -113,18 +119,37 @@ export function makeFakeChatGptBrowserProviderV1Transport(
             highWater,
           };
         }),
-      queryOperation: () => Effect.sync(snapshot),
+      queryOperation: (request) =>
+        Effect.sync(() => {
+          calls.queriedOperationIds.push(request.providerOperationId);
+          if (operationId === undefined) {
+            return {
+              providerOperationId: request.providerOperationId,
+              providerSessionId: script.providerSessionId,
+              nativeIdentity: {},
+              highWater: ChatGptBrowserProviderV1EventSequence.make(0),
+              state: "unknown" as const,
+            };
+          }
+          return snapshot();
+        }),
       replay: (request) =>
         Effect.gen(function* () {
           calls.replayAfter.push(request.after);
           if (script.replayError !== undefined) return yield* Effect.fail(script.replayError);
           return {
             providerOperationId: request.providerOperationId,
-            events: script.events.filter((event) => event.sequence > request.after),
+            events: script.replayIncludesStale
+              ? script.events
+              : script.events.filter((event) => event.sequence > request.after),
             highWater,
           };
         }),
-      cancel: () => Effect.sync(snapshot),
+      cancel: (request) =>
+        Effect.sync(() => {
+          calls.cancelledOperationIds.push(request.providerOperationId);
+          return snapshot();
+        }),
       readFinalContent: (request) =>
         Effect.sync(() => {
           calls.finalReadOffsets.push(request.offset);
