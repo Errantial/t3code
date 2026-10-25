@@ -41,6 +41,7 @@ import {
   resolveMacWebAuthnEntitlements,
   resolveMacPasskeySigningConfiguration,
   resolveDesktopArtifactPublicConfig,
+  resolveDesktopRuntimeDependencies,
   resolveMergedStageDependencies,
   resolveBuildOptions,
   stageWslRuntimeArchive,
@@ -682,6 +683,23 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
       }
     }),
   );
+
+  it("stages electron-updater when the desktop bundle leaves it external", () => {
+    assert.deepStrictEqual(
+      resolveDesktopRuntimeDependencies(
+        {
+          "electron-updater": "^6.8.9",
+          "playwright-core": "1.60.0",
+          effect: "4.0.5",
+        },
+        {},
+      ),
+      {
+        "electron-updater": "^6.8.9",
+        "playwright-core": "1.60.0",
+      },
+    );
+  });
 
   it("stages only the externals of both bundles in merged packages", () => {
     assert.deepStrictEqual(

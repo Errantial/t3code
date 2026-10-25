@@ -12,6 +12,9 @@ export const DESKTOP_RUNTIME_EXTERNAL_PREFIXES = [
   "electron-webauthn",
   "ffi-rs",
   "@yuuang/",
+  // Electron updater is intentionally runtime-loaded by the desktop bundle.
+  // Keep it external and stage the package so packaged startup can resolve it.
+  "electron-updater",
   // Reads its own bundle from disk by resolving `playwright-core/package.json`
   // at runtime and ships the browser driver alongside; there is nothing to
   // gain from inlining a 10 MB file the code re-reads as text.
