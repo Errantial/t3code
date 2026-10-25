@@ -32,6 +32,7 @@ import {
   type ChatGptBrowserProviderSecretsPort,
   type ChatGptBrowserProviderSettlementPort,
 } from "./runtime.ts";
+import type { ChatGptBrowserHostService, ChatGptBrowserHostStatus } from "./host.ts";
 
 export interface NativeManagedChatGptBrowserHostOptions {
   readonly rootDirectory: string;
@@ -50,16 +51,66 @@ export interface NativeManagedChatGptBrowserHostOptions {
 const hostError = (operation: string, cause?: unknown) =>
   new ChatGptBrowserHostError({ operation, ...(cause === undefined ? {} : { cause }) });
 
+export function makeReusableChatGptBrowserAuthentication(options: {
+  readonly open: Effect.Effect<ChatGptBrowserHostSession, ChatGptBrowserHostError>;
+  readonly openInteractive: Effect.Effect<ChatGptBrowserHostSession, ChatGptBrowserHostError>;
+  readonly authenticateSession: (
+    session: ChatGptBrowserHostSession,
+  ) => Effect.Effect<ChatGptBrowserHostStatus, ChatGptBrowserHostError>;
+}) {
+  let retained: ChatGptBrowserHostSession | null = null;
+  const authenticate = Effect.suspend(() => {
+    if (retained) return options.authenticateSession(retained);
+    return Effect.acquireUseRelease(
+      options.openInteractive,
+      (session) =>
+        options.authenticateSession(session).pipe(
+          Effect.tap(() =>
+            Effect.sync(() => {
+              retained = session;
+            }),
+          ),
+        ),
+      (session) =>
+        Effect.suspend(() =>
+          retained === session ? Effect.void : session.close.pipe(Effect.ignore),
+        ),
+    );
+  });
+  const open = Effect.suspend(() => {
+    const session = retained;
+    if (!session) return options.open;
+    retained = null;
+    return Effect.succeed(session);
+  });
+  const shutdown = Effect.suspend(() => {
+    const session = retained;
+    if (!session) return Effect.void;
+    retained = null;
+    return session.close.pipe(Effect.ignore);
+  });
+  return { authenticate, open, shutdown };
+}
+
 /**
  * T3 provider sessions are logical conversations; the managed Chromium process is environment
  * infrastructure. Share one physical host session across those logical sessions and let the
  * T3-owned driver admission policy decide which exact operation may run.
  */
-export function shareChatGptBrowserHost(host: ChatGptBrowserHostPort): ChatGptBrowserHostPort {
+export function shareChatGptBrowserHost(
+  host: ChatGptBrowserHostService,
+): ChatGptBrowserHostService {
   const lock = Semaphore.makeUnsafe(1);
   let current: { readonly session: ChatGptBrowserHostSession; refs: number } | null = null;
 
   return {
+    // Status/readiness may need to open a short-lived probe browser when no physical session is
+    // active. Serialize those acquisitions with provider-session/auth acquisition so the core
+    // host's one-browser `requireIdle` fence never sees two legitimate T3 callers racing to open
+    // the same managed profile. The fence itself remains fail-closed and concurrency stays one.
+    readiness: lock.withPermit(host.readiness),
+    status: lock.withPermit(host.status),
+    authenticate: lock.withPermit(host.authenticate),
     open: lock.withPermit(
       Effect.gen(function* () {
         if (current === null) current = { session: yield* host.open, refs: 0 };
@@ -122,6 +173,7 @@ export const makeNativeManagedChatGptBrowserHost = Effect.fn(
     acceptObservation?: (observation: ChatGptBrowserProviderBrowserObservation) => Promise<void>;
   }
   const brokers = new Map<string, BrokerBinding>();
+  let activeBroker: NativeChatGptBrowserBroker | null = null;
   const stateDirectory = NodePath.join(options.rootDirectory, "provider-state");
 
   const platform: ChatGptBrowserPlatformPort = {
@@ -189,6 +241,7 @@ export const makeNativeManagedChatGptBrowserHost = Effect.fn(
           if (Result.isSuccess(ready)) {
             verifyBrowserIdentity(options.release, ready.success.identity);
             brokers.set(process.opaqueId, binding);
+            activeBroker = binding.broker;
             return process;
           }
 
@@ -207,6 +260,7 @@ export const makeNativeManagedChatGptBrowserHost = Effect.fn(
       Effect.gen(function* () {
         const binding = brokers.get(handle.opaqueId);
         if (binding) {
+          if (activeBroker === binding.broker) activeBroker = null;
           yield* Effect.tryPromise({
             try: () => binding.broker.close(),
             catch: (cause) => hostError("closing-native-browser-broker", cause),
@@ -253,6 +307,71 @@ export const makeNativeManagedChatGptBrowserHost = Effect.fn(
       ? { allowBrowserRevisionChange: options.allowBrowserRevisionChange }
       : {}),
   });
+  // The resolved provider release is immutable for this host instance. Activate and validate it
+  // once before exposing any status/auth/session operation, while no persistent browser session
+  // can be open. This removes prepare-vs-open interleavings; `shareChatGptBrowserHost` separately
+  // serializes the live status/readiness/auth/session acquisitions that can open the profile.
+  yield* managed.prepareRelease;
 
-  return managed satisfies ChatGptBrowserManagedHost;
+  const statusForSession = Effect.fn("ChatGptBrowser.statusForSession")(function* (
+    session: ChatGptBrowserHostSession,
+  ) {
+    const broker = activeBroker;
+    if (!broker) return yield* hostError("finding-native-browser-broker");
+    const authentication =
+      broker.authenticationStatus() === "unknown"
+        ? yield* Effect.tryPromise({
+            try: (signal) => broker.waitForAuthenticationStatus(signal),
+            catch: (cause) => hostError("waiting-for-chatgpt-authentication-status", cause),
+          }).pipe(
+            Effect.timeoutOrElse({
+              duration: "10 seconds",
+              orElse: () => Effect.succeed("unknown" as const),
+            }),
+          )
+        : broker.authenticationStatus();
+    return { identity: session.identity, authentication } satisfies ChatGptBrowserHostStatus;
+  });
+  const probeStatus = Effect.suspend(() =>
+    activeBroker
+      ? Effect.succeed({
+          identity: options.release.identity,
+          authentication: activeBroker.authenticationStatus(),
+        } satisfies ChatGptBrowserHostStatus)
+      : Effect.acquireUseRelease(managed.open, statusForSession, (session) =>
+          session.close.pipe(Effect.ignore),
+        ),
+  );
+  const interactiveArgs = [
+    ...(options.release.browserArgs ?? []).filter(
+      (argument) => argument !== "--start-minimized" && !argument.startsWith("--window-position="),
+    ),
+    "--window-position=80,80",
+  ];
+  const reusableAuthentication = makeReusableChatGptBrowserAuthentication({
+    open: managed.open,
+    openInteractive: managed.openWithBrowserArgs(interactiveArgs, { visible: true }),
+    authenticateSession: (session) =>
+      Effect.gen(function* () {
+        const broker = activeBroker;
+        if (!broker) return yield* hostError("finding-native-browser-broker");
+        if (broker.authenticationStatus() !== "authenticated") {
+          yield* Effect.tryPromise({
+            try: (signal) => broker.waitForAuthentication(signal),
+            catch: (cause) => hostError("waiting-for-chatgpt-sign-in", cause),
+          });
+        }
+        return yield* statusForSession(session);
+      }),
+  });
+
+  return {
+    ...managed,
+    readiness: probeStatus.pipe(Effect.map((status) => status.identity)),
+    status: probeStatus,
+    authenticate: reusableAuthentication.authenticate,
+    open: reusableAuthentication.open,
+    shutdown: reusableAuthentication.shutdown,
+  } satisfies ChatGptBrowserManagedHost &
+    ChatGptBrowserHostService & { readonly shutdown: Effect.Effect<void> };
 });

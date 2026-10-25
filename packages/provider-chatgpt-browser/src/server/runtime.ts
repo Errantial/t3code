@@ -52,6 +52,8 @@ export interface ChatGptBrowserProviderBrowserObservation {
   readonly providerOperationId: ChatGptBrowserProviderOperationId;
   readonly state: "claimed" | "sent" | "running" | "terminal" | "drained";
   readonly nativeIdentity: ChatGptBrowserProviderV1NativeIdentity;
+  /** Exact browser-side proof that the one-time Send authorization fence has been crossed. */
+  readonly sendAuthorized?: boolean;
   readonly terminalStatus?: ChatGptBrowserProviderV1TerminalStatus;
   /** Canonical complete assistant final. No interim or presentation text is accepted here. */
   readonly finalText?: string;
@@ -689,12 +691,45 @@ export function makeDurableChatGptBrowserRuntime(input: {
                 "Browser already owns the exact operation but its durable provider WAL is missing.",
               );
             }
-            const active = (await wal.all()).find(
+            let active = (await wal.all()).find(
               (candidate) =>
                 candidate.providerSessionId === request.providerSessionId &&
                 !terminalStates.has(candidate.state),
             );
-            if (active)
+            if (active) {
+              // Browser restart recovery can finish an older exact operation before the server
+              // WAL has had another reason to query it. Reconcile that one durable owner before
+              // enforcing the provider-session concurrency fence. Missing/ambiguous/nonterminal
+              // browser truth still fails closed; only an exact terminal observation releases it.
+              const observedActive = await browser.queryExact(
+                active.providerOperationId as ChatGptBrowserProviderOperationId,
+                signal,
+              );
+              if (observedActive) {
+                active = await syncObservation(wal, active, observedActive, settlement);
+                // A previous T3 attempt can fail after provider-v1 durably claims the operation but
+                // before the browser authorizes the one-time Send. Exact browser truth can prove that
+                // this owner is still pre-send. Retire only that explicitly-never-authorized claim;
+                // authorized or unknown claims remain ambiguous and continue to fence later sends.
+                if (
+                  active.state === "claimed" &&
+                  observedActive.state === "claimed" &&
+                  observedActive.sendAuthorized === false &&
+                  observedActive.nativeIdentity.userMessageId === undefined
+                ) {
+                  active = await syncObservation(
+                    wal,
+                    active,
+                    await browser.cancelExact(
+                      active.providerOperationId as ChatGptBrowserProviderOperationId,
+                      signal,
+                    ),
+                    settlement,
+                  );
+                }
+              }
+            }
+            if (active && !terminalStates.has(active.state))
               throw providerFailure(
                 "operation_conflict",
                 "Another operation is already active for this provider session.",
@@ -810,7 +845,10 @@ export function makeDurableChatGptBrowserRuntime(input: {
           throw providerFailure("invalid_state", "Unsupported ChatGPT Browser feature message.");
         }
         if (!browser.feature) {
-          throw providerFailure("invalid_state", "ChatGPT Browser feature transport is unavailable.");
+          throw providerFailure(
+            "invalid_state",
+            "ChatGPT Browser feature transport is unavailable.",
+          );
         }
         return await browser.feature(message);
       }),
@@ -843,6 +881,10 @@ export function makeScopedChatGptBrowserHost(
   options: ScopedChatGptBrowserHostOptions,
 ): ChatGptBrowserHostPort {
   return {
+    readiness: Effect.tryPromise({
+      try: async () => (await options.assets.prepare()).hostIdentity,
+      catch: (cause) => hostFailure("readiness", cause),
+    }),
     open: Effect.tryPromise({
       try: async () => {
         const assets = await options.assets.prepare();

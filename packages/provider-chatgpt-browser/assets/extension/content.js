@@ -17778,7 +17778,17 @@
             if (!generating && (message.state === "sent" || message.state === "running")) {
               adoptOpenTurn(providerTurnId, userMessageId);
             }
-          } else if (message.state === "sent" && recoveryTurnId && !turnId && !generating) {
+          } else if (
+            message.state === "sent" &&
+            recoveryTurnId &&
+            !generating &&
+            // `finishGeneration()` intentionally retains the just-finished local turn id as a
+            // tombstone so late Fiber revisions can still be filed under their exact owner. That
+            // tombstone must not block recovery of a later provider-v1 Send whose exact user
+            // message is now the newest message in this conversation. Only an actually open
+            // generation, or a non-settled local turn identity, can veto replacing it.
+            (!turnId || fiberSettled?.localTurnId === turnId)
+          ) {
             if (adoptOpenTurn(recoveryTurnId, userMessageId))
               emit({ kind: "turn_start", turnId: recoveryTurnId });
           }

@@ -148,7 +148,9 @@ export interface ChatGptBrowserAdapterV2Options {
   readonly instanceId: ProviderAdapter.ProviderAdapterV2["Service"]["instanceId"];
   readonly defaultCwd: string;
   readonly host: ChatGptBrowserHostPort;
-  readonly resolveAttachmentPath?: (attachment: ProviderAdapter.ProviderAdapterV2TurnMessage["attachments"][number]) => string | null;
+  readonly resolveAttachmentPath?: (
+    attachment: ProviderAdapter.ProviderAdapterV2TurnMessage["attachments"][number],
+  ) => string | null;
 }
 
 interface ActiveApproval {
@@ -675,6 +677,18 @@ export const makeChatGptBrowserAdapterV2 = Effect.fn("makeChatGptBrowserAdapterV
             if (snapshot.providerOperationId !== turn.operationId) {
               return yield* protocolError("ChatGPT Browser query returned a different operation");
             }
+            // Provider-v1 publishes terminal before the T3-owned settlement fence can seal drain.
+            // During that interval replay is allowed to return an empty page at the same high-water:
+            // the terminal row was already observed locally, and the only remaining work is to wait
+            // for its matching drain row. Do not busy-spin while the settlement fence is pending.
+            if (
+              turn.terminal !== undefined &&
+              snapshot.state === "terminal" &&
+              page.highWater === cursor
+            ) {
+              yield* Effect.sleep("50 millis");
+              continue;
+            }
             return yield* protocolError(
               `ChatGPT Browser replay made no progress before drain (state ${snapshot.state})`,
             );
@@ -853,7 +867,13 @@ export const makeChatGptBrowserAdapterV2 = Effect.fn("makeChatGptBrowserAdapterV
               { decision: "decline", label: "Deny" },
             ],
           };
-          turn.approval = { documentId: approval.documentId, cardId: approval.cardId, request, node, turnItem };
+          turn.approval = {
+            documentId: approval.documentId,
+            cardId: approval.cardId,
+            request,
+            node,
+            turnItem,
+          };
           yield* emit({ type: "node.updated", driver: CHATGPT_BROWSER_DRIVER_KIND, node });
           yield* emit({
             type: "runtime_request.updated",
@@ -981,8 +1001,7 @@ export const makeChatGptBrowserAdapterV2 = Effect.fn("makeChatGptBrowserAdapterV
                 attachments: args.message.attachments,
                 resolvePath: options.resolveAttachmentPath ?? (() => null),
               }),
-            catch: (cause) =>
-              protocolError("ChatGPT Browser attachment preparation failed", cause),
+            catch: (cause) => protocolError("ChatGPT Browser attachment preparation failed", cause),
           });
           yield* feature(
             s8FeatureMessage(operationId, {
@@ -995,12 +1014,56 @@ export const makeChatGptBrowserAdapterV2 = Effect.fn("makeChatGptBrowserAdapterV
               protocolError("ChatGPT Browser S8 operation configuration failed", cause),
             ),
           );
-          const receipt = yield* transport.send({
-            type: "operation.send",
-            providerOperationId: operationId,
-            providerSessionId: input.providerSessionId,
-            text: args.message.text,
-          });
+          const receipt = yield* transport
+            .send({
+              type: "operation.send",
+              providerOperationId: operationId,
+              providerSessionId: input.providerSessionId,
+              text: args.message.text,
+            })
+            .pipe(
+              Effect.tapError(() =>
+                Effect.gen(function* () {
+                  // A failed send can still have crossed provider-v1's durable claim boundary.
+                  // Persist cancellation intent first, then cancel only this exact operation if
+                  // browser/provider state proves it exists. Unknown ownership is left untouched;
+                  // an authorized-but-unacked send remains fail-closed in the native broker.
+                  yield* operationStore.requestCancel({
+                    attemptId: args.attemptId,
+                    providerOperationId: operationId,
+                  });
+                  const owned = yield* transport
+                    .queryOperation({
+                      type: "operation.query",
+                      providerOperationId: operationId,
+                    })
+                    .pipe(Effect.catch(() => Effect.succeed(undefined)));
+                  if (
+                    owned === undefined ||
+                    owned.state === "unknown" ||
+                    owned.state === "terminal" ||
+                    owned.state === "drained" ||
+                    owned.providerSessionId !== input.providerSessionId
+                  ) {
+                    return;
+                  }
+                  yield* transport
+                    .cancel({ type: "operation.cancel", providerOperationId: operationId })
+                    .pipe(Effect.ignore);
+                }).pipe(
+                  Effect.catchCause((cause) =>
+                    Effect.logWarning(
+                      "Failed to retire ChatGPT Browser operation after send error",
+                      {
+                        providerOperationId: operationId,
+                        runAttemptId: args.attemptId,
+                        cause,
+                      },
+                    ),
+                  ),
+                ),
+              ),
+            );
           if (
             receipt.providerOperationId !== operationId ||
             receipt.providerSessionId !== input.providerSessionId

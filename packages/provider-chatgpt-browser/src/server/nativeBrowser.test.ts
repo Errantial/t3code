@@ -95,6 +95,88 @@ async function startReadyBroker() {
 }
 
 describe("native ChatGPT browser broker", () => {
+  it("tracks the managed ChatGPT sign-in and wakes authentication waiters", async () => {
+    const { broker, headers } = await startReadyBroker();
+    try {
+      expect(broker.authenticationStatus()).toBe("unknown");
+      const known = broker.waitForAuthenticationStatus();
+      await requestJson({
+        port: broker.port,
+        path: "/provider-v1/browser/status",
+        headers,
+        body: { operations: [], after: 0, wait: false, chatGptSignedIn: false },
+      });
+      await expect(known).resolves.toBe("unauthenticated");
+      expect(broker.authenticationStatus()).toBe("unauthenticated");
+
+      const authenticated = broker.waitForAuthentication();
+      await requestJson({
+        port: broker.port,
+        path: "/provider-v1/browser/status",
+        headers,
+        body: { operations: [], after: 0, wait: false, chatGptSignedIn: true },
+      });
+      await authenticated;
+      expect(broker.authenticationStatus()).toBe("authenticated");
+    } finally {
+      await broker.close();
+    }
+  });
+
+  it("stages S8 configuration without claiming browser ownership before the durable send", async () => {
+    const { broker, session } = await startReadyBroker();
+    try {
+      const providerOperationId = chatGptBrowserProviderOperationIdForAttempt(
+        RunAttemptId.make("attempt-native-configure-before-send"),
+      );
+      await session.feature!({
+        type: "feature.message",
+        feature: CHATGPT_BROWSER_S8_FEATURE,
+        providerOperationId,
+        payload: {
+          kind: "operation.configure",
+          selection: {
+            requestedModel: "gpt-6-thinking",
+            selectedModel: "gpt-6-thinking",
+            requestedReasoningEffort: "medium",
+            selectedReasoningEffort: "medium",
+          },
+          attachments: [],
+        },
+      });
+
+      await expect(
+        session.queryExact(providerOperationId, new AbortController().signal),
+      ).resolves.toBeNull();
+
+      await session.sendExact(
+        {
+          type: "operation.send",
+          providerOperationId,
+          providerSessionId: ProviderSessionId.make("provider-session-configure-before-send"),
+          text: "configured send",
+        },
+        new AbortController().signal,
+      );
+      await expect(
+        session.feature!({
+          type: "feature.message",
+          feature: CHATGPT_BROWSER_S8_FEATURE,
+          providerOperationId,
+          payload: { kind: "operation.read" },
+        }),
+      ).resolves.toMatchObject({
+        selection: {
+          selectedModel: "gpt-6-thinking",
+          selectedReasoningEffort: "medium",
+        },
+        attachments: [],
+      });
+    } finally {
+      await broker.close();
+    }
+  });
+
   it("rejects an approval answer after the browser document changes", async () => {
     const { broker, headers, session } = await startReadyBroker();
     try {
@@ -586,6 +668,7 @@ describe("native ChatGPT browser broker", () => {
       expect(await session.queryExact(providerOperationId, controller.signal)).toMatchObject({
         providerOperationId,
         state: "claimed",
+        sendAuthorized: false,
       });
       expect((await status).status).toBe(200);
     } finally {
@@ -666,7 +749,11 @@ describe("native ChatGPT browser broker", () => {
       );
       await expect(
         session.queryExact(providerOperationId, controller.signal),
-      ).resolves.toMatchObject({ state: "claimed", nativeIdentity: {} });
+      ).resolves.toMatchObject({
+        state: "claimed",
+        nativeIdentity: {},
+        sendAuthorized: true,
+      });
     } finally {
       await broker.close();
     }
@@ -1055,7 +1142,7 @@ describe("native ChatGPT browser broker", () => {
     }
   });
 
-  it("does not attribute a turnless historical final by conversation alone", async () => {
+  it("does not attribute historical finals before the exact turn starts", async () => {
     const secrets = new Map<string, Uint8Array>();
     const accepted: Array<{ readonly finalText?: string; readonly terminalStatus?: string }> = [];
     const broker = await startNativeChatGptBrowserBroker({
@@ -1148,10 +1235,21 @@ describe("native ChatGPT browser broker", () => {
               conversationId,
               event: {
                 kind: "assistant_message",
-                messageId: "assistant-history",
+                messageId: "assistant-history-turnless",
                 state: "final",
                 final: true,
-                text: "history",
+                text: "turnless history",
+              },
+            },
+            {
+              conversationId,
+              event: {
+                kind: "assistant_message",
+                turnId: "turn-history",
+                messageId: "assistant-history-bound",
+                state: "final",
+                final: true,
+                text: "turn-bound history",
               },
             },
           ],

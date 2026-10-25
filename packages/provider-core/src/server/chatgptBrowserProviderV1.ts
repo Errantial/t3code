@@ -349,6 +349,12 @@ export interface ChatGptBrowserHostSession {
 }
 
 export interface ChatGptBrowserHostPort {
+  /**
+   * Prepares and validates the managed browser/provider assets without opening a durable user
+   * session. Provider status uses this to distinguish a usable bundled runtime from the legacy
+   * placeholder "not found" state.
+   */
+  readonly readiness: Effect.Effect<ChatGptBrowserHostIdentity, ChatGptBrowserHostError>;
   readonly open: Effect.Effect<ChatGptBrowserHostSession, ChatGptBrowserHostError>;
 }
 
@@ -381,6 +387,8 @@ export interface ChatGptBrowserPlatformPort {
     readonly profileDirectory: string;
     readonly extensionRoot: string;
     readonly args: ReadonlyArray<string>;
+    /** Interactive authentication needs a real window; all ordinary provider work stays hidden. */
+    readonly visible?: boolean;
   }) => Effect.Effect<ChatGptBrowserProcessHandle, ChatGptBrowserHostError>;
   readonly stopBrowser: (
     handle: ChatGptBrowserProcessHandle,

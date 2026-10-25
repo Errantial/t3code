@@ -203,6 +203,116 @@ describe("scoped in-process ChatGPT browser provider host", () => {
     }
   });
 
+  it("reconciles an exact browser-terminal prior operation before enforcing the session fence", async () => {
+    const root = await tempRoot();
+    const browser = fakeBrowser();
+    const settled: string[] = [];
+    try {
+      const opened = await Effect.runPromise(
+        makeScopedChatGptBrowserHost(options(root, browser, settled)).open,
+      );
+      await Effect.runPromise(opened.transport.send(sendRequest()));
+
+      // The browser recovered/completed this exact operation after restart, but the server WAL
+      // has not queried it yet and therefore still says running.
+      browser.observe({
+        providerOperationId: operationId,
+        state: "drained",
+        nativeIdentity: {
+          conversationId: "conversation-native",
+          userMessageId: "user-message-native",
+          providerTurnId: "provider-turn-native",
+        },
+        terminalStatus: "completed",
+        finalText: "recovered first",
+      });
+
+      const next = chatGptBrowserProviderOperationIdForAttempt(
+        RunAttemptId.make("attempt-runtime-after-recovered-terminal"),
+      );
+      await Effect.runPromise(opened.transport.send(sendRequest(next)));
+
+      expect(settled).toEqual([operationId]);
+      expect(browser.calls.sendContexts).toEqual([
+        undefined,
+        { conversationId: "conversation-native" },
+      ]);
+      await Effect.runPromise(opened.close);
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("retires an exact never-authorized prior claim before enforcing the session fence", async () => {
+    const root = await tempRoot();
+    const browser = fakeBrowser();
+    const settled: string[] = [];
+    try {
+      const opened = await Effect.runPromise(
+        makeScopedChatGptBrowserHost(options(root, browser, settled)).open,
+      );
+      browser.failNextSend();
+      await expect(Effect.runPromise(opened.transport.send(sendRequest()))).rejects.toThrow(
+        "lost before exact browser receipt",
+      );
+      browser.observe({
+        providerOperationId: operationId,
+        state: "claimed",
+        nativeIdentity: { conversationId: "conversation-native" },
+        sendAuthorized: false,
+      });
+
+      const next = chatGptBrowserProviderOperationIdForAttempt(
+        RunAttemptId.make("attempt-runtime-after-pre-send-orphan"),
+      );
+      await Effect.runPromise(opened.transport.send(sendRequest(next)));
+
+      expect(browser.calls.cancel).toBe(1);
+      expect(browser.calls.send).toBe(2);
+      expect(settled).toEqual([operationId]);
+      expect(browser.calls.sendContexts.at(-1)).toEqual({ conversationId: "conversation-native" });
+      await Effect.runPromise(opened.close);
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps an authorized unacked prior claim fenced", async () => {
+    const root = await tempRoot();
+    const browser = fakeBrowser();
+    const settled: string[] = [];
+    try {
+      const opened = await Effect.runPromise(
+        makeScopedChatGptBrowserHost(options(root, browser, settled)).open,
+      );
+      browser.failNextSend();
+      await expect(Effect.runPromise(opened.transport.send(sendRequest()))).rejects.toThrow(
+        "lost before exact browser receipt",
+      );
+      browser.observe({
+        providerOperationId: operationId,
+        state: "claimed",
+        nativeIdentity: { conversationId: "conversation-native" },
+        sendAuthorized: true,
+      });
+
+      const next = chatGptBrowserProviderOperationIdForAttempt(
+        RunAttemptId.make("attempt-runtime-after-authorized-unacked"),
+      );
+      await expect(
+        Effect.runPromise(opened.transport.send(sendRequest(next))),
+      ).rejects.toMatchObject({
+        code: "operation_conflict",
+      });
+
+      expect(browser.calls.cancel).toBe(0);
+      expect(browser.calls.send).toBe(1);
+      await Effect.runPromise(opened.close);
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("reconstructs final/terminal/drain once, waits on browser change, and preserves UTF-16 final semantics", async () => {
     const root = await tempRoot();
     const browser = fakeBrowser();

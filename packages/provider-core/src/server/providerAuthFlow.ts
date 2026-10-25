@@ -33,6 +33,8 @@ export interface ProviderAuthFlowContext {
     respond?: (response: ProviderAuthResponse) => Effect.Effect<void, ProviderSetupError>,
     complete?: (callbackUrl: string) => Effect.Effect<void, ProviderSetupError>,
   ) => Effect.Effect<void>;
+  /** Publishes a provider-owned interactive wait that has no external URL or credential form. */
+  readonly waiting: (message: string) => Effect.Effect<void>;
   readonly verifying: Effect.Effect<void>;
 }
 
@@ -281,6 +283,13 @@ export const make = Effect.fn("ProviderAuthFlow.make")(function* (options: {
               expiresAt: flow.expiresAt,
               ...(returnUrl ? { returnUrl } : {}),
               ...(callbackMode ? { callbackMode } : {}),
+              waiting: (message) =>
+                publish(flow, {
+                  phase: "waiting",
+                  interaction: null,
+                  authorizationUrl: null,
+                  message,
+                }),
               // Terminal sign-in updates this for every output chunk within the auth operation.
               setInteraction: Effect.fnUntraced(function* (interaction, respond, complete) {
                 if (active !== flow) return;

@@ -92,6 +92,11 @@ export interface ChatGptBrowserManagedHostOptions {
 }
 
 export interface ChatGptBrowserManagedHost extends ChatGptBrowserHostPort {
+  /** Opens the active release with caller-selected presentation args while preserving profile/extension ownership. */
+  readonly openWithBrowserArgs: (
+    browserArgs: ReadonlyArray<string>,
+    options?: { readonly visible?: boolean },
+  ) => Effect.Effect<ChatGptBrowserHostSession, ChatGptBrowserHostError>;
   /** Installs and validates the configured release, then activates it at an idle boundary. */
   readonly prepareRelease: Effect.Effect<
     ChatGptBrowserManagedReleaseDescriptor,
@@ -955,92 +960,105 @@ export function makeChatGptBrowserHost(
     }),
   );
 
-  const open = lifecycleLock.withPermit(
-    Effect.gen(function* () {
-      yield* requireIdle("opening-browser-while-browser-open");
-      const paths = yield* platformPaths;
-      const issues = yield* options.platform.checkPrerequisites;
-      if (issues.length > 0)
-        return yield* Effect.fail(hostError("checking-browser-prerequisites", issues));
+  const openWithBrowserArgs = (
+    browserArgs?: ReadonlyArray<string>,
+    openOptions?: { readonly visible?: boolean },
+  ) =>
+    lifecycleLock.withPermit(
+      Effect.gen(function* () {
+        yield* requireIdle("opening-browser-while-browser-open");
+        const paths = yield* platformPaths;
+        const issues = yield* options.platform.checkPrerequisites;
+        if (issues.length > 0)
+          return yield* Effect.fail(hostError("checking-browser-prerequisites", issues));
 
-      let pointer = yield* readPointer(paths);
-      if (pointer === null) {
-        const installed = yield* installRelease({ paths, release: options.release });
-        yield* makeDisposableValidation({
-          platform: options.platform,
-          paths,
-          release: options.release,
-          installed,
-          validateCandidate: options.validateCandidate,
-        });
-        const release = descriptorFromSource(options.release);
+        let pointer = yield* readPointer(paths);
+        if (pointer === null) {
+          const installed = yield* installRelease({ paths, release: options.release });
+          yield* makeDisposableValidation({
+            platform: options.platform,
+            paths,
+            release: options.release,
+            installed,
+            validateCandidate: options.validateCandidate,
+          });
+          const release = descriptorFromSource(options.release);
+          yield* materializeStableExtension(
+            installed.extensionDirectory,
+            paths.extensionRoot,
+            chatGptBrowserManagedExtensionBuildId(release.identity),
+          );
+          pointer = pointerForActivation(release, undefined);
+          yield* writePointer(options.platform, paths, pointer);
+        }
+
+        if (pointer.active.identity.target !== options.platform.target) {
+          return yield* Effect.fail(hostError("matching-active-platform-target"));
+        }
+        const installed = yield* requireInstalledRelease({ paths, release: pointer.active });
         yield* materializeStableExtension(
           installed.extensionDirectory,
           paths.extensionRoot,
-          chatGptBrowserManagedExtensionBuildId(release.identity),
+          chatGptBrowserManagedExtensionBuildId(pointer.active.identity),
         );
-        pointer = pointerForActivation(release, undefined);
-        yield* writePointer(options.platform, paths, pointer);
-      }
-
-      if (pointer.active.identity.target !== options.platform.target) {
-        return yield* Effect.fail(hostError("matching-active-platform-target"));
-      }
-      const installed = yield* requireInstalledRelease({ paths, release: pointer.active });
-      yield* materializeStableExtension(
-        installed.extensionDirectory,
-        paths.extensionRoot,
-        chatGptBrowserManagedExtensionBuildId(pointer.active.identity),
-      );
-      yield* tryFs("preparing-browser-profile", () =>
-        NodeFs.mkdir(paths.profileDirectory, { recursive: true }),
-      );
-      const process = yield* options.platform.launchBrowser({
-        executablePath: installed.browserExecutablePath,
-        profileDirectory: paths.profileDirectory,
-        extensionRoot: paths.extensionRoot,
-        args: pointer.active.browserArgs ?? [],
-      });
-      sessionOpen = true;
-
-      const stopProcess = options.platform.stopBrowser(process).pipe(
-        Effect.tap(() =>
-          Effect.sync(() => {
-            sessionOpen = false;
-          }),
-        ),
-      );
-
-      const transport = yield* options
-        .connectTransport({
-          release: pointer.active,
-          browserExecutablePath: installed.browserExecutablePath,
+        yield* tryFs("preparing-browser-profile", () =>
+          NodeFs.mkdir(paths.profileDirectory, { recursive: true }),
+        );
+        const process = yield* options.platform.launchBrowser({
+          executablePath: installed.browserExecutablePath,
           profileDirectory: paths.profileDirectory,
           extensionRoot: paths.extensionRoot,
-          process,
-        })
-        .pipe(Effect.onError(() => stopProcess.pipe(Effect.ignore)));
-      const closeLock = Semaphore.makeUnsafe(1);
-      let closed = false;
-      const close = closeLock.withPermit(
-        Effect.suspend(() => {
-          if (closed) return Effect.void;
-          return stopProcess.pipe(
-            Effect.tap(() =>
-              Effect.sync(() => {
-                closed = true;
-              }),
-            ),
-          );
-        }),
-      );
-      return {
-        identity: pointer.active.identity,
-        transport,
-        close,
-      } satisfies ChatGptBrowserHostSession;
-    }),
-  );
+          args: browserArgs ?? pointer.active.browserArgs ?? [],
+          visible: openOptions?.visible === true,
+        });
+        sessionOpen = true;
 
-  return { open, prepareRelease, rollbackProviderRelease, activeRelease };
+        const stopProcess = options.platform.stopBrowser(process).pipe(
+          Effect.tap(() =>
+            Effect.sync(() => {
+              sessionOpen = false;
+            }),
+          ),
+        );
+
+        const transport = yield* options
+          .connectTransport({
+            release: pointer.active,
+            browserExecutablePath: installed.browserExecutablePath,
+            profileDirectory: paths.profileDirectory,
+            extensionRoot: paths.extensionRoot,
+            process,
+          })
+          .pipe(Effect.onError(() => stopProcess.pipe(Effect.ignore)));
+        const closeLock = Semaphore.makeUnsafe(1);
+        let closed = false;
+        const close = closeLock.withPermit(
+          Effect.suspend(() => {
+            if (closed) return Effect.void;
+            return stopProcess.pipe(
+              Effect.tap(() =>
+                Effect.sync(() => {
+                  closed = true;
+                }),
+              ),
+            );
+          }),
+        );
+        return {
+          identity: pointer.active.identity,
+          transport,
+          close,
+        } satisfies ChatGptBrowserHostSession;
+      }),
+    );
+  const open = openWithBrowserArgs();
+
+  return {
+    readiness: prepareRelease.pipe(Effect.map((release) => release.identity)),
+    open,
+    openWithBrowserArgs,
+    prepareRelease,
+    rollbackProviderRelease,
+    activeRelease,
+  };
 }

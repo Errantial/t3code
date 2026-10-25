@@ -1658,6 +1658,24 @@ async function maintainNativeProviderViews() {
   }
 }
 
+async function nativeProviderChatGptSignedIn() {
+  let tabs = [];
+  try {
+    tabs = await chrome.tabs.query({ url: CHATGPT_TAB_URLS });
+  } catch {
+    return null;
+  }
+  const tab = tabs.find(
+    (candidate) =>
+      !candidate.incognito &&
+      !candidate.discarded &&
+      candidate.status === "complete" &&
+      typeof candidate.id === "number" &&
+      signInStage(candidate.url || "") === "done",
+  );
+  return tab ? chatGptSignedIn(tab.id, { fresh: true }).catch(() => null) : null;
+}
+
 function primeNativeProvider() {
   if (nativeProviderPrime) return nativeProviderPrime;
   const work = (async () => {
@@ -1666,6 +1684,7 @@ function primeNativeProvider() {
       operations: nativeProviderOperationSummaries(),
       after: nativeProviderGeneration,
       wait: false,
+      chatGptSignedIn: await nativeProviderChatGptSignedIn(),
     });
     if (!reply.ok || !reply.data) return false;
     if (Number.isSafeInteger(reply.data.generation) && reply.data.generation >= 0) {
@@ -1690,6 +1709,7 @@ async function maintainNativeProvider() {
         operations: nativeProviderOperationSummaries(),
         after: nativeProviderGeneration,
         wait: true,
+        chatGptSignedIn: await nativeProviderChatGptSignedIn(),
       });
       if (!reply.ok || !reply.data) return false;
       if (Number.isSafeInteger(reply.data.generation) && reply.data.generation >= 0)
@@ -1715,7 +1735,16 @@ async function maintainNativeProvider() {
       const nativeInputs = (Array.isArray(reply.data.inputs) ? reply.data.inputs : []).map(
         (input) => ({ ...input, nativeProvider: true }),
       );
-      await deliverDesktopInputs(nativeInputs, true, [], undefined, async () => {});
+      // `inputs` is the broker's complete projection of claimed, never-authorized native sends.
+      // Use it as the opening-authority projection too, so completed/cancelled/drained operations
+      // do not leave browser-session tab elections behind indefinitely.
+      await deliverDesktopInputs(
+        nativeInputs,
+        true,
+        [],
+        nativeInputs.map((input) => input.id),
+        async () => {},
+      );
       void offerStopTurns(reply.data.stopTurns, true);
       await maintainNativeProviderViews();
       void drainNativeProviderJournal().catch(() => undefined);
@@ -3142,6 +3171,59 @@ function offerDesktopInput(tabId, message) {
   void chrome.tabs.sendMessage(tabId, message).catch(() => undefined);
 }
 
+function offerReadyNativeInputsForTab(tabId) {
+  if (!Number.isInteger(tabId)) return;
+  for (const [id, opening] of Object.entries(inputOpenings)) {
+    const native = nativeProviderOperations[id];
+    if (
+      !native ||
+      native.state !== "claimed" ||
+      native.authorized === true ||
+      opening?.tab !== tabId ||
+      opening.stage !== "ready"
+    )
+      continue;
+    // A native input only needs its exact durable id + elected conversation to wake the content
+    // script; the text/model payload remains broker-owned and is claimed through desktop_input.
+    // This may race another identical wake, which is harmless: desktopInputBusy plus the broker's
+    // one-time claim/authorization fence still owns the only path to Send.
+    const message = {
+      type: "clf-desktop-input",
+      id,
+      conversationId: cleanConversationId(opening.conversationId),
+    };
+    // A ready election can outlive its isolated-world receiver across an extension reload or a
+    // full document swap. `register_document` normally wakes this operation again, but there is a
+    // narrow cold-start order where the election is persisted after that registration and every
+    // later native maintenance pass only finds the same receiver-less tab. Repair exactly that
+    // elected tab and retry the same wake; never transfer opening authority or create another tab
+    // from a transport failure alone.
+    void chrome.tabs.sendMessage(tabId, message).catch(async () => {
+      const latestOpening = inputOpenings[id];
+      const latestNative = nativeProviderOperations[id];
+      if (
+        !latestOpening ||
+        latestOpening.tab !== tabId ||
+        latestOpening.stage !== "ready" ||
+        !latestNative ||
+        latestNative.state !== "claimed" ||
+        latestNative.authorized === true
+      )
+        return;
+      if (!(await restoreChatgptTab(tabId))) return;
+      const afterRepairOpening = inputOpenings[id];
+      const afterRepairNative = nativeProviderOperations[id];
+      if (
+        afterRepairOpening?.tab === tabId &&
+        afterRepairOpening.stage === "ready" &&
+        afterRepairNative?.state === "claimed" &&
+        afterRepairNative.authorized !== true
+      )
+        offerDesktopInput(tabId, message);
+    });
+  }
+}
+
 async function deliverDesktopInputs(
   inputs,
   background,
@@ -3191,14 +3273,15 @@ async function deliverDesktopInputs(
     if (
       !tab &&
       elected &&
-      tabs.length === 0 &&
       nativeSummary?.state === "claimed" &&
-      nativeSummary.authorized !== true
+      nativeSummary.authorized !== true &&
+      !tabs.some((candidate) => candidate.id === elected.tab)
     ) {
       // A whole-browser restart can leave no ChatGPT document at all while local storage still
-      // remembers the previous session's spent tab election. With no current ChatGPT tab and the
-      // exact native operation still pre-send/never-authorized, that tab id cannot represent live
-      // browser work. Release only the stale opening fence so this same operation can reopen.
+      // remembers the previous session's spent tab election. It can also leave unrelated ChatGPT
+      // tabs restored while the elected tab itself is gone. Only the exact native operation that
+      // is still pre-send/never-authorized may release that provably absent tab election; an
+      // authorized or still-present tab remains fenced.
       delete elections[input.id];
       await persistLive();
       elected = null;
@@ -3507,6 +3590,7 @@ async function deliverDesktopInputs(
             tab = await createChatTab(url, background);
             await protectCreatedTab(tab);
             await elect(input.id, { tab: tab.id, stage: "ready", fallbackUsed: true });
+            offerReadyNativeInputsForTab(tab.id);
             tabs.push(tab);
             // A failed New Chat transition can leave the borrowed managed page
             // empty. Its conversation ownership is gone, so ordinary pruning can
@@ -3561,6 +3645,7 @@ async function deliverDesktopInputs(
         conversationId: target,
         ...(project ? { project } : {}),
       });
+      offerReadyNativeInputsForTab(tab.id);
       tabs.push(tab);
       continue;
     }
@@ -6162,6 +6247,11 @@ const HANDLERS = {
       const keepAwake = await inAppGroup(tab).catch(() => false);
       if (keepAwake) await noteKeepAwake(result.tab, result.documentId, true);
       result = { ...result, keepAwake };
+      // Native provider maintenance may already be blocked in its generation long-poll after it
+      // created this exact ready tab. Registration is independent local progress, so wake the
+      // elected input directly instead of relying on a broker generation change to run another
+      // delivery pass.
+      offerReadyNativeInputsForTab(result.tab);
     }
     if (result?.ok === true) {
       void maintain(true).catch(() => undefined);
@@ -8579,8 +8669,9 @@ function reportPresence() {
 
 if (!globalThis.__cosBrowserWorker) {
   chrome.tabs.onUpdated.addListener((_id, changeInfo, tab) => {
-    if (changeInfo.status === "complete" && signInStage(tab?.url || "") === "done")
-      void reportPresence();
+    if (changeInfo.status !== "complete" || signInStage(tab?.url || "") !== "done") return;
+    if (NATIVE_PROVIDER_ONLY) void primeNativeProvider().catch(() => undefined);
+    else void reportPresence();
   });
 }
 // A tab moved into or out of the app's tab group is told at once: Chrome pauses a collapsed

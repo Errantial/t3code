@@ -39,6 +39,12 @@ const threadId = ThreadId.make("thread-chatgpt-browser-test");
 const host = (
   transport: ReturnType<typeof makeFakeChatGptBrowserProviderV1Transport>["transport"],
 ): ChatGptBrowserHostPort => ({
+  readiness: Effect.succeed({
+    target: "windows-x64",
+    browserRevision: "browser-test",
+    providerReleaseVersion: "provider-test",
+    extensionVersion: "extension-test",
+  }),
   open: Effect.succeed({
     identity: {
       target: "linux-x64",
@@ -196,6 +202,90 @@ describe("ChatGPT Browser ProviderAdapterV2", () => {
     ),
   );
 
+  it.live("waits through a terminal settlement gap before the drain event arrives", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const attemptId = RunAttemptId.make("attempt-chatgpt-browser-terminal-gap");
+        const operationId = chatGptBrowserProviderOperationIdForAttempt(attemptId);
+        const finalText = "hello";
+        const scriptedEvents = coreEvents(operationId, finalText);
+        const fake = makeFakeChatGptBrowserProviderV1Transport({
+          providerSessionId,
+          events: scriptedEvents,
+          finalText,
+        });
+        const operationStore = yield* memoryOperationStore();
+        let sent = false;
+        let replayIndex = 0;
+        const replayPages = [
+          { events: scriptedEvents.slice(0, 2), highWater: seq(2) },
+          { events: scriptedEvents.slice(2, 3), highWater: seq(3) },
+          { events: [], highWater: seq(3) },
+          { events: scriptedEvents.slice(3), highWater: seq(4) },
+        ] as const;
+        const transport = {
+          ...fake.transport,
+          send: (request: Parameters<typeof fake.transport.send>[0]) =>
+            fake.transport.send(request).pipe(Effect.tap(() => Effect.sync(() => (sent = true)))),
+          queryOperation: (request: Parameters<typeof fake.transport.queryOperation>[0]) =>
+            Effect.sync(() => {
+              fake.calls.queriedOperationIds.push(request.providerOperationId);
+              if (!sent) {
+                return {
+                  providerOperationId: request.providerOperationId,
+                  providerSessionId,
+                  nativeIdentity: {},
+                  highWater: seq(0),
+                  state: "unknown" as const,
+                };
+              }
+              return {
+                providerOperationId: request.providerOperationId,
+                providerSessionId,
+                nativeIdentity: {},
+                highWater: seq(3),
+                state: "terminal" as const,
+                terminalStatus: "completed" as const,
+                terminalSequence: seq(3),
+              };
+            }),
+          replay: (request: Parameters<typeof fake.transport.replay>[0]) =>
+            Effect.sync(() => {
+              fake.calls.replayAfter.push(request.after);
+              const page = replayPages[Math.min(replayIndex, replayPages.length - 1)]!;
+              replayIndex += 1;
+              return {
+                providerOperationId: request.providerOperationId,
+                events: page.events,
+                highWater: page.highWater,
+              };
+            }),
+        };
+        const runtime = yield* openRuntime({ host: host(transport), operationStore });
+        const providerThread = yield* runtime.ensureThread({
+          threadId,
+          modelSelection: { instanceId, model: "default" },
+          runtimePolicy: {
+            runtimeMode: "full-access",
+            interactionMode: "default",
+            cwd: "/workspace",
+          },
+        });
+
+        yield* runtime.startTurn(turnInput(providerThread, attemptId));
+        const events = yield* runtime.events.pipe(
+          Stream.tap(checkpointChatGptBrowserProviderEvent),
+          Stream.takeUntil((event) => event.type === "turn.terminal"),
+          Stream.runCollect,
+        );
+
+        expect(fake.calls.replayAfter).toEqual([0, 2, 3, 3]);
+        expect(events.at(-1)).toMatchObject({ type: "turn.terminal", status: "completed" });
+        expect(yield* operationStore.get(attemptId)).toMatchObject({ consumerHighWater: 4 });
+      }),
+    ),
+  );
+
   it.effect("persists the operation before send and only sends after authoritative unknown", () =>
     Effect.scoped(
       Effect.gen(function* () {
@@ -234,6 +324,46 @@ describe("ChatGPT Browser ProviderAdapterV2", () => {
         expect(fake.calls.sentOperationIds).toEqual([operationId]);
       }),
     ),
+  );
+
+  it.effect(
+    "requests exact cancellation when send fails after provider ownership may be claimed",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const attemptId = RunAttemptId.make("attempt-chatgpt-browser-send-failure-cleanup");
+          const operationId = chatGptBrowserProviderOperationIdForAttempt(attemptId);
+          const operationStore = yield* memoryOperationStore();
+          const fake = makeFakeChatGptBrowserProviderV1Transport({
+            providerSessionId,
+            events: [],
+            sendError: {
+              code: "browser_unavailable",
+              retryable: true,
+              message: "lost after provider claim",
+            },
+          });
+          const runtime = yield* openRuntime({ host: host(fake.transport), operationStore });
+          const providerThread = yield* runtime.ensureThread({
+            threadId,
+            modelSelection: { instanceId, model: "default" },
+            runtimePolicy: {
+              runtimeMode: "full-access",
+              interactionMode: "default",
+              cwd: "/workspace",
+            },
+          });
+
+          const started = yield* Effect.exit(
+            runtime.startTurn(turnInput(providerThread, attemptId)),
+          );
+
+          expect(started._tag).toBe("Failure");
+          expect(fake.calls.sentOperationIds).toEqual([operationId]);
+          expect(fake.calls.cancelledOperationIds).toEqual([operationId]);
+          expect(yield* operationStore.get(attemptId)).toMatchObject({ cancelRequested: true });
+        }),
+      ),
   );
 
   it.effect("recovers an accepted unacked operation without sending it again", () =>
@@ -612,6 +742,7 @@ describe("ChatGPT Browser ProviderAdapterV2", () => {
           instanceId,
           defaultCwd: "/workspace",
           host: {
+            readiness: Effect.fail(new ChatGptBrowserHostError({ operation: "readiness" })),
             open: Effect.fail(new ChatGptBrowserHostError({ operation: "open" })),
           },
         }).pipe(Effect.provide(Layer.merge(IdAllocator.layer, layerMemoryOperationStore)));

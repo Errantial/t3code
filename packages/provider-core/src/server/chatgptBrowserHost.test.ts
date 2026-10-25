@@ -42,6 +42,7 @@ interface PlatformFixture {
     readonly profileDirectory: string;
     readonly extensionRoot: string;
     readonly args: ReadonlyArray<string>;
+    readonly visible?: boolean;
   }>;
   readonly stops: string[];
   readonly pointerWrites: string[];
@@ -246,6 +247,18 @@ describe("ChatGPT managed browser host", () => {
           yield* session.close;
           yield* session.close;
           expect(fixture.stops).toEqual(["browser-1", "browser-2"]);
+          const interactive = yield* host.openWithBrowserArgs(
+            ["--provider-runtime", "--window-position=80,80"],
+            { visible: true },
+          );
+          expect(fixture.launches[2]?.profileDirectory).toBe(fixture.paths.profileDirectory);
+          expect(fixture.launches[2]?.args).toEqual([
+            "--provider-runtime",
+            "--window-position=80,80",
+          ]);
+          expect(fixture.launches[2]?.visible).toBe(true);
+          yield* interactive.close;
+          expect(fixture.stops).toEqual(["browser-1", "browser-2", "browser-3"]);
           expect(yield* statPath(fixture.paths.profileDirectory)).toBeDefined();
         }),
       ),

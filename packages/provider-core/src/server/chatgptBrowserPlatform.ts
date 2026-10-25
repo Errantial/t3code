@@ -20,6 +20,42 @@ const SECRET_KEY = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const WINDOWS_RENAME_RETRY_CODES = new Set(["EACCES", "EBUSY", "EPERM"]);
 const WINDOWS_RENAME_RETRY_DELAYS_MS = [0, 10, 25, 50, 100, 200] as const;
 const BROWSER_STOP_GRACE_MS = 2_000;
+const WINDOWS_CLOSE_BROWSER_SCRIPT = String.raw`
+$ErrorActionPreference = 'Stop'
+$targetPid = __TARGET_PID__
+$source = @'
+using System;
+using System.Runtime.InteropServices;
+
+public static class T3ManagedBrowserWindow {
+  public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+
+  [DllImport("user32.dll")]
+  public static extern bool EnumWindows(EnumWindowsProc callback, IntPtr lParam);
+
+  [DllImport("user32.dll")]
+  public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
+
+  [DllImport("user32.dll", SetLastError = true)]
+  public static extern bool PostMessage(IntPtr hWnd, uint message, IntPtr wParam, IntPtr lParam);
+}
+'@
+Add-Type -TypeDefinition $source
+$posted = 0
+$callback = [T3ManagedBrowserWindow+EnumWindowsProc]{
+  param([IntPtr]$window, [IntPtr]$state)
+  [uint32]$windowPid = 0
+  [void][T3ManagedBrowserWindow]::GetWindowThreadProcessId($window, [ref]$windowPid)
+  if ($windowPid -eq $targetPid) {
+    if ([T3ManagedBrowserWindow]::PostMessage($window, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero)) {
+      $script:posted++
+    }
+  }
+  return $true
+}
+[void][T3ManagedBrowserWindow]::EnumWindows($callback, [IntPtr]::Zero)
+if ($posted -eq 0) { exit 3 }
+`;
 const SANDBOX_BYPASS_FLAGS = new Set([
   "--no-sandbox",
   "--disable-setuid-sandbox",
@@ -74,6 +110,7 @@ interface SpawnBrowserInput {
   readonly executablePath: string;
   readonly args: ReadonlyArray<string>;
   readonly detached: boolean;
+  readonly visible: boolean;
   readonly environment: NodeJS.ProcessEnv;
 }
 
@@ -151,7 +188,7 @@ function spawnBrowser(input: SpawnBrowserInput): Promise<SpawnedBrowserProcess> 
       env: input.environment,
       detached: input.detached,
       shell: false,
-      windowsHide: true,
+      windowsHide: !input.visible,
       stdio: "ignore",
     });
     let settled = false;
@@ -420,13 +457,18 @@ async function waitForExit(
 
 async function stopWindowsBrowserTree(
   browserProcess: SpawnedBrowserProcess,
+  environment: NodeJS.ProcessEnv,
   runtime: ChatGptBrowserPlatformRuntime,
 ): Promise<void> {
   if (!browserProcess.isRunning()) return;
-  const graceful = await runtime.runCommand("taskkill.exe", [
-    "/PID",
-    String(browserProcess.pid),
-    "/T",
+  const graceful = await runtime.runCommand(windowsPowerShellPath(environment), [
+    "-NoLogo",
+    "-NoProfile",
+    "-NonInteractive",
+    "-ExecutionPolicy",
+    "Bypass",
+    "-Command",
+    WINDOWS_CLOSE_BROWSER_SCRIPT.replace("__TARGET_PID__", String(browserProcess.pid)),
   ]);
   if (
     graceful.exitCode === 0 &&
@@ -610,6 +652,7 @@ function makePlatform(
             executablePath: input.executablePath,
             args,
             detached: target === "linux-x64",
+            visible: input.visible === true,
             environment,
           }),
         );
@@ -628,7 +671,7 @@ function makePlatform(
         }
         yield* tryPlatform("stopping-managed-browser", () =>
           target === "windows-x64"
-            ? stopWindowsBrowserTree(browserProcess, runtime)
+            ? stopWindowsBrowserTree(browserProcess, environment, runtime)
             : stopLinuxBrowserTree(browserProcess, runtime),
         );
         processes.delete(handle.opaqueId);

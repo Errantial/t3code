@@ -21,6 +21,8 @@ export const layer = Layer.effect(
   Effect.gen(function* () {
     const config = yield* ServerConfig.ServerConfig;
     const path = yield* Path.Path;
+    let shutdownManagedHost: Effect.Effect<void> = Effect.void;
+    yield* Effect.addFinalizer(() => shutdownManagedHost);
     const managed = yield* Effect.cached(
       Effect.gen(function* () {
         const release = yield* Effect.tryPromise({
@@ -38,9 +40,15 @@ export const layer = Layer.effect(
           // A persistent Chromium profile is never implicitly migrated across browser revisions.
           allowBrowserRevisionChange: () => Effect.succeed(false),
         });
+        shutdownManagedHost = host.shutdown;
         return shareChatGptBrowserHost(host);
       }),
     );
-    return ChatGptBrowserHost.of({ open: managed.pipe(Effect.flatMap((host) => host.open)) });
+    return ChatGptBrowserHost.of({
+      readiness: managed.pipe(Effect.flatMap((host) => host.readiness)),
+      status: managed.pipe(Effect.flatMap((host) => host.status)),
+      authenticate: managed.pipe(Effect.flatMap((host) => host.authenticate)),
+      open: managed.pipe(Effect.flatMap((host) => host.open)),
+    });
   }),
 );

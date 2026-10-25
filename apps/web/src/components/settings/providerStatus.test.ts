@@ -22,6 +22,33 @@ const provider: ServerProvider = {
 };
 
 describe("getProviderSummary", () => {
+  it("presents a validated managed ChatGPT Browser runtime as available", () => {
+    expect(
+      getProviderSummary({
+        ...provider,
+        instanceId: ProviderInstanceId.make("chatgptBrowser"),
+        driver: ProviderDriverKind.make("chatgptBrowser"),
+        auth: { status: "unknown" },
+      }),
+    ).toEqual({ headline: "Available", detail: null });
+  });
+
+  it("does not call a bundled ChatGPT Browser launch failure not found", () => {
+    expect(
+      getProviderSummary({
+        ...provider,
+        instanceId: ProviderInstanceId.make("chatgptBrowser"),
+        driver: ProviderDriverKind.make("chatgptBrowser"),
+        status: "error",
+        auth: { status: "unknown" },
+        message: "ChatGPT Browser failed its managed runtime readiness check.",
+      }),
+    ).toEqual({
+      headline: "Unavailable",
+      detail: "ChatGPT Browser failed its managed runtime readiness check.",
+    });
+  });
+
   it("does not hide a provider error behind a previous authenticated state", () => {
     expect(
       getProviderSummary({

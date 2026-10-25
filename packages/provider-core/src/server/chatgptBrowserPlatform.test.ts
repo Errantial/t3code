@@ -23,6 +23,7 @@ interface RuntimeFixture {
     readonly executablePath: string;
     readonly args: ReadonlyArray<string>;
     readonly detached: boolean;
+    readonly visible: boolean;
   }>;
   readonly signals: Array<{ readonly pid: number; readonly signal: NodeJS.Signals | 0 }>;
 }
@@ -56,6 +57,7 @@ const makeRuntime = (input?: {
   readonly files?: Readonly<Record<string, string>>;
   readonly missingLibraries?: ReadonlyArray<string>;
   readonly userId?: number;
+  readonly windowsCloseExits?: boolean;
 }): RuntimeFixture => {
   const commands: RuntimeFixture["commands"] = [];
   const launches: RuntimeFixture["launches"] = [];
@@ -87,6 +89,13 @@ const makeRuntime = (input?: {
       }
       if (command === "fc-match") {
         return { exitCode: 0, stdout: "DejaVu Sans\n", stderr: "" };
+      }
+      if (command.toLowerCase().endsWith("powershell.exe") && input?.windowsCloseExits === true) {
+        const script = args.at(-1) ?? "";
+        if (script.includes("T3ManagedBrowserWindow")) {
+          running = false;
+          resolveExit?.();
+        }
       }
       if (command === "taskkill.exe") {
         running = false;
@@ -279,7 +288,47 @@ $result | ConvertTo-Json -Depth 4 -Compress
       ),
   );
 
-  it.effect("launches the dedicated profile and stops only the captured process tree", () =>
+  it.effect(
+    "launches the dedicated profile and gracefully closes only the captured browser pid",
+    () =>
+      withTempRoot((root) =>
+        Effect.gen(function* () {
+          const fixture = makeRuntime({ windowsCloseExits: true });
+          const platform = makeWindowsChatGptBrowserPlatform({
+            rootDirectory: root,
+            runtime: fixture.runtime,
+          });
+          const handle = yield* platform.launchBrowser({
+            executablePath: NodePath.win32.join(root, "browser", "chrome.exe"),
+            profileDirectory: NodePath.win32.join(root, "profile"),
+            extensionRoot: NodePath.win32.join(root, "extension"),
+            args: ["--headless=new"],
+          });
+          expect(fixture.launches).toEqual([
+            expect.objectContaining({
+              detached: false,
+              visible: false,
+              args: expect.arrayContaining([
+                `--user-data-dir=${NodePath.win32.join(root, "profile")}`,
+                `--load-extension=${NodePath.win32.join(root, "extension")}`,
+                "--headless=new",
+              ]),
+            }),
+          ]);
+          expect(fixture.launches[0]!.args).not.toContain("--no-sandbox");
+          yield* platform.stopBrowser(handle);
+          const closeCommand = fixture.commands.find(
+            (entry) =>
+              entry.command.toLowerCase().endsWith("powershell.exe") &&
+              entry.args.at(-1)?.includes("T3ManagedBrowserWindow"),
+          );
+          expect(closeCommand?.args.at(-1)).toContain("$targetPid = 4242");
+          expect(fixture.commands.some((entry) => entry.command === "taskkill.exe")).toBe(false);
+        }),
+      ),
+  );
+
+  it.effect("forces only the captured browser tree when graceful close does not exit", () =>
     withTempRoot((root) =>
       Effect.gen(function* () {
         const fixture = makeRuntime();
@@ -291,25 +340,16 @@ $result | ConvertTo-Json -Depth 4 -Compress
           executablePath: NodePath.win32.join(root, "browser", "chrome.exe"),
           profileDirectory: NodePath.win32.join(root, "profile"),
           extensionRoot: NodePath.win32.join(root, "extension"),
-          args: ["--headless=new"],
+          args: [],
         });
-        expect(fixture.launches).toEqual([
-          expect.objectContaining({
-            detached: false,
-            args: expect.arrayContaining([
-              `--user-data-dir=${NodePath.win32.join(root, "profile")}`,
-              `--load-extension=${NodePath.win32.join(root, "extension")}`,
-              "--headless=new",
-            ]),
-          }),
-        ]);
-        expect(fixture.launches[0]!.args).not.toContain("--no-sandbox");
+
         yield* platform.stopBrowser(handle);
+
         expect(
-          fixture.commands.some(
-            (entry) => entry.command === "taskkill.exe" && entry.args.join(" ") === "/PID 4242 /T",
-          ),
-        ).toBe(true);
+          fixture.commands
+            .filter((entry) => entry.command === "taskkill.exe")
+            .map((entry) => entry.args),
+        ).toEqual([["/PID", "4242", "/T", "/F"]]);
       }),
     ),
   );
@@ -424,6 +464,7 @@ describe("Linux x64 ChatGPT browser platform", () => {
         args: ["--headless=new"],
       });
       expect(fixture.launches[0]).toMatchObject({ detached: true });
+      expect(fixture.launches[0]?.visible).toBe(false);
       expect(fixture.launches[0]!.args).not.toContain("--no-sandbox");
       yield* platform.stopBrowser(handle);
       expect(fixture.signals).toContainEqual({ pid: 4242, signal: "SIGTERM" });

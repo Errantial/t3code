@@ -103,9 +103,19 @@ interface NativeBrokerOptions {
   ) => Promise<void>;
 }
 
+export type NativeChatGptBrowserAuthenticationStatus =
+  | "authenticated"
+  | "unauthenticated"
+  | "unknown";
+
 export interface NativeChatGptBrowserBroker {
   readonly port: number;
   readonly waitForSession: (signal?: AbortSignal) => Promise<ChatGptBrowserProviderBrowserSession>;
+  readonly authenticationStatus: () => NativeChatGptBrowserAuthenticationStatus;
+  readonly waitForAuthenticationStatus: (
+    signal?: AbortSignal,
+  ) => Promise<NativeChatGptBrowserAuthenticationStatus>;
+  readonly waitForAuthentication: (signal?: AbortSignal) => Promise<void>;
   readonly close: () => Promise<void>;
 }
 
@@ -200,6 +210,7 @@ function observation(record: OperationRecord): ChatGptBrowserProviderBrowserObse
     providerOperationId: record.providerOperationId,
     state: record.state,
     nativeIdentity: record.nativeIdentity,
+    sendAuthorized: record.authorized,
     ...(record.terminalStatus ? { terminalStatus: record.terminalStatus } : {}),
     ...(record.finalText !== undefined ? { finalText: record.finalText } : {}),
   };
@@ -278,10 +289,16 @@ export async function startNativeChatGptBrowserBroker(
   if (credential && !/^[a-f0-9]{64}$/i.test(credential)) credential = null;
 
   const operations = new Map<string, OperationRecord>();
+  // `operation.configure` carries S8 selection/attachment staging, but it is not authority to
+  // send browser work. Keep configuration separate until provider-v1 has durably prepared the
+  // operation and calls `sendExact`; otherwise configuration alone makes `queryExact` report
+  // browser ownership before the provider WAL exists and the durable runtime must fail closed.
+  const pendingConfigurations = new Map<string, ChatGptBrowserS8OperationConfigurePayload>();
   const operationWaiters = new Map<string, Set<() => void>>();
   const globalWaiters = new Set<() => void>();
   let brokerGeneration = 0;
   let peer: BrowserPeer | null = null;
+  let chatGptSignedIn: boolean | null = null;
   let closed = false;
   let readyResolve: ((session: ChatGptBrowserProviderBrowserSession) => void) | null = null;
   let readyReject: ((cause: unknown) => void) | null = null;
@@ -348,6 +365,34 @@ export async function startNativeChatGptBrowserBroker(
       globalWaiters.add(finish);
     });
 
+  const authenticationStatus = (): NativeChatGptBrowserAuthenticationStatus =>
+    chatGptSignedIn === true
+      ? "authenticated"
+      : chatGptSignedIn === false
+        ? "unauthenticated"
+        : "unknown";
+
+  const waitForAuthenticationStatus = async (
+    signal?: AbortSignal,
+  ): Promise<NativeChatGptBrowserAuthenticationStatus> => {
+    for (;;) {
+      const status = authenticationStatus();
+      if (status !== "unknown") return status;
+      if (closed) throw new Error("provider_v1_browser_closed");
+      if (signal?.aborted) throw signal.reason;
+      await waitForGlobalChange(30_000, signal);
+    }
+  };
+
+  const waitForAuthentication = async (signal?: AbortSignal): Promise<void> => {
+    for (;;) {
+      if ((await waitForAuthenticationStatus(signal)) === "authenticated") return;
+      if (closed) throw new Error("provider_v1_browser_closed");
+      if (signal?.aborted) throw signal.reason;
+      await waitForGlobalChange(30_000, signal);
+    }
+  };
+
   const getOrCreate = (providerOperationId: string): OperationRecord => {
     const existing = operations.get(providerOperationId);
     if (existing) return existing;
@@ -369,6 +414,20 @@ export async function startNativeChatGptBrowserBroker(
 
   const s8State = (record: OperationRecord) => (record.s8 ??= { approvalGeneration: 0 });
 
+  const configureOperation = (
+    record: OperationRecord,
+    payload: ChatGptBrowserS8OperationConfigurePayload,
+  ) => {
+    const state = s8State(record);
+    const serialized = JSON.stringify(payload);
+    if (state.configuration && JSON.stringify(state.configuration) !== serialized) {
+      throw new Error("provider_feature_configuration_conflict");
+    }
+    state.configuration = payload;
+    state.selection = { ...payload.selection };
+    touch(record);
+  };
+
   const approvalSnapshot = (record: OperationRecord): ChatGptBrowserS8ApprovalSnapshot => {
     const state = s8State(record);
     return {
@@ -383,28 +442,33 @@ export async function startNativeChatGptBrowserBroker(
     payload: ChatGptBrowserS8FeaturePayload,
   ): unknown => {
     if (!providerOperationId) throw new Error("provider_feature_operation_required");
-    const record = getOrCreate(providerOperationId);
-    const state = s8State(record);
     if (payload.kind === "operation.configure") {
       const serialized = JSON.stringify(payload);
-      if (state.configuration && JSON.stringify(state.configuration) !== serialized) {
+      const record = operations.get(providerOperationId);
+      if (record) {
+        configureOperation(record, payload);
+        return { ok: true, selection: { ...payload.selection } };
+      }
+      const pending = pendingConfigurations.get(providerOperationId);
+      if (pending && JSON.stringify(pending) !== serialized) {
         throw new Error("provider_feature_configuration_conflict");
       }
-      state.configuration = payload;
-      state.selection = { ...payload.selection };
-      touch(record);
-      return { ok: true, selection: state.selection };
+      pendingConfigurations.set(providerOperationId, payload);
+      return { ok: true, selection: { ...payload.selection } };
     }
+    const record = getOrCreate(providerOperationId);
+    const state = s8State(record);
     if (payload.kind === "operation.read") {
       return {
         selection: state.selection,
-        attachments: state.configuration?.attachments.map(({ id, name, mimeType, size, sha256 }) => ({
-          id,
-          name,
-          mimeType,
-          size,
-          sha256,
-        })) ?? [],
+        attachments:
+          state.configuration?.attachments.map(({ id, name, mimeType, size, sha256 }) => ({
+            id,
+            name,
+            mimeType,
+            size,
+            sha256,
+          })) ?? [],
       };
     }
     if (payload.kind === "approval.read") return approvalSnapshot(record);
@@ -438,7 +502,8 @@ export async function startNativeChatGptBrowserBroker(
     }
     if (payload.card) {
       const sameCard =
-        state.approval?.documentId === payload.documentId && state.approval.cardId === payload.card.id;
+        state.approval?.documentId === payload.documentId &&
+        state.approval.cardId === payload.card.id;
       if (!sameCard) {
         state.approval = {
           documentId: payload.documentId,
@@ -562,6 +627,11 @@ export async function startNativeChatGptBrowserBroker(
     identity: identity(browserPeer),
     sendExact: async (request: ChatGptBrowserProviderV1SendRequest, _signal, context) => {
       const record = getOrCreate(request.providerOperationId);
+      const pendingConfiguration = pendingConfigurations.get(request.providerOperationId);
+      if (pendingConfiguration) {
+        configureOperation(record, pendingConfiguration);
+        pendingConfigurations.delete(request.providerOperationId);
+      }
       if (record.providerSessionId && record.providerSessionId !== request.providerSessionId) {
         throw new Error("provider_operation_session_conflict");
       }
@@ -652,6 +722,11 @@ export async function startNativeChatGptBrowserBroker(
   const handleStatus = async (body: Record<string, unknown>, onReconciled?: () => void) => {
     const after =
       Number.isSafeInteger(body.after) && Number(body.after) >= 0 ? Number(body.after) : -1;
+    const nextSignedIn = typeof body.chatGptSignedIn === "boolean" ? body.chatGptSignedIn : null;
+    if (nextSignedIn !== chatGptSignedIn) {
+      chatGptSignedIn = nextSignedIn;
+      wake();
+    }
     for (const value of Array.isArray(body.operations) ? body.operations : []) {
       const summary = asRecord(value);
       if (!summary) continue;
@@ -678,13 +753,15 @@ export async function startNativeChatGptBrowserBroker(
           ? {
               model: record.s8.configuration.selection.selectedModel,
               reasoningEffort: record.s8.configuration.selection.selectedReasoningEffort,
-              attachments: record.s8.configuration.attachments.map(({ id, name, mimeType, size, sha256 }) => ({
-                id,
-                name,
-                mimeType,
-                size,
-                sha256,
-              })),
+              attachments: record.s8.configuration.attachments.map(
+                ({ id, name, mimeType, size, sha256 }) => ({
+                  id,
+                  name,
+                  mimeType,
+                  size,
+                  sha256,
+                }),
+              ),
               images: [],
             }
           : {}),
@@ -808,13 +885,15 @@ export async function startNativeChatGptBrowserBroker(
                 model: record.s8.configuration.selection.selectedModel,
                 reasoningEffort: record.s8.configuration.selection.selectedReasoningEffort,
                 exactModelSelection: true,
-                attachments: record.s8.configuration.attachments.map(({ id, name, mimeType, size, sha256 }) => ({
-                  id,
-                  name,
-                  mimeType,
-                  size,
-                  sha256,
-                })),
+                attachments: record.s8.configuration.attachments.map(
+                  ({ id, name, mimeType, size, sha256 }) => ({
+                    id,
+                    name,
+                    mimeType,
+                    size,
+                    sha256,
+                  }),
+                ),
                 images: [],
               }
             : {}),
@@ -872,11 +951,13 @@ export async function startNativeChatGptBrowserBroker(
       }
       // Conversation identity alone is not enough to mutate an operation. An observer page can
       // republish settled history when it first mounts; those assistant finals belong to earlier
-      // turns in the same conversation and commonly carry no local turn id. Treating the sole
-      // non-drained operation in that conversation as their owner can freeze a historical final
-      // into the new operation before its exact turn arrives. Require either the exact user
-      // message receipt above or a concrete turn id that can be reconciled to this operation.
-      record ??= turnId ? matchingOperation(conversationId, turnId) : null;
+      // turns in the same conversation and may carry either no local turn id or the old turn's id.
+      // Before this operation has an exact provider turn, only `turn_start` may establish that id.
+      // Letting an arbitrary historical event use the sole unbound operation as its fallback owner
+      // freezes stale final text into a new send, then the real turn_start binds a different id and
+      // the runtime correctly trips provider_final_changed. Exact user-message receipts remain the
+      // other admissible pre-turn identity above.
+      record ??= kind === "turn_start" && turnId ? matchingOperation(conversationId, turnId) : null;
       if (!record) continue;
       if (kind === "turn_start" && turnId) {
         if (
@@ -1250,5 +1331,12 @@ export async function startNativeChatGptBrowserBroker(
     }
   };
 
-  return { port, waitForSession, close: closeServer };
+  return {
+    port,
+    waitForSession,
+    authenticationStatus,
+    waitForAuthenticationStatus,
+    waitForAuthentication,
+    close: closeServer,
+  };
 }
