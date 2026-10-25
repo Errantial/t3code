@@ -9,6 +9,7 @@ import {
   type OrchestrationV2ProviderTurn,
   type OrchestrationV2RuntimeRequest,
   type OrchestrationV2TurnItem,
+  type ThreadId,
 } from "@t3tools/contracts";
 import {
   CHATGPT_BROWSER_PROVIDER_V1_FINAL_CONTENT_MAX_UTF16,
@@ -367,6 +368,37 @@ export const makeChatGptBrowserAdapterV2 = Effect.fn("makeChatGptBrowserAdapterV
               createdAt: timestamp,
               updatedAt: timestamp,
             };
+        yield* emit({
+          type: "provider_thread.updated",
+          driver: CHATGPT_BROWSER_DRIVER_KIND,
+          providerThread: thread,
+        });
+        return thread;
+      });
+
+      const resumeBoundThread = Effect.fnUntraced(function* (args: {
+        readonly providerThread: OrchestrationV2ProviderThread;
+        readonly threadId?: ThreadId;
+      }) {
+        const existing = args.providerThread;
+        const appThreadId = args.threadId ?? existing.appThreadId;
+        if (
+          existing.driver !== CHATGPT_BROWSER_DRIVER_KIND ||
+          existing.providerInstanceId !== options.instanceId ||
+          existing.providerSessionId !== input.providerSessionId ||
+          appThreadId === null ||
+          existing.appThreadId !== appThreadId
+        ) {
+          return yield* protocolError(
+            "ChatGPT Browser restart thread identity does not match the opened provider session",
+          );
+        }
+        const timestamp = yield* DateTime.now;
+        thread = {
+          ...existing,
+          status: "idle",
+          updatedAt: timestamp,
+        };
         yield* emit({
           type: "provider_thread.updated",
           driver: CHATGPT_BROWSER_DRIVER_KIND,
@@ -1161,13 +1193,17 @@ export const makeChatGptBrowserAdapterV2 = Effect.fn("makeChatGptBrowserAdapterV
             ),
           ),
         resumeThread: (args) =>
-          Effect.fail(
-            new ProviderAdapter.ProviderAdapterResumeThreadError({
-              driver: CHATGPT_BROWSER_DRIVER_KIND,
-              providerSessionId: input.providerSessionId,
-              providerThreadId: args.providerThread.id,
-              cause: "ChatGPT Browser restart reconciliation is not part of provider-v1 S1.",
-            }),
+          resumeBoundThread(args).pipe(
+            commands.withPermits(1),
+            Effect.mapError(
+              (cause) =>
+                new ProviderAdapter.ProviderAdapterResumeThreadError({
+                  driver: CHATGPT_BROWSER_DRIVER_KIND,
+                  providerSessionId: input.providerSessionId,
+                  providerThreadId: args.providerThread.id,
+                  cause,
+                }),
+            ),
           ),
         startTurn: (args) =>
           start(args).pipe(

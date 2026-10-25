@@ -286,6 +286,76 @@ describe("ChatGPT Browser ProviderAdapterV2", () => {
     ),
   );
 
+  it.effect("rebinds a projected thread after restart and recovers without sending again", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const attemptId = RunAttemptId.make("attempt-chatgpt-browser-restart-rebind");
+        const operationId = chatGptBrowserProviderOperationIdForAttempt(attemptId);
+        const operationStore = yield* memoryOperationStore();
+        const fake = makeFakeChatGptBrowserProviderV1Transport({
+          providerSessionId,
+          initialOperationId: operationId,
+          events: coreEvents(operationId, "hello"),
+          finalText: "hello",
+        });
+        const originalRuntime = yield* openRuntime({ host: host(fake.transport), operationStore });
+        const originalThread = yield* originalRuntime.ensureThread({
+          threadId,
+          modelSelection: { instanceId, model: "default" },
+          runtimePolicy: {
+            runtimeMode: "full-access",
+            interactionMode: "default",
+            cwd: "/workspace",
+          },
+        });
+        const projectedThread: OrchestrationV2ProviderThread = {
+          ...originalThread,
+          nativeThreadRef: {
+            driver: originalThread.driver,
+            nativeId: "historical-chatgpt-conversation",
+            strength: "strong",
+          },
+          status: "active",
+        };
+        yield* operationStore.prepare({
+          attemptId,
+          providerOperationId: operationId,
+          providerSessionId,
+          providerThreadId: projectedThread.id,
+        });
+
+        const recoveredRuntime = yield* openRuntime({ host: host(fake.transport), operationStore });
+        const resumed = yield* recoveredRuntime.resumeThread({
+          providerThread: projectedThread,
+          threadId,
+          modelSelection: { instanceId, model: "default" },
+          runtimePolicy: {
+            runtimeMode: "full-access",
+            interactionMode: "default",
+            cwd: "/workspace",
+          },
+        });
+        expect(resumed).toMatchObject({
+          id: projectedThread.id,
+          providerSessionId,
+          appThreadId: threadId,
+          nativeThreadRef: projectedThread.nativeThreadRef,
+          status: "idle",
+        });
+
+        yield* recoveredRuntime.startTurn(turnInput(resumed, attemptId));
+        yield* recoveredRuntime.events.pipe(
+          Stream.filter((event) => event.type === "turn.terminal"),
+          Stream.runHead,
+        );
+
+        expect(fake.calls.queriedOperationIds).toEqual([operationId]);
+        expect(fake.calls.sentOperationIds).toEqual([]);
+        expect(fake.calls.replayAfter).toEqual([0]);
+      }),
+    ),
+  );
+
   it.effect("persists the operation before send and only sends after authoritative unknown", () =>
     Effect.scoped(
       Effect.gen(function* () {
