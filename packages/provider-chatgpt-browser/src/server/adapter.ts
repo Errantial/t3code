@@ -166,6 +166,7 @@ interface ActiveTurn {
   readonly operationId: ChatGptBrowserProviderOperationId;
   providerTurn: OrchestrationV2ProviderTurn;
   assistantMessage: OrchestrationV2ConversationMessage | undefined;
+  assistantItemOrdinal: number | undefined;
   terminal:
     | {
         readonly sequence: number;
@@ -383,33 +384,98 @@ export const makeChatGptBrowserAdapterV2 = Effect.fn("makeChatGptBrowserAdapterV
       ) {
         const timestamp = yield* DateTime.now;
         const previous = turn.assistantMessage;
-        const message: OrchestrationV2ConversationMessage = {
-          id:
-            previous?.id ??
-            idAllocator.derive.messageFromProviderItem({
-              driver: CHATGPT_BROWSER_DRIVER_KIND,
-              nativeItemId: `assistant:${turn.operationId}`,
-            }),
+        const nativeItemId = `assistant:${turn.operationId}`;
+        const nativeItemRef = {
+          driver: CHATGPT_BROWSER_DRIVER_KIND,
+          nativeId: nativeItemId,
+          strength: "weak" as const,
+        };
+        const nodeId = idAllocator.derive.nodeFromProviderItem({
+          driver: CHATGPT_BROWSER_DRIVER_KIND,
+          nativeItemId,
+        });
+        const messageId =
+          previous?.id ??
+          idAllocator.derive.messageFromProviderItem({
+            driver: CHATGPT_BROWSER_DRIVER_KIND,
+            nativeItemId,
+          });
+        const turnItemId = idAllocator.derive.turnItemFromProviderItem({
+          driver: CHATGPT_BROWSER_DRIVER_KIND,
+          nativeItemId,
+        });
+        const itemOrdinal = turn.assistantItemOrdinal ?? turn.nextItemOrdinal++;
+        turn.assistantItemOrdinal = itemOrdinal;
+        const startedAt = previous?.createdAt ?? timestamp;
+        const completedAt = streaming ? null : timestamp;
+        const node: OrchestrationV2ExecutionNode = {
+          id: nodeId,
           threadId: turn.input.threadId,
           runId: turn.input.runId,
-          nodeId: turn.input.rootNodeId,
+          parentNodeId: turn.input.rootNodeId,
+          rootNodeId: turn.input.rootNodeId,
+          kind: "assistant_message",
+          status: streaming ? "running" : "completed",
+          countsForRun: false,
+          providerThreadId: turn.providerTurn.providerThreadId,
+          providerTurnId: turn.providerTurn.id,
+          nativeItemRef,
+          runtimeRequestId: null,
+          checkpointScopeId: null,
+          startedAt,
+          completedAt,
+        };
+        const message: OrchestrationV2ConversationMessage = {
+          id: messageId,
+          threadId: turn.input.threadId,
+          runId: turn.input.runId,
+          nodeId,
           role: "assistant",
           text,
           attachments: [],
           streaming,
           createdBy: "agent",
           creationSource: "provider",
-          createdAt: previous?.createdAt ?? timestamp,
+          createdAt: startedAt,
           updatedAt: timestamp,
         };
         turn.assistantMessage = message;
-        const event: ProviderAdapter.ProviderAdapterV2Event = {
+        const turnItem: Extract<OrchestrationV2TurnItem, { type: "assistant_message" }> = {
+          id: turnItemId,
+          threadId: turn.input.threadId,
+          runId: turn.input.runId,
+          nodeId,
+          providerThreadId: turn.providerTurn.providerThreadId,
+          providerTurnId: turn.providerTurn.id,
+          nativeItemRef,
+          parentItemId: null,
+          ordinal: itemOrdinal,
+          status: streaming ? "running" : "completed",
+          title: null,
+          startedAt,
+          completedAt,
+          updatedAt: timestamp,
+          type: "assistant_message",
+          messageId,
+          text,
+          streaming,
+        };
+        yield* emit({
+          type: "node.updated",
+          driver: CHATGPT_BROWSER_DRIVER_KIND,
+          node,
+        });
+        yield* emit({
           type: "message.updated",
           driver: CHATGPT_BROWSER_DRIVER_KIND,
           message,
-        };
+        });
         yield* emit(
-          event,
+          {
+            type: "turn_item.updated",
+            driver: CHATGPT_BROWSER_DRIVER_KIND,
+            turnItem,
+          },
           checkpointSequence === undefined
             ? undefined
             : operationStore.advanceHighWater({
@@ -1106,6 +1172,7 @@ export const makeChatGptBrowserAdapterV2 = Effect.fn("makeChatGptBrowserAdapterV
           operationId,
           providerTurn,
           assistantMessage: undefined,
+          assistantItemOrdinal: undefined,
           terminal: undefined,
           interruptRequested: recovery.cancelRequested,
           finished: false,
