@@ -1251,11 +1251,76 @@ describe("native ChatGPT browser broker", () => {
         }),
       );
 
+      // Cold extension restore still owns the exact terminal turn. The broker's older drained
+      // row cannot prove completed durability because it never received the final body, so the
+      // first status merge must keep this exact operation view-eligible for replay.
+      const coldTerminal = await requestJson<{
+        operations: Array<{
+          conversationId?: string;
+          finalObserved?: boolean;
+          terminalStatus?: string;
+          state?: string;
+        }>;
+      }>({
+        port: broker.port,
+        path: "/provider-v1/browser/status",
+        headers,
+        body: {
+          operations: [
+            {
+              providerOperationId,
+              commandId,
+              state: "terminal",
+              terminalStatus: "completed",
+              conversationId,
+              providerTurnId: turnId,
+              finalMessageId: "assistant-incomplete-drain",
+              finalObserved: true,
+            },
+          ],
+          after: 0,
+          wait: false,
+        },
+      });
+      expect(coldTerminal.status).toBe(200);
+      expect(coldTerminal.body.operations).toContainEqual(
+        expect.objectContaining({
+          state: "terminal",
+          terminalStatus: "completed",
+          conversationId,
+          finalObserved: false,
+        }),
+      );
+
+      const contradictory = await requestJson({
+        port: broker.port,
+        path: "/provider-v1/browser/status",
+        headers,
+        body: {
+          operations: [
+            {
+              providerOperationId,
+              commandId,
+              state: "terminal",
+              terminalStatus: "completed",
+              conversationId: "33333333-3333-3333-3333-333333333333",
+              providerTurnId: turnId,
+              finalMessageId: "assistant-incomplete-drain",
+              finalObserved: true,
+            },
+          ],
+          after: 0,
+          wait: false,
+        },
+      });
+      expect(contradictory.status).toBe(500);
+
       await expect(
         session.queryExact(providerOperationId, controller.signal),
       ).resolves.toMatchObject({
-        state: "running",
+        state: "terminal",
         terminalStatus: "completed",
+        nativeIdentity: { conversationId, providerTurnId: turnId },
       });
       const drain = await requestJson<{ error: string; retryable: boolean }>({
         port: broker.port,
@@ -1266,7 +1331,7 @@ describe("native ChatGPT browser broker", () => {
       expect(drain.status).toBe(409);
       expect(drain.body).toEqual({
         ok: false,
-        error: "provider_turn_not_closing",
+        error: "provider_final_not_observed",
         retryable: true,
       });
     } finally {
@@ -1619,6 +1684,62 @@ describe("native ChatGPT browser broker", () => {
           operations: [],
         },
       });
+      const lateBeforeDrain = await requestJson({
+        port: broker.port,
+        path: "/provider-v1/browser/events",
+        headers,
+        body: {
+          conversationId: conversationB,
+          entries: [
+            {
+              conversationId: conversationB,
+              event: {
+                kind: "tool_evidence",
+                turnId: turnB,
+                calls: [
+                  {
+                    messageId: "late-native-call-before-drain",
+                    tool: "read",
+                    requestId: "late-request-before-drain",
+                    order: 1,
+                    answered: false,
+                  },
+                ],
+              },
+            },
+            {
+              conversationId: conversationB,
+              event: {
+                kind: "page_tool",
+                turnId: turnB,
+                messageId: "late-page-step-before-drain",
+                text: "Inspecting",
+                order: 2,
+                activeNow: false,
+              },
+            },
+          ],
+          operations: [],
+        },
+      });
+      expect(lateBeforeDrain.status).toBe(200);
+      await expect(session.queryExact(operationB, controller.signal)).resolves.toMatchObject({
+        state: "terminal",
+        terminalStatus: "completed",
+        toolRevisions: expect.arrayContaining([
+          expect.objectContaining({
+            itemId: "late-native-call-before-drain",
+            toolName: "read",
+            status: "running",
+          }),
+          expect.objectContaining({
+            itemId: "late-page-step-before-drain",
+            toolName: "ChatGPT",
+            title: "Inspecting",
+            status: "completed",
+          }),
+        ]),
+      });
       const probe = await requestJson<{ drainToken: string }>({
         port: broker.port,
         path: "/provider-v1/browser/drain",
@@ -1676,7 +1797,15 @@ describe("native ChatGPT browser broker", () => {
       expect(late.status).toBe(200);
       const afterLate = await session.queryExact(operationB, controller.signal);
       expect(afterLate).toMatchObject({ state: "drained" });
-      expect(afterLate?.toolRevisions).toBeUndefined();
+      expect(afterLate?.toolRevisions).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ itemId: "late-native-call-before-drain" }),
+          expect.objectContaining({ itemId: "late-page-step-before-drain" }),
+        ]),
+      );
+      expect(afterLate?.toolRevisions).not.toEqual(
+        expect.arrayContaining([expect.objectContaining({ itemId: "late-tool-after-drain" })]),
+      );
     } finally {
       await broker.close();
     }

@@ -579,7 +579,7 @@ describe("scoped in-process ChatGPT browser provider host", () => {
 
       browser.observe({
         providerOperationId: operationId,
-        state: "drained",
+        state: "terminal",
         nativeIdentity,
         assistantRevisions: [{ itemId: "assistant-1", order: 0, text: "hello" }],
         toolRevisions: [{ itemId: "tool-1", order: 1, toolName: "web.run", status: "completed" }],
@@ -597,7 +597,6 @@ describe("scoped in-process ChatGPT browser provider host", () => {
       expect(third.events.map((event) => event.payload.type)).toEqual([
         "assistant.final",
         "operation.terminal",
-        "operation.drained",
       ]);
       expect(third.events[0]?.payload).toMatchObject({
         type: "assistant.final",
@@ -605,7 +604,71 @@ describe("scoped in-process ChatGPT browser provider host", () => {
         ordinal: 0,
         contentLength: 5,
       });
-      expect(third.highWater).toBe(7);
+      expect(third.highWater).toBe(6);
+      expect(settled).toEqual([]);
+
+      browser.observe({
+        providerOperationId: operationId,
+        state: "terminal",
+        nativeIdentity,
+        assistantRevisions: [{ itemId: "assistant-1", order: 0, text: "hello" }],
+        toolRevisions: [
+          { itemId: "tool-1", order: 1, toolName: "web.run", status: "completed" },
+          { itemId: "late-page-tool", order: 2, toolName: "ChatGPT", status: "completed" },
+          { itemId: "late-native-tool", order: 3, toolName: "read", status: "running" },
+        ],
+        finalText: "hello",
+        finalMessageId: "assistant-1",
+        terminalStatus: "completed",
+      });
+      const lateBeforeDrain = await Effect.runPromise(
+        opened.transport.replay({
+          type: "events.replay",
+          providerOperationId: operationId,
+          after: third.highWater,
+        }),
+      );
+      expect(lateBeforeDrain.events.map((event) => event.payload)).toEqual([
+        {
+          type: "tool.revision",
+          itemId: "late-page-tool",
+          ordinal: 2,
+          toolName: "ChatGPT",
+          status: "completed",
+        },
+        {
+          type: "tool.revision",
+          itemId: "late-native-tool",
+          ordinal: 3,
+          toolName: "read",
+          status: "running",
+        },
+      ]);
+      expect(lateBeforeDrain.highWater).toBe(8);
+
+      browser.observe({
+        providerOperationId: operationId,
+        state: "drained",
+        nativeIdentity,
+        assistantRevisions: [{ itemId: "assistant-1", order: 0, text: "hello" }],
+        toolRevisions: [
+          { itemId: "tool-1", order: 1, toolName: "web.run", status: "completed" },
+          { itemId: "late-page-tool", order: 2, toolName: "ChatGPT", status: "completed" },
+          { itemId: "late-native-tool", order: 3, toolName: "read", status: "running" },
+        ],
+        finalText: "hello",
+        finalMessageId: "assistant-1",
+        terminalStatus: "completed",
+      });
+      const drained = await Effect.runPromise(
+        opened.transport.replay({
+          type: "events.replay",
+          providerOperationId: operationId,
+          after: lateBeforeDrain.highWater,
+        }),
+      );
+      expect(drained.events.map((event) => event.payload.type)).toEqual(["operation.drained"]);
+      expect(drained.highWater).toBe(9);
       expect(settled).toEqual([operationId]);
       browser.observe({
         providerOperationId: operationId,
@@ -618,10 +681,10 @@ describe("scoped in-process ChatGPT browser provider host", () => {
         opened.transport.replay({
           type: "events.replay",
           providerOperationId: operationId,
-          after: third.highWater,
+          after: drained.highWater,
         }),
       );
-      expect(sealed).toEqual({ providerOperationId: operationId, events: [], highWater: 7 });
+      expect(sealed).toEqual({ providerOperationId: operationId, events: [], highWater: 9 });
       await Effect.runPromise(opened.close);
 
       const reopened = await Effect.runPromise(
@@ -631,13 +694,13 @@ describe("scoped in-process ChatGPT browser provider host", () => {
         reopened.transport.replay({
           type: "events.replay",
           providerOperationId: operationId,
-          after: third.highWater,
+          after: drained.highWater,
         }),
       );
       expect(sealedAfterRestart).toEqual({
         providerOperationId: operationId,
         events: [],
-        highWater: 7,
+        highWater: 9,
       });
       await Effect.runPromise(reopened.close);
     } finally {

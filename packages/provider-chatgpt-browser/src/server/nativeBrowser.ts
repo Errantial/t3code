@@ -590,11 +590,6 @@ export async function startNativeChatGptBrowserBroker(
     if (!providerOperationId) return;
     const record = getOrCreate(providerOperationId);
     if (summary.commandId && summary.commandId !== record.commandId) return;
-    let changed = false;
-    if (summary.state && stateRank[summary.state] > stateRank[record.state]) {
-      record.state = summary.state;
-      changed = true;
-    }
     const incomingIdentity: ChatGptBrowserProviderV1NativeIdentity = {
       ...(summary.conversationId ? { conversationId: summary.conversationId } : {}),
       ...(summary.userMessageId ? { userMessageId: summary.userMessageId } : {}),
@@ -610,19 +605,44 @@ export async function startNativeChatGptBrowserBroker(
       }
     }
     const nextIdentity = { ...record.nativeIdentity, ...incomingIdentity };
-    if (JSON.stringify(nextIdentity) !== JSON.stringify(record.nativeIdentity)) {
-      record.nativeIdentity = nextIdentity;
-      changed = true;
-    }
     const incomingFinalMessageId = cleanString(summary.finalMessageId, 256);
     if (incomingFinalMessageId) {
       if (record.finalMessageId && record.finalMessageId !== incomingFinalMessageId) {
         throw new Error("provider_final_identity_conflict");
       }
-      if (!record.finalMessageId) {
-        record.finalMessageId = incomingFinalMessageId;
-        changed = true;
-      }
+    }
+
+    // Validate exact identity before mutating any broker state. A cold extension can restore a
+    // terminal exact operation while this broker still remembers an older drained projection.
+    // If that drained row says completed but the broker never received the final body, it is not
+    // durably complete. Let the extension's same-operation terminal summary reactivate the view
+    // so its observer can replay the missing final. This is a state-only recovery transition: it
+    // never creates send authority and never changes providerOperationId/command ownership.
+    let nextState = record.state;
+    if (summary.state && stateRank[summary.state] > stateRank[record.state]) {
+      nextState = summary.state;
+    } else if (
+      record.state === "drained" &&
+      summary.state === "terminal" &&
+      record.terminalStatus === "completed" &&
+      summary.terminalStatus === "completed" &&
+      record.finalText === undefined
+    ) {
+      nextState = "terminal";
+    }
+
+    let changed = false;
+    if (nextState !== record.state) {
+      record.state = nextState;
+      changed = true;
+    }
+    if (JSON.stringify(nextIdentity) !== JSON.stringify(record.nativeIdentity)) {
+      record.nativeIdentity = nextIdentity;
+      changed = true;
+    }
+    if (incomingFinalMessageId && !record.finalMessageId) {
+      record.finalMessageId = incomingFinalMessageId;
+      changed = true;
     }
     if (summary.terminalStatus && !record.terminalStatus) {
       record.terminalStatus = summary.terminalStatus;

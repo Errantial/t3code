@@ -16107,6 +16107,10 @@
 
       const calls = [...(nativeTurn.calls || [])];
       const browserNoEffects = !providerTurnHasEffectEvidence(nativeTurn);
+      if (nativeTurn.conversationConflict === true) {
+        pending.invalidated = true;
+        return false;
+      }
       // The legacy restart-drain route has no exact provider-v1 operation WAL, so it must remain
       // effect-free. Native provider-v1 is different: the broker has already matched this probe to
       // the exact operation + conversation + provider turn, and the provider WAL owns every live
@@ -16124,7 +16128,23 @@
       if (!nativeProviderDrain && calls.some((call) => !call?.requestId)) {
         return false;
       }
-      if (!nativeProviderDrain) {
+      if (nativeProviderDrain) {
+        // Native provider-v1 terminal identity is sufficient positive authority to finish an exact
+        // turn even when the legacy correlation registry never learned an unanswered connector
+        // request. It is not permission to override contradictory evidence already learned by that
+        // registry, however: an exact request id previously confirmed for another conversation is
+        // foreign to this turn and must fail closed. This check is deliberately local/non-blocking;
+        // waiting for a fresh correlation ACK here recreates the terminal+pendingTools deadlock.
+        const foreignOwner = calls.some((call) => {
+          if (!call?.requestId) return false;
+          const confirmedOwner = requestOwnersConfirmed.get(call.requestId);
+          return confirmedOwner !== undefined && confirmedOwner !== pending.conversationId;
+        });
+        if (foreignOwner) {
+          pending.invalidated = true;
+          return false;
+        }
+      } else {
         await confirmLiveRequestOwners(calls, pending.conversationId, current);
         if (
           !current() ||

@@ -101,7 +101,7 @@ describe("managed extension native restart recovery source", () => {
     expect(block).toContain("await maybePublishProviderDrainReady()");
   });
 
-  it("does not make exact native provider drain depend on legacy request-owner correlation", async () => {
+  it("lets exact native provider drain ignore missing legacy correlation but refuse known foreign owners", async () => {
     const source = await contentSource();
     const block = sourceBetween(
       source,
@@ -110,7 +110,12 @@ describe("managed extension native restart recovery source", () => {
     );
 
     expect(block).toContain("const nativeRecovery = recovery && nativeProviderDrain;");
-    expect(block).toContain("if (!nativeProviderDrain) {");
+    expect(block).toContain("if (nativeProviderDrain) {");
+    expect(block).toContain("const foreignOwner = calls.some((call) => {");
+    expect(block).toContain("requestOwnersConfirmed.get(call.requestId)");
+    expect(block).toContain("confirmedOwner !== pending.conversationId");
+    expect(block).toContain("pending.invalidated = true;");
+    expect(block).toContain("} else {");
     expect(block).toContain(
       "await confirmLiveRequestOwners(calls, pending.conversationId, current);",
     );
@@ -126,6 +131,35 @@ describe("managed extension native restart recovery source", () => {
     );
     expect(source).toContain("!nativeProviderDrainRefresh &&");
     expect(source).toContain("nativeProviderDrain,");
+  });
+
+  it("does not use global pendingTools as authority for exact provider terminal drain", async () => {
+    const source = await contentSource();
+    const proof = sourceBetween(
+      source,
+      "async function providerDrainTerminalProof(recordedFinal, expectedTerminal) {",
+      "/** Fresh exact terminal proof, shared by stuck-composer recovery and idle-tab retirement. */",
+    );
+    const drain = sourceBetween(
+      source,
+      "async function maybePublishProviderDrainReady() {",
+      "/** Both final-driven Goal/Loop and unfinished Continue settle the same native control. */",
+    );
+
+    expect(proof).not.toContain("pendingTools === 0");
+    expect(proof).not.toContain("pendingTools > 0");
+    expect(drain).not.toContain("pendingTools === 0");
+    expect(drain).not.toContain("pendingTools > 0");
+    expect(drain).toContain("const finalPageTurn = currentAssistantTurn();");
+    expect(drain).toContain("nativeProviderDrain,");
+    expect(drain).toContain("const calls = [...(nativeTurn.calls || [])];");
+    expect(drain).toContain("if (!(await flush()) || !current()) {");
+    expect(drain).toContain("providerDrainFences.set(pending.turnId, fence);");
+    expect(drain).toContain('phase: "commit"');
+
+    // Ordinary automation/composer readiness must still respect the app-wide busy count.
+    expect(source).toContain("pendingTools > 0 ||");
+    expect(source).toContain("pendingTools === 0 &&");
   });
 
   it("keeps fallback terminal proof presentation-only so legacy correlation cannot wedge drain", async () => {
