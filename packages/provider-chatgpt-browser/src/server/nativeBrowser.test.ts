@@ -7,6 +7,7 @@ import { chatGptBrowserProviderOperationIdForAttempt } from "@t3tools/provider-c
 
 import { CHATGPT_BROWSER_S8_FEATURE } from "./features.ts";
 import { startNativeChatGptBrowserBroker } from "./nativeBrowser.ts";
+import type { ChatGptBrowserProviderBrowserObservation } from "./runtime.ts";
 
 const peerHeaders = {
   "content-type": "application/json",
@@ -940,7 +941,7 @@ describe("native ChatGPT browser broker", () => {
 
   it("returns non-2xx until a final browser observation is durably accepted", async () => {
     const secrets = new Map<string, Uint8Array>();
-    const accepted: Array<{ readonly finalText?: string; readonly terminalStatus?: string }> = [];
+    const accepted: ChatGptBrowserProviderBrowserObservation[] = [];
     let rejectObservation = false;
     const broker = await startNativeChatGptBrowserBroker({
       ports: [0],
@@ -1016,7 +1017,7 @@ describe("native ChatGPT browser broker", () => {
         },
       });
 
-      const events = {
+      const liveEvents = {
         conversationId: "11111111-1111-1111-1111-111111111111",
         entries: [
           {
@@ -1028,9 +1029,91 @@ describe("native ChatGPT browser broker", () => {
             event: {
               kind: "assistant_message",
               turnId: "turn-1",
+              messageId: "assistant-1",
+              order: 2,
+              state: "streaming",
+              final: false,
+              text: "ans",
+              references: [
+                {
+                  index: 0,
+                  sources: [{ title: "Python", url: "https://www.python.org/downloads/" }],
+                },
+              ],
+            },
+          },
+          {
+            conversationId: "11111111-1111-1111-1111-111111111111",
+            event: {
+              kind: "tool_evidence",
+              turnId: "turn-1",
+              calls: [
+                {
+                  messageId: "tool-1",
+                  tool: "web.run",
+                  order: 1,
+                  requestId: "request-1",
+                  answered: false,
+                },
+              ],
+            },
+          },
+        ],
+        operations: [],
+      };
+      expect(
+        (
+          await requestJson({
+            port: broker.port,
+            path: "/provider-v1/browser/events",
+            headers,
+            body: liveEvents,
+          })
+        ).status,
+      ).toBe(200);
+      expect(accepted.at(-1)).toMatchObject({
+        assistantRevisions: [{ itemId: "assistant-1", order: 2, text: "ans" }],
+        toolRevisions: [{ itemId: "tool-1", order: 1, toolName: "web.run", status: "running" }],
+      });
+
+      const events = {
+        conversationId: "11111111-1111-1111-1111-111111111111",
+        entries: [
+          {
+            conversationId: "11111111-1111-1111-1111-111111111111",
+            event: {
+              kind: "assistant_message",
+              turnId: "turn-1",
+              messageId: "assistant-1",
+              order: 2,
               state: "final",
               final: true,
               text: "answer",
+              references: [
+                {
+                  index: 0,
+                  sources: [
+                    { title: "Python", url: "https://www.python.org/downloads/" },
+                    { title: "Docs", url: "https://docs.python.org/3/" },
+                  ],
+                },
+              ],
+            },
+          },
+          {
+            conversationId: "11111111-1111-1111-1111-111111111111",
+            event: {
+              kind: "tool_evidence",
+              turnId: "turn-1",
+              calls: [
+                {
+                  messageId: "tool-1",
+                  tool: "web.run",
+                  order: 1,
+                  requestId: "request-1",
+                  answered: true,
+                },
+              ],
             },
           },
           {
@@ -1050,14 +1133,30 @@ describe("native ChatGPT browser broker", () => {
       expect(refused.status).toBe(500);
 
       rejectObservation = false;
-      const acceptedRetry = await requestJson({
+      const acceptedRetry = await requestJson<{
+        operations: Array<{ finalMessageId?: string; terminalStatus?: string; state?: string }>;
+      }>({
         port: broker.port,
         path: "/provider-v1/browser/events",
         headers,
         body: events,
       });
       expect(acceptedRetry.status).toBe(200);
-      expect(accepted.at(-1)).toMatchObject({ finalText: "answer", terminalStatus: "completed" });
+      expect(acceptedRetry.body.operations).toContainEqual(
+        expect.objectContaining({
+          state: "terminal",
+          terminalStatus: "completed",
+          finalMessageId: "assistant-1",
+          finalObserved: true,
+        }),
+      );
+      expect(accepted.at(-1)).toMatchObject({
+        assistantRevisions: [{ itemId: "assistant-1", order: 2, text: "answer" }],
+        toolRevisions: [{ itemId: "tool-1", order: 1, toolName: "web.run", status: "completed" }],
+        finalText: "answer",
+        finalMessageId: "assistant-1",
+        terminalStatus: "completed",
+      });
     } finally {
       await broker.close();
     }
@@ -1115,7 +1214,14 @@ describe("native ChatGPT browser broker", () => {
       const commandId = pending.body.inputs[0]!.id;
       const conversationId = "22222222-2222-2222-2222-222222222222";
       const turnId = "turn-incomplete-drain";
-      await requestJson({
+      const restored = await requestJson<{
+        operations: Array<{
+          finalMessageId?: string;
+          finalObserved?: boolean;
+          terminalStatus?: string;
+          state?: string;
+        }>;
+      }>({
         port: broker.port,
         path: "/provider-v1/browser/status",
         headers,
@@ -1128,12 +1234,22 @@ describe("native ChatGPT browser broker", () => {
               terminalStatus: "completed",
               conversationId,
               providerTurnId: turnId,
+              finalMessageId: "assistant-incomplete-drain",
+              finalObserved: true,
             },
           ],
           after: 0,
           wait: false,
         },
       });
+      expect(restored.body.operations).toContainEqual(
+        expect.objectContaining({
+          state: "drained",
+          terminalStatus: "completed",
+          finalMessageId: "assistant-incomplete-drain",
+          finalObserved: false,
+        }),
+      );
 
       await expect(
         session.queryExact(providerOperationId, controller.signal),
@@ -1515,6 +1631,7 @@ describe("native ChatGPT browser broker", () => {
         },
       });
       expect(probe.status).toBe(200);
+      expect(probe.body).toMatchObject({ nativeProvider: true });
       const committed = await requestJson({
         port: broker.port,
         path: "/provider-v1/browser/drain",
@@ -1528,11 +1645,38 @@ describe("native ChatGPT browser broker", () => {
         },
       });
       expect(committed.status).toBe(200);
+      expect(committed.body).toMatchObject({ nativeProvider: true });
       await expect(session.queryExact(operationB, controller.signal)).resolves.toMatchObject({
         state: "drained",
         terminalStatus: "completed",
         nativeIdentity: { conversationId: conversationB, providerTurnId: turnB },
       });
+      const late = await requestJson({
+        port: broker.port,
+        path: "/provider-v1/browser/events",
+        headers,
+        body: {
+          conversationId: conversationB,
+          entries: [
+            {
+              conversationId: conversationB,
+              event: {
+                kind: "page_tool",
+                turnId: turnB,
+                messageId: "late-tool-after-drain",
+                text: "Late stale activity",
+                order: 1,
+                activeNow: false,
+              },
+            },
+          ],
+          operations: [],
+        },
+      });
+      expect(late.status).toBe(200);
+      const afterLate = await session.queryExact(operationB, controller.signal);
+      expect(afterLate).toMatchObject({ state: "drained" });
+      expect(afterLate?.toolRevisions).toBeUndefined();
     } finally {
       await broker.close();
     }

@@ -417,6 +417,7 @@
   const errorFirstSeen = new WeakMap();
   /** The last label sent for each identified ChatGPT-native tool row of this generation. */
   const pageToolsReported = new Map();
+  const webSearchSequences = new Map();
   /** The last round outline sent for each local turn, newest last (`turnTraceOf`). */
   const tracesReported = new Map();
   /** When this document first showed each call of a turn it ran live, by ChatGPT's call id. */
@@ -435,8 +436,9 @@
   // the worker's journal-to-zero acknowledgement; new authored work tears it down immediately.
   let providerDrainPending = null;
   // Main may offer one exact restart-unsealed provider turn to a replacement document. The
-  // descriptor is only a candidate until a fresh Fiber hydration re-proves its exact terminal
-  // and that the native turn contains no effect/tool evidence at all.
+  // descriptor is only a candidate until a fresh Fiber hydration re-proves its exact terminal.
+  // Legacy recovery still requires a no-effects turn; native provider-v1 can recover effectful
+  // turns because its exact operation/turn identity and durable event WAL are independently fenced.
   let providerDrainRecoveryCandidate = null;
   const providerDrainFences = new Map();
   let providerDrainWork = null;
@@ -845,6 +847,8 @@
   // Exact provider-v1 recovery provenance for a turn adopted after its answer may already have settled.
   // This is set only when the current page proves the broker-owned user message is still the newest question.
   let nativeProviderRecoveryQuestionId = null;
+  let nativeProviderRecoveryTurnId = null;
+  let nativeProviderRecoveryFinalMessageId = null;
   let since = 0;
   let streamEntries = [];
   /** Exact request id -> one durable local turn, null when the retained stream conflicts. */
@@ -2236,6 +2240,8 @@
     userAnchorByMessage.clear();
     openedUserMessageId = null;
     nativeProviderRecoveryQuestionId = null;
+    nativeProviderRecoveryTurnId = null;
+    nativeProviderRecoveryFinalMessageId = null;
     streamEntries = [];
     streamRequestTurnOwners.clear();
     since = 0;
@@ -2302,6 +2308,7 @@
     providerDrainRecoveryCandidate = null;
     steeredTurns.clear();
     pageToolsReported.clear();
+    webSearchSequences.clear();
     nativeImagesReported.clear();
     nativeImageCaptures.clear();
     nativeImageCaptureQueue.clear();
@@ -3160,6 +3167,22 @@
       });
     }
     const nativeEnd = result.outcome === "completed" ? fiberTurnFor(ended) : null;
+    const newestUserMessageId =
+      result.outcome === "completed"
+        ? (CLF_DOM.messages()
+            .filter((row) => row.role === "user")
+            .at(-1)?.id ?? null)
+        : null;
+    const exactNativeRestartRecovery = Boolean(
+      endedTurnId &&
+      result.outcome === "completed" &&
+      nativeProviderRecoveryQuestionId &&
+      nativeProviderRecoveryTurnId === endedTurnId &&
+      nativeProviderRecoveryFinalMessageId &&
+      newestUserMessageId === nativeProviderRecoveryQuestionId &&
+      nativeEnd?.question === nativeProviderRecoveryQuestionId &&
+      nativeEnd?.endMessageId === nativeProviderRecoveryFinalMessageId,
+    );
     const imageEnd =
       nativeEnd?.endMessageId &&
       nativeEnd.images?.some(
@@ -3192,7 +3215,13 @@
         // scan must confirm this same native final. A changed id is Retry/Regenerate, not a late
         // hydration of the provider turn we are sealing. Null deliberately allows the first
         // exact final to arrive after turn_end.
-        terminalMessageId: result.outcome === "completed" ? nativeEnd?.endMessageId || null : null,
+        terminalMessageId:
+          exactNativeRestartRecovery && nativeProviderRecoveryFinalMessageId
+            ? nativeProviderRecoveryFinalMessageId
+            : result.outcome === "completed"
+              ? nativeEnd?.endMessageId || null
+              : null,
+        ...(exactNativeRestartRecovery ? { terminalSeq: null, recovery: "restart_unsealed" } : {}),
         invalidated: false,
       };
       providerDrainRetryPending = false;
@@ -3205,6 +3234,8 @@
     turnStartedAt = 0;
     unwitnessedGeneration = false;
     nativeProviderRecoveryQuestionId = null;
+    nativeProviderRecoveryTurnId = null;
+    nativeProviderRecoveryFinalMessageId = null;
     genNode = null;
   }
 
@@ -4716,14 +4747,34 @@
     )) {
       if (!entry || typeof entry !== "object") continue;
       const messageId = cap(entry.messageId, 200);
-      const label = cap(entry.label, 300);
-      if (!messageId || !label || fiberBusyCaption(label)) continue;
-      const priorAt = activityIndex.get(messageId);
+      const structuralWeb =
+        !messageId &&
+        entry.structuralKind === "web-search" &&
+        Number.isInteger(entry.structuralOrdinal) &&
+        entry.structuralOrdinal >= 0 &&
+        entry.structuralOrdinal < FIBER_MAX_ACTIVITIES &&
+        entry.structuralKey === `web-search:${entry.structuralOrdinal}` &&
+        entry.label === "Web search" &&
+        typeof entry.activeNow === "boolean";
+      const label = structuralWeb ? "Web search" : cap(entry.label, 300);
+      if ((!messageId && !structuralWeb) || !label || fiberBusyCaption(label)) continue;
+      const identity = structuralWeb
+        ? `structural:web-search:${entry.structuralOrdinal}`
+        : messageId;
+      const priorAt = activityIndex.get(identity);
       if (priorAt === undefined) {
-        activityIndex.set(messageId, activities.length);
+        activityIndex.set(identity, activities.length);
         activities.push({
-          messageId,
+          ...(messageId ? { messageId } : {}),
+          ...(structuralWeb
+            ? {
+                structuralKind: "web-search",
+                structuralOrdinal: entry.structuralOrdinal,
+                structuralKey: `web-search:${entry.structuralOrdinal}`,
+              }
+            : {}),
           label,
+          ...(typeof entry.activeNow === "boolean" ? { activeNow: entry.activeNow } : {}),
           order:
             Number.isInteger(entry.order) &&
             entry.order >= 0 &&
@@ -4733,10 +4784,22 @@
         });
         continue;
       }
-      if (activities[priorAt].label !== label) conflictingActivities.add(messageId);
+      const prior = activities[priorAt];
+      if (
+        prior.label !== label ||
+        (typeof prior.activeNow === "boolean" &&
+          typeof entry.activeNow === "boolean" &&
+          prior.activeNow !== entry.activeNow)
+      )
+        conflictingActivities.add(identity);
     }
     const keptActivities = activities.filter(
-      (activity) => !conflictingActivities.has(activity.messageId),
+      (activity) =>
+        !conflictingActivities.has(
+          activity.structuralKind === "web-search"
+            ? `structural:web-search:${activity.structuralOrdinal}`
+            : activity.messageId,
+        ),
     );
     const thoughtNotifications = [];
     const thoughtSeen = new Set();
@@ -5602,6 +5665,7 @@
 
   async function refreshFiber(settled = null, presentationOnly = false) {
     const providerTerminalProbe = Boolean(settled?.terminalProbe);
+    const nativeProviderDrainRefresh = settled?.nativeProviderDrain === true;
     // A bound chat can briefly lose its /c/<id> route during React/router churn, and a real
     // navigation to a fresh composer has the exact same pathname until ChatGPT assigns the
     // new conversation id. While that identity is unresolved, fail closed: emitting Fiber
@@ -5624,6 +5688,12 @@
     const requestedOwner = settled || requestedLiveOwner;
     let answer = await askFiber();
     if (answer === null) {
+      // Drain already has an exact terminal proof. This second full scan exists only to capture
+      // late assistant/tool/page evidence before the fence. If MAIN misses this bounded read, keep
+      // the drain pending and retry later; do not enter the recorder's service-worker repair path,
+      // whose control-plane request is unrelated to terminal authority and may be waiting on a
+      // failed/restarting worker indefinitely.
+      if (nativeProviderDrainRefresh) return false;
       // One missed reply is not proof the helper is gone: a busy main thread can outlive this
       // bounded poll. Keep the last proven state while the worker attempts a repair. Only a
       // completed repair attempt that still cannot round-trip (or an explicit repair failure)
@@ -5695,6 +5765,19 @@
     // id that can join the call to B. A marker-shaped string alone is never authority: the app
     // must accept the exact destination message first, or the provisional answer is discarded.
     const newestUser = [...CLF_DOM.messages()].reverse().find((message) => message.role === "user");
+    if (
+      !ownedPageTurn &&
+      exactOwner?.localTurnId &&
+      newestUser?.id &&
+      openedUserMessageId === newestUser.id
+    ) {
+      const exactQuestionTurns = answer.turns.filter((turn) => {
+        if (turn?.question !== newestUser.id || turn?.conversationConflict === true) return false;
+        const pageConversation = concreteConversation(turn.conversationId);
+        return !askedConversation || !pageConversation || pageConversation === askedConversation;
+      });
+      if (exactQuestionTurns.length === 1) ownedPageTurn = exactQuestionTurns[0];
+    }
     const currentContinuationMarker = markedAs(newestUser?.text);
     let committedResumeOwner = null;
     if (currentContinuationMarker?.[1] === "RESUME") {
@@ -5710,9 +5793,10 @@
         // Idle presentation refresh may consume an already committed proof, but it never
         // creates one. Reconciliation can acknowledge/compact continuation custody and is
         // therefore a recorder/control mutation, not presentation identity.
-        const reconciliation = presentationOnly
-          ? null
-          : reconcileContinuationMarkers([resumeEntry]);
+        const reconciliation =
+          presentationOnly || nativeProviderDrainRefresh
+            ? null
+            : reconcileContinuationMarkers([resumeEntry]);
         if (reconciliation) await reconciliation;
         if (epoch !== askedEpoch || conversationId !== askedConversation) return false;
         if (askedConversation && CLF_DOM.conversationId() !== askedConversation) return false;
@@ -5801,7 +5885,13 @@
     for (const check of pageViewChecks) void check();
     completeDesktopDecision();
     const markedTurns = markedContinuationTurns();
-    const continuationReconciliation = reconcileContinuationMarkers(markedTurns);
+    // Continuation reconciliation may compact or acknowledge recorder custody through the service
+    // worker. Native drain needs the already-rendered evidence from this exact Fiber snapshot, not
+    // unrelated continuation control-plane completion. Ordinary recorder/live scans retain that
+    // reconciliation; an exact native drain skips it and remains bounded by the Fiber round-trip.
+    const continuationReconciliation = nativeProviderDrainRefresh
+      ? null
+      : reconcileContinuationMarkers(markedTurns);
     if (continuationReconciliation) await continuationReconciliation;
     if (epoch !== askedEpoch || conversationId !== askedConversation) return false;
     // Fiber names turns with ChatGPT's page `data-turn-id`, which the live page reuses. The
@@ -5858,7 +5948,9 @@
           }
         }
       }
-      const ownerConfirmation = confirmLiveRequestOwners(ownerCalls, askedConversation);
+      const ownerConfirmation = nativeProviderDrainRefresh
+        ? null
+        : confirmLiveRequestOwners(ownerCalls, askedConversation);
       // `ownedPageTurn` has one deliberately narrow exception to the ordinary conversation
       // filter: on a fresh chat, the real /c/<id> can exist while that live turn's React branch
       // still carries a provisional client thread id. The explicit /correlations handshake is
@@ -5870,6 +5962,7 @@
         ? concreteConversation(ownedPageTurn.conversationId)
         : null;
       if (
+        !nativeProviderDrainRefresh &&
         ownedPageTurn &&
         (ownedPageTurn.requestOwnerRequired ||
           (ownedPageConversation && ownedPageConversation !== askedConversation))
@@ -5918,13 +6011,14 @@
       }
       const pageConversation = concreteConversation(turn.conversationId);
       const provisionalOwnedTurn =
-        turn.requestOwnerRequired ||
-        Boolean(
-          turn === ownedPageTurn &&
-          askedConversation &&
-          pageConversation &&
-          pageConversation !== askedConversation,
-        );
+        !nativeProviderDrainRefresh &&
+        (turn.requestOwnerRequired ||
+          Boolean(
+            turn === ownedPageTurn &&
+            askedConversation &&
+            pageConversation &&
+            pageConversation !== askedConversation,
+          ));
       const fresh = turn.calls.filter((call) => {
         // A mismatched owned turn is admissible only as a provisional-first-turn candidate.
         // Its request id must have survived the app's explicit owner read-back before the
@@ -5961,7 +6055,7 @@
           noteTurnProgress(turnId, "page-call");
         emit({
           kind: "tool_evidence",
-          ...(index === activeTurnIndex ? { turnId: activeLocalTurnId } : {}),
+          ...(providerLocalOwner ? { turnId: providerLocalOwner } : {}),
           ...(turn.conversationId &&
           !(
             turn === ownedPageTurn &&
@@ -6035,20 +6129,48 @@
       // already-written rows after reload is not newly authored work. Subsequent
       // changes use this same retained Fiber snapshot; a witnessed local Send
       // already owns fresh publication from its first response.
+      const itemIdentity = (item) =>
+        item?.messageId ||
+        (item?.structuralKind === "web-search" && typeof item.structuralKey === "string"
+          ? `structural:${item.structuralKey}`
+          : null);
       const messageIds = new Set(
-        [...(turn.messages || []), ...(turn.activities || [])].map((item) => item.messageId),
+        [...(turn.messages || []), ...(turn.activities || [])].map(itemIdentity).filter(Boolean),
       );
       const previousTurn = previousFiberTurns.filter(
         (previous) =>
           previous.conversationId === turn.conversationId &&
           ((previous.turnId && previous.turnId === turn.turnId) ||
             [...(previous.messages || []), ...(previous.activities || [])].some((item) =>
-              messageIds.has(item.messageId),
+              messageIds.has(itemIdentity(item)),
             )),
       );
       const freshPublication =
         Boolean(newestUser?.id && openedUserMessageId === newestUser.id) ||
         previousTurn.length === 1;
+      const structuralWeb = (turn.activities || []).filter(
+        (activity) => activity?.structuralKind === "web-search",
+      );
+      let structuralWebAllowed = structuralWeb.length === 0;
+      if (structuralWeb.length > 0 && localOwner) {
+        const ordinalsStable = structuralWeb.every(
+          (activity, at) =>
+            activity.structuralOrdinal === at && typeof activity.activeNow === "boolean",
+        );
+        const current = structuralWeb.map((activity) =>
+          activity.activeNow === true ? "running" : "completed",
+        );
+        const prior = webSearchSequences.get(localOwner) || null;
+        const prefixStable =
+          !prior ||
+          (current.length >= prior.length &&
+            prior.every((status, at) => !(status === "completed" && current[at] === "running")));
+        if (ordinalsStable && prefixStable) {
+          webSearchSequences.delete(localOwner);
+          webSearchSequences.set(localOwner, current);
+          structuralWebAllowed = true;
+        }
+      }
       const items = [];
       let serial = 0;
       for (const message of turn.messages || []) {
@@ -6129,18 +6251,32 @@
         }
         if (item.type === "activity") {
           const activity = item.value;
+          if (activity.structuralKind === "web-search" && !structuralWebAllowed) continue;
           const owner = localOwner || "";
-          const signature = `${activity.label}\u0000${owner}`;
-          const previous = pageToolsReported.get(activity.messageId);
+          const messageId =
+            typeof activity.messageId === "string" && activity.messageId
+              ? activity.messageId
+              : owner && typeof activity.structuralKey === "string" && activity.structuralKey
+                ? `${owner}:${activity.structuralKey}`
+                : null;
+          if (!messageId) continue;
+          const explicitActiveNow =
+            typeof activity.activeNow === "boolean" ? activity.activeNow : null;
+          const signature = `${activity.label}\u0000${owner}\u0000${explicitActiveNow ?? ""}`;
+          const previous = pageToolsReported.get(messageId);
           if (previous === signature) continue;
-          pageToolsReported.set(activity.messageId, signature);
+          pageToolsReported.set(messageId, signature);
           if (owner && previous === undefined && freshPublication)
             noteTurnProgress(owner, "page-step");
           emit({
             kind: "page_tool",
             text: activity.label,
-            messageId: activity.messageId,
-            activeNow: generating && owner === turnId && previous === undefined && freshPublication,
+            messageId,
+            ...(Number.isInteger(activity.order) ? { order: activity.order } : {}),
+            activeNow:
+              explicitActiveNow === null
+                ? generating && owner === turnId && previous === undefined && freshPublication
+                : explicitActiveNow && generating && owner === turnId,
             turnId: localOwner || undefined,
           });
           continue;
@@ -6258,6 +6394,7 @@
         emit({
           kind: "assistant_message",
           messageId: message.messageId,
+          ...(Number.isInteger(message.order) ? { order: message.order } : {}),
           providerMessageId: message.rawMessageId,
           ...(message.resolvedModel ? { resolvedModel: message.resolvedModel } : {}),
           ...(message.references ? { references: message.references } : {}),
@@ -6339,7 +6476,8 @@
     const activeNativeTurn = activeTurnIndex >= 0 ? answer.turns[activeTurnIndex] : null;
     const exactNativeRecoveryTerminal = Boolean(
       nativeProviderRecoveryQuestionId &&
-      openedUserMessageId === nativeProviderRecoveryQuestionId &&
+      nativeProviderRecoveryTurnId &&
+      turnId === nativeProviderRecoveryTurnId &&
       newestUser?.id === nativeProviderRecoveryQuestionId &&
       // Reusing a terminal already present in settledFinals is only safe when ChatGPT's own
       // page model says this native turn was opened by the exact broker-owned user message.
@@ -6375,6 +6513,8 @@
     if (callsReported.size > 4000) callsReported.clear();
     if (messagesReported.size > 4000) messagesReported.clear();
     if (pageToolsReported.size > 4000) pageToolsReported.clear();
+    while (webSearchSequences.size > 2000)
+      webSearchSequences.delete(webSearchSequences.keys().next().value);
     while (tracesReported.size > 64) tracesReported.delete(tracesReported.keys().next().value);
     if (nativeImagesReported.size > 2000) {
       for (const key of nativeImagesReported.keys()) {
@@ -8703,14 +8843,23 @@
       const data = reply.data;
       if (data.approvalAnswer) answerApproval(data.approvalAnswer);
       const restartDrain = data.providerDrainRecovery;
+      const nativeRestartDrain = restartDrain?.nativeProvider === true;
+      const restartDrainUserMessageId =
+        nativeRestartDrain &&
+        typeof restartDrain.userMessageId === "string" &&
+        restartDrain.userMessageId.length > 0 &&
+        restartDrain.userMessageId.length <= 256
+          ? restartDrain.userMessageId
+          : null;
       const validRestartDrain =
         restartDrain?.kind === "restart_unsealed" &&
         restartDrain.outcome === "completed" &&
         typeof restartDrain.turnId === "string" &&
         restartDrain.turnId.length > 0 &&
         restartDrain.turnId.length <= 256 &&
-        Number.isSafeInteger(restartDrain.terminalSeq) &&
-        restartDrain.terminalSeq > 0 &&
+        (!nativeRestartDrain || restartDrainUserMessageId !== null) &&
+        (nativeRestartDrain ||
+          (Number.isSafeInteger(restartDrain.terminalSeq) && restartDrain.terminalSeq > 0)) &&
         typeof restartDrain.terminalMessageId === "string" &&
         restartDrain.terminalMessageId.length > 0;
       if (!providerDrainPending && validRestartDrain) {
@@ -8719,7 +8868,10 @@
           providerDrainRecoveryCandidate.conversationId === forId &&
           providerDrainRecoveryCandidate.epoch === forEpoch &&
           providerDrainRecoveryCandidate.turnId === restartDrain.turnId &&
-          providerDrainRecoveryCandidate.terminalSeq === restartDrain.terminalSeq &&
+          providerDrainRecoveryCandidate.terminalSeq ===
+            (nativeRestartDrain ? null : restartDrain.terminalSeq) &&
+          providerDrainRecoveryCandidate.nativeProvider === nativeRestartDrain &&
+          providerDrainRecoveryCandidate.userMessageId === restartDrainUserMessageId &&
           providerDrainRecoveryCandidate.terminalMessageId === restartDrain.terminalMessageId;
         if (!sameCandidate)
           providerDrainRecoveryCandidate = {
@@ -8728,7 +8880,9 @@
             outcome: "completed",
             epoch: forEpoch,
             terminalMessageId: restartDrain.terminalMessageId,
-            terminalSeq: restartDrain.terminalSeq,
+            terminalSeq: nativeRestartDrain ? null : restartDrain.terminalSeq,
+            nativeProvider: nativeRestartDrain,
+            userMessageId: restartDrainUserMessageId,
             mismatchedTerminals: [],
             invalidated: false,
           };
@@ -8992,7 +9146,39 @@
       // Before painting, not after: a row's fold count decides which call goes on it, and
       // painting first would label from a stale count and then have to move it.
       const fiberRefreshed = await refreshFiber();
-      if (fiberRefreshed) maybeArmRestartProviderDrainRecovery();
+      if (fiberRefreshed) {
+        const recoveryCandidate = providerDrainRecoveryCandidate;
+        const recoveryNativeTurn = fiberTurnFor(currentAssistantTurn());
+        if (
+          recoveryCandidate?.nativeProvider === true &&
+          generating &&
+          turnId === recoveryCandidate.turnId &&
+          recoveryCandidate.epoch === epoch &&
+          recoveryCandidate.conversationId === conversationId &&
+          CLF_DOM.conversationId() === recoveryCandidate.conversationId &&
+          recoveryCandidate.userMessageId &&
+          CLF_DOM.messages()
+            .filter((row) => row.role === "user")
+            .at(-1)?.id === recoveryCandidate.userMessageId &&
+          recoveryNativeTurn?.question === recoveryCandidate.userMessageId &&
+          recoveryNativeTurn.endMessageId === recoveryCandidate.terminalMessageId
+        ) {
+          const ended = generationTurn();
+          if (ended && generating && turnId === recoveryCandidate.turnId) {
+            // Preserve the broker's exact restart authority through finishGeneration(). That
+            // function installs the drain barrier and then clears the transient recovery fields;
+            // copying the already-validated candidate here prevents the resulting pending drain
+            // from silently falling back to legacy request-id correlation.
+            nativeProviderRecoveryQuestionId = recoveryCandidate.userMessageId;
+            nativeProviderRecoveryTurnId = recoveryCandidate.turnId;
+            nativeProviderRecoveryFinalMessageId = recoveryCandidate.terminalMessageId;
+            providerDrainRecoveryCandidate = null;
+            finishGeneration(ended, { outcome: "completed" }, false);
+            await flush();
+          }
+        }
+        maybeArmRestartProviderDrainRecovery();
+      }
       // Push page observations immediately after the Fiber pass instead of waiting for the
       // normal recorder debounce. The next fast live pull can then consume them; emit/flush is
       // idempotent at the app boundary, so this tightens latency without manufacturing rows.
@@ -15598,24 +15784,38 @@
       epoch === observedEpoch &&
       conversationId === observedConversation &&
       CLF_DOM.conversationId() === observedConversation &&
-      !generating &&
-      pendingTools === 0;
+      !generating;
     if (generating || !terminal || !pageTurn) return "unreadable";
     for (let attempt = 0; attempt < 2; attempt++) {
       const lightweight = await askFiberTerminal(pageTurn);
-      if (!stillCurrent()) return "unreadable";
+      if (!stillCurrent()) {
+        return "unreadable";
+      }
       if (!lightweight?.endMessageId) continue;
-      if (lightweight.endMessageId !== terminal) return "contradictory";
+      if (lightweight.endMessageId !== terminal) {
+        return "contradictory";
+      }
       const joined = fiberTurnFor(currentAssistantTurn())?.endMessageId || null;
       if (!joined) return "unreadable";
       if (joined !== terminal) return "contradictory";
-      return recordedFinal || fiberTerminalMessageId === terminal ? "confirmed" : "unreadable";
+      const confirmed = recordedFinal || fiberTerminalMessageId === terminal;
+      return confirmed ? "confirmed" : "unreadable";
     }
-    const recovered = await refreshFiber({
-      pageTurnId: pageTurn.id,
-      pageTurn: pageTurn.node || pageTurn.nodes?.[0],
-      terminalProbe: terminal,
-    });
+    // Terminal proof is a read-only identity check. Running the ordinary recorder refresh here
+    // can enter the legacy request-owner handshake for connector calls in this same page turn;
+    // after a tool process/restart failure those request ids may never receive a correlation ACK,
+    // which would wedge an otherwise exact provider-v1 terminal operation inside its proof path.
+    // Presentation-only still performs the route/epoch-qualified MAIN-world Fiber scan and
+    // refreshes the exact DOM<->descriptor stamps/turn cache, but returns before correlation,
+    // journal emission, continuation reconciliation, or any recorder mutation.
+    const recovered = await refreshFiber(
+      {
+        pageTurnId: pageTurn.id,
+        pageTurn: pageTurn.node || pageTurn.nodes?.[0],
+        terminalProbe: terminal,
+      },
+      true,
+    );
     if (!recovered || !stillCurrent()) return "unreadable";
     const joined = fiberTurnFor(currentAssistantTurn())?.endMessageId || null;
     if (!joined) return "unreadable";
@@ -15670,8 +15870,7 @@
       candidate.epoch !== epoch ||
       candidate.conversationId !== conversationId ||
       CLF_DOM.conversationId() !== candidate.conversationId ||
-      generating ||
-      pendingTools !== 0
+      generating
     )
       return false;
     const nativeTurn = fiberTurnFor(currentAssistantTurn());
@@ -15706,10 +15905,6 @@
         }
       }
     }
-    if (providerTurnHasEffectEvidence(nativeTurn)) {
-      candidate.invalidated = true;
-      return false;
-    }
     providerDrainPending = {
       conversationId: candidate.conversationId,
       turnId: candidate.turnId,
@@ -15735,8 +15930,7 @@
       pending.epoch !== epoch ||
       pending.conversationId !== conversationId ||
       CLF_DOM.conversationId() !== pending.conversationId ||
-      generating ||
-      pendingTools !== 0
+      generating
     )
       return false;
     if (providerDrainWork) {
@@ -15754,12 +15948,13 @@
         (pending.recovery === "restart_unsealed" &&
           typeof pending.terminalMessageId === "string" &&
           pending.terminalMessageId.length > 0)) &&
-      !generating &&
-      pendingTools === 0;
+      !generating;
     const work = (async () => {
       // First give turn_end to the worker/app. The probe is authority only when main has durably
       // entered closing for this exact provider turn; ordinary CoS chats return not-applicable.
-      if (!(await flush()) || !current()) return false;
+      if (!(await flush()) || !current()) {
+        return false;
+      }
       let recovery = pending.recovery === "restart_unsealed" ? "restart_unsealed" : null;
       let probe = await ask(
         {
@@ -15826,7 +16021,14 @@
         typeof probeData.drainToken === "string"
           ? probeData.drainToken
           : null;
-      if (!drainToken || !current()) return false;
+      if (!drainToken) {
+        return false;
+      }
+      if (!current()) {
+        return false;
+      }
+      const nativeProviderDrain = probeData.nativeProvider === true;
+      const nativeRecovery = recovery && nativeProviderDrain;
 
       let nativeTurn = null;
       if (pending.outcome === "completed") {
@@ -15837,7 +16039,12 @@
         // general observe timer, which browsers may heavily throttle in hidden provider tabs.
         // No sleep/debounce: each refresh is itself an async page-model round trip.
         for (let attempt = 0; attempt < 3 && current(); attempt++) {
-          const proof = await providerDrainTerminalProof(true, expectedTerminal);
+          let proof;
+          try {
+            proof = await providerDrainTerminalProof(true, expectedTerminal);
+          } catch (error) {
+            throw error;
+          }
           if (proof === "contradictory") {
             if (providerDrainPending === pending) pending.invalidated = true;
             return false;
@@ -15852,8 +16059,36 @@
           // restart barrier retryable; later ordinary Fiber hydration re-enters this path.
           return false;
         }
+        // `pendingTools` is the app's conversation-wide activity count, not authority over this
+        // exact provider turn. A connector request can remain globally "pending" after ChatGPT has
+        // already emitted the exact final/turn_end (for example when its result row is collapsed or
+        // never paired by the page model). Waiting for that global count wedges provider drain and
+        // leaves T3 showing thinking forever. Instead take one final exact page-model refresh while
+        // the old turn is still unfenced; it captures any late call/page activity deterministically.
+        // The later ownership check + flush transfers those rows before the turn fence is installed,
+        // and adapter terminal cleanup settles any genuinely unpaired running tool item at drain.
+        const finalPageTurn = currentAssistantTurn();
+        if (!finalPageTurn) {
+          return false;
+        }
+        let finalRefreshed = false;
+        try {
+          finalRefreshed = await refreshFiber({
+            pageTurnId: finalPageTurn.id || null,
+            localTurnId: pending.turnId,
+            pageTurn: finalPageTurn,
+            nativeProviderDrain,
+          });
+        } catch (error) {
+          return false;
+        }
+        if (!finalRefreshed || !current()) {
+          return false;
+        }
         nativeTurn = fiberTurnFor(currentAssistantTurn());
-        if (!nativeTurn?.endMessageId) return false;
+        if (!nativeTurn?.endMessageId) {
+          return false;
+        }
         if (expectedTerminal && nativeTurn.endMessageId !== expectedTerminal) {
           pending.invalidated = true;
           return false;
@@ -15872,17 +16107,42 @@
 
       const calls = [...(nativeTurn.calls || [])];
       const browserNoEffects = !providerTurnHasEffectEvidence(nativeTurn);
-      if (recovery && !browserNoEffects) {
+      // The legacy restart-drain route has no exact provider-v1 operation WAL, so it must remain
+      // effect-free. Native provider-v1 is different: the broker has already matched this probe to
+      // the exact operation + conversation + provider turn, and the provider WAL owns every live
+      // assistant/tool revision. For that route, retain effectful recovery after the final exact
+      // Fiber refresh and request-owner checks below rather than wedging a terminal turn forever.
+      if (recovery && !nativeRecovery && !browserNoEffects) {
         pending.invalidated = true;
         return false;
       }
-      if (calls.some((call) => !call?.requestId)) return false;
-      await confirmLiveRequestOwners(calls, pending.conversationId, current);
-      if (
-        !current() ||
-        calls.some((call) => requestOwnersConfirmed.get(call.requestId) !== pending.conversationId)
-      )
+      // Legacy correlation cannot safely place a connector row without request_id. Native
+      // provider-v1 recovery does not use that registry: the broker has already bound this exact
+      // browser turn to one durable operation, and tool revisions are keyed by the page's stable
+      // tool message id under that exact turn. Preserve request-id strictness everywhere else,
+      // but do not let a provider-native terminal wait forever on metadata ChatGPT never emitted.
+      if (!nativeProviderDrain && calls.some((call) => !call?.requestId)) {
         return false;
+      }
+      if (!nativeProviderDrain) {
+        await confirmLiveRequestOwners(calls, pending.conversationId, current);
+        if (
+          !current() ||
+          calls.some(
+            (call) => requestOwnersConfirmed.get(call.requestId) !== pending.conversationId,
+          )
+        )
+          return false;
+      }
+      // Exact provider-v1 drain must not depend on the legacy CoS correlation registry, whether
+      // this is an ordinary live close or restart recovery. The native probe above has already
+      // matched one durable provider operation to
+      // this exact conversation + provider turn, and the final Fiber refresh re-proved the same
+      // page turn/final identity after every pre-fence event was flushed through the native
+      // journal. A connector request can legitimately remain unacknowledged in the legacy
+      // registry after its external tool process failed or restarted; requiring that separate
+      // read-back here wedges an otherwise terminal native operation forever. Non-provider/legacy
+      // paths retain the correlation ACK requirement unchanged.
 
       const terminalMessageId = nativeTurn.endMessageId || null;
       const settledPageTurn =
@@ -15901,8 +16161,9 @@
       providerDrainFences.set(pending.turnId, fence);
       // From this point the exact old Fiber turn can update local dedupe bookkeeping but cannot
       // enqueue another provider-visible row. Transfer every pre-fence row to worker custody.
-      if (!(await flush()) || !current() || providerDrainFences.get(pending.turnId) !== fence)
+      if (!(await flush()) || !current() || providerDrainFences.get(pending.turnId) !== fence) {
         return false;
+      }
       const commit = await ask(
         {
           type: "provider_turn_drain_ready",
@@ -17732,6 +17993,14 @@
             typeof message.providerTurnId === "string" && message.providerTurnId.length <= 256
               ? message.providerTurnId
               : null;
+          const brokerFinalMessageId =
+            typeof message.finalMessageId === "string" && message.finalMessageId.length <= 256
+              ? message.finalMessageId
+              : null;
+          const needsTerminalFinalRecovery =
+            message.state === "terminal" &&
+            message.terminalStatus === "completed" &&
+            message.finalObserved !== true;
           const recoveryTurnId =
             typeof message.recoveryTurnId === "string" &&
             /^r-[a-f0-9-]{36}$/i.test(message.recoveryTurnId)
@@ -17739,6 +18008,10 @@
               : null;
           if (!expectedConversation || currentConversation !== expectedConversation) {
             sendResponse({ ok: false, error: "native_conversation_mismatch" });
+            return;
+          }
+          if (providerTurnId && turnId && turnId !== providerTurnId) {
+            sendResponse({ ok: false, error: "native_turn_conflict" });
             return;
           }
           // Native provider-v1 already durably owns this exact conversation/question. That exact
@@ -17758,6 +18031,8 @@
               return;
             }
             nativeProviderRecoveryQuestionId = userMessageId;
+            nativeProviderRecoveryTurnId = providerTurnId || recoveryTurnId;
+            nativeProviderRecoveryFinalMessageId = brokerFinalMessageId;
           }
           // If the browser was restarted after Send but before turn_start reached the broker,
           // reopen the normal recorder lifecycle under a deterministic operation-scoped id and
@@ -17765,17 +18040,21 @@
           // for final text, outcome and turn_end.
           resumeIdentityPending = false;
           if (providerTurnId) {
-            if (turnId && turnId !== providerTurnId) {
-              sendResponse({ ok: false, error: "native_turn_conflict" });
-              return;
-            }
             appActiveTurnId = providerTurnId;
             // `finishGeneration()` deliberately keeps `turnId` as a settled tombstone. If the
             // provider still says this exact operation is sent/running, an idle recorder with the
             // same turn id is not proof that observation completed; re-adopt that same turn under
-            // the exact conversation/question fence above. A provider-terminal row is already
-            // closed; only the broker's exact invalid-drain repair may regress one to running.
-            if (!generating && (message.state === "sent" || message.state === "running")) {
+            // the exact conversation/question fence above. A completed terminal row also needs one
+            // re-adoption after broker restart when its volatile final body is absent. The exact
+            // newest-question/page-model gate above is what makes the already-settled Fiber final
+            // reusable; broker `finalObserved` turns this recovery back off as soon as that body is
+            // republished. A known final id alone is not enough because the broker needs the body.
+            if (
+              !generating &&
+              (message.state === "sent" ||
+                message.state === "running" ||
+                needsTerminalFinalRecovery)
+            ) {
               adoptOpenTurn(providerTurnId, userMessageId);
             }
           } else if (
@@ -17794,6 +18073,84 @@
           }
           if (recorderHandle.healthy()) observe();
           await flush();
+          // A broker-terminal recovery can deliberately re-adopt an already-settled page turn so
+          // its volatile final body is republished after browser restart. If the ordinary recorder
+          // cannot close that synthetic generation because ChatGPT omitted the historical
+          // question backlink, do not leave the provider wedged in `generating`: once the broker
+          // confirms it already owns the final body, require one fresh Fiber read to match the
+          // broker's exact final message id, under the exact conversation/newest-user/turn fences
+          // established above, then close only that adopted provider turn. This never guesses from
+          // text, DOM position, quiet time, or the conversation-wide pending-tools count.
+          if (
+            providerTurnId &&
+            userMessageId &&
+            brokerFinalMessageId &&
+            message.state === "terminal" &&
+            message.terminalStatus === "completed" &&
+            message.finalObserved === true
+          ) {
+            const pageTurn = currentAssistantTurn();
+            if (
+              pageTurn &&
+              (await refreshFiber({
+                pageTurnId: pageTurn.id || null,
+                localTurnId: providerTurnId,
+                pageTurn,
+              })) &&
+              CLF_DOM.conversationId() === expectedConversation
+            ) {
+              const exactTurn = fiberTurnFor(currentAssistantTurn());
+              if (
+                exactTurn?.question === userMessageId &&
+                exactTurn.endMessageId === brokerFinalMessageId
+              ) {
+                if (generating && turnId === providerTurnId) {
+                  const ended = generationTurn();
+                  if (ended && generating && turnId === providerTurnId) {
+                    finishGeneration(ended, { outcome: "completed" }, false);
+                    await flush();
+                  }
+                }
+                // A replacement document can already be idle when the broker refresh arrives:
+                // the exact final/terminal was durable before this document existed, so there is
+                // no local generation left to close. The broker-owned conversation + question +
+                // provider turn + final identity above, freshly re-proved by Fiber, is sufficient
+                // to enter the *normal* two-phase browser drain protocol. This does not synthesize
+                // a server-side drain or skip settlement: maybePublishProviderDrainReady() first
+                // flushes, probes the exact provider operation, installs its page fence, flushes
+                // again, and only then commits the broker-issued drain token.
+                if (!generating) {
+                  if (
+                    providerDrainPending &&
+                    (providerDrainPending.conversationId !== expectedConversation ||
+                      providerDrainPending.turnId !== providerTurnId)
+                  ) {
+                    sendResponse({ ok: false, error: "native_drain_turn_conflict" });
+                    return;
+                  }
+                  if (!providerDrainPending) {
+                    providerDrainPending = {
+                      conversationId: expectedConversation,
+                      turnId: providerTurnId,
+                      outcome: "completed",
+                      epoch,
+                      terminalMessageId: brokerFinalMessageId,
+                      terminalSeq: null,
+                      recovery: "restart_unsealed",
+                      invalidated: false,
+                    };
+                    providerDrainRetryPending = false;
+                  }
+                  if (
+                    providerDrainRecoveryCandidate?.conversationId === expectedConversation &&
+                    providerDrainRecoveryCandidate.turnId === providerTurnId
+                  )
+                    providerDrainRecoveryCandidate = null;
+                  await maybePublishProviderDrainReady();
+                }
+              }
+            }
+          }
           sendResponse({ ok: true, conversationId: CLF_DOM.conversationId(), turnId });
         })().catch(() => sendResponse({ ok: false }));
         return true;

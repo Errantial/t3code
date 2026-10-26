@@ -2803,7 +2803,9 @@
       seen = new Set(),
       callSources = new Map(),
       executionIds = [],
+      builtInActivities = [],
       images = new Map();
+    let webSearchOrdinal = 0;
     let lastAnswer = null;
     const remember = (id) => {
       if (!id || seen.has(id)) return false;
@@ -2898,6 +2900,32 @@
             : [item];
         for (const step of steps) {
           if (++work > MAX_ROWS) return null;
+          if (
+            step?.type === "web-search" &&
+            step.action &&
+            typeof step.action === "object" &&
+            step.action.type === "search" &&
+            typeof step.completed === "boolean"
+          ) {
+            builtInActivities.push({
+              structuralKind: "web-search",
+              structuralOrdinal: webSearchOrdinal,
+              structuralKey: `web-search:${webSearchOrdinal++}`,
+              label: "Web search",
+              activeNow: step.completed !== true,
+            });
+          }
+          if (step?.type === "chatgpt-python-execution") {
+            const id = str(step.id);
+            const activeNow =
+              step.status === "running" ? true : step.status === "completed" ? false : null;
+            if (id && activeNow !== null)
+              builtInActivities.push({
+                messageId: id,
+                label: "Python",
+                activeNow,
+              });
+          }
           if (step?.type === "assistant-message" && item !== step) {
             // Interim prose whatever phase it carries: only a top-level answer can end the turn.
             const id = str(step.messageId),
@@ -2970,6 +2998,7 @@
       slots,
       callSources,
       executionIds,
+      builtInActivities,
       images,
       endMessageId: imageAnswer ? imageEnd : turnEndMessageId(messages),
     };
@@ -3162,7 +3191,9 @@
           exactImageNodes,
           shell?.images,
         );
-        const activities = nativeActivities.events;
+        const activities = shell
+          ? [...nativeActivities.events, ...shell.builtInActivities]
+          : nativeActivities.events;
         const endMessageId = shell ? shell.endMessageId : turnEndMessageId(messages);
         const trace = shell ? shellTurnTrace(shell) : [];
         // The shell supplies the completed final item's own exact message id,

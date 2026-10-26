@@ -88,9 +88,9 @@ export const ChatGptBrowserProviderCapabilitiesV2 = {
     emitsMessageCompleted: true,
   },
   tools: {
-    exposesToolItemIds: false,
-    emitsToolStarted: false,
-    emitsToolCompleted: false,
+    exposesToolItemIds: true,
+    emitsToolStarted: true,
+    emitsToolCompleted: true,
     emitsToolOutput: false,
     supportsMcpTools: false,
     supportsDynamicToolCallbacks: false,
@@ -139,7 +139,7 @@ export const ChatGptBrowserProviderCapabilitiesV2 = {
   identity: {
     nativeThreadIds: "none",
     nativeTurnIds: "none",
-    nativeItemIds: "none",
+    nativeItemIds: "strong",
     nativeRequestIds: "none",
   },
   runtimePolicy: { enforcement: "client-boundary" },
@@ -166,7 +166,23 @@ interface ActiveTurn {
   readonly input: ProviderAdapter.ProviderAdapterV2TurnInput;
   readonly operationId: ChatGptBrowserProviderOperationId;
   providerTurn: OrchestrationV2ProviderTurn;
-  assistantMessage: OrchestrationV2ConversationMessage | undefined;
+  readonly assistantItems: Map<
+    string,
+    {
+      readonly liveOrdinal: number;
+      readonly node: OrchestrationV2ExecutionNode;
+      readonly message: OrchestrationV2ConversationMessage;
+      readonly turnItem: Extract<OrchestrationV2TurnItem, { type: "assistant_message" }>;
+    }
+  >;
+  readonly toolItems: Map<
+    string,
+    {
+      readonly liveOrdinal: number;
+      readonly node: OrchestrationV2ExecutionNode;
+      readonly turnItem: Extract<OrchestrationV2TurnItem, { type: "dynamic_tool" }>;
+    }
+  >;
   terminal:
     | {
         readonly sequence: number;
@@ -407,48 +423,195 @@ export const makeChatGptBrowserAdapterV2 = Effect.fn("makeChatGptBrowserAdapterV
         return thread;
       });
 
+      const liveItemOrdinal = (ordinal: number) => (ordinal + 1) * 2;
+      const nextControlItemOrdinal = (turn: ActiveTurn) => {
+        const ordinal = turn.nextItemOrdinal;
+        turn.nextItemOrdinal += 2;
+        return ordinal;
+      };
+      const checkpointFor = (
+        turn: ActiveTurn,
+        checkpointSequence?: ChatGptBrowserProviderV1EventSequence,
+      ) =>
+        checkpointSequence === undefined
+          ? undefined
+          : operationStore.advanceHighWater({
+              attemptId: turn.input.attemptId,
+              providerOperationId: turn.operationId,
+              sequence: checkpointSequence,
+            });
+
       const updateAssistant = Effect.fnUntraced(function* (
         turn: ActiveTurn,
+        itemId: string,
+        liveOrdinal: number,
         text: string,
         streaming: boolean,
+        settledStatus: "completed" | "cancelled" | "interrupted" | "failed" = "completed",
         checkpointSequence?: ChatGptBrowserProviderV1EventSequence,
       ) {
         const timestamp = yield* DateTime.now;
-        const previous = turn.assistantMessage;
-        const message: OrchestrationV2ConversationMessage = {
+        const previous = turn.assistantItems.get(itemId);
+        const nativeItemId = `assistant:${turn.operationId}:${itemId}`;
+        const nativeItemRef = {
+          driver: CHATGPT_BROWSER_DRIVER_KIND,
+          nativeId: itemId,
+          strength: "strong" as const,
+        };
+        const ordinal = liveItemOrdinal(previous?.liveOrdinal ?? liveOrdinal);
+        turn.nextItemOrdinal = Math.max(turn.nextItemOrdinal, ordinal + 1);
+        const startedAt = previous?.turnItem.startedAt ?? timestamp;
+        const completedAt = streaming ? null : timestamp;
+        const itemStatus = streaming ? "running" : settledStatus;
+        const node: OrchestrationV2ExecutionNode = {
           id:
-            previous?.id ??
-            idAllocator.derive.messageFromProviderItem({
+            previous?.node.id ??
+            idAllocator.derive.nodeFromProviderItem({
               driver: CHATGPT_BROWSER_DRIVER_KIND,
-              nativeItemId: `assistant:${turn.operationId}`,
+              nativeItemId,
             }),
           threadId: turn.input.threadId,
           runId: turn.input.runId,
-          nodeId: turn.input.rootNodeId,
+          parentNodeId: turn.input.rootNodeId,
+          rootNodeId: turn.input.rootNodeId,
+          kind: "assistant_message",
+          status: itemStatus,
+          countsForRun: false,
+          providerThreadId: turn.providerTurn.providerThreadId,
+          providerTurnId: turn.providerTurn.id,
+          nativeItemRef,
+          runtimeRequestId: null,
+          checkpointScopeId: null,
+          startedAt,
+          completedAt,
+        };
+        const message: OrchestrationV2ConversationMessage = {
+          id:
+            previous?.message.id ??
+            idAllocator.derive.messageFromProviderItem({
+              driver: CHATGPT_BROWSER_DRIVER_KIND,
+              nativeItemId,
+            }),
+          threadId: turn.input.threadId,
+          runId: turn.input.runId,
+          nodeId: node.id,
           role: "assistant",
           text,
           attachments: [],
           streaming,
           createdBy: "agent",
           creationSource: "provider",
-          createdAt: previous?.createdAt ?? timestamp,
+          createdAt: previous?.message.createdAt ?? timestamp,
           updatedAt: timestamp,
         };
-        turn.assistantMessage = message;
-        const event: ProviderAdapter.ProviderAdapterV2Event = {
-          type: "message.updated",
-          driver: CHATGPT_BROWSER_DRIVER_KIND,
-          message,
+        const turnItem: Extract<OrchestrationV2TurnItem, { type: "assistant_message" }> = {
+          id:
+            previous?.turnItem.id ??
+            idAllocator.derive.turnItemFromProviderItem({
+              driver: CHATGPT_BROWSER_DRIVER_KIND,
+              nativeItemId,
+            }),
+          threadId: turn.input.threadId,
+          runId: turn.input.runId,
+          nodeId: node.id,
+          providerThreadId: turn.providerTurn.providerThreadId,
+          providerTurnId: turn.providerTurn.id,
+          nativeItemRef,
+          parentItemId: null,
+          ordinal,
+          status: itemStatus,
+          title: null,
+          startedAt,
+          completedAt,
+          updatedAt: timestamp,
+          type: "assistant_message",
+          messageId: message.id,
+          text,
+          streaming,
         };
+        turn.assistantItems.set(itemId, { liveOrdinal, node, message, turnItem });
+        yield* emit({ type: "node.updated", driver: CHATGPT_BROWSER_DRIVER_KIND, node });
+        yield* emit({ type: "message.updated", driver: CHATGPT_BROWSER_DRIVER_KIND, message });
         yield* emit(
-          event,
-          checkpointSequence === undefined
-            ? undefined
-            : operationStore.advanceHighWater({
-                attemptId: turn.input.attemptId,
-                providerOperationId: turn.operationId,
-                sequence: checkpointSequence,
-              }),
+          { type: "turn_item.updated", driver: CHATGPT_BROWSER_DRIVER_KIND, turnItem },
+          checkpointFor(turn, checkpointSequence),
+        );
+      });
+
+      const updateTool = Effect.fnUntraced(function* (
+        turn: ActiveTurn,
+        itemId: string,
+        liveOrdinal: number,
+        toolName: string | undefined,
+        title: string | undefined,
+        output: string | undefined,
+        status: "running" | "completed",
+        checkpointSequence?: ChatGptBrowserProviderV1EventSequence,
+      ) {
+        const timestamp = yield* DateTime.now;
+        const previous = turn.toolItems.get(itemId);
+        const nativeItemId = `tool:${turn.operationId}:${itemId}`;
+        const nativeItemRef = {
+          driver: CHATGPT_BROWSER_DRIVER_KIND,
+          nativeId: itemId,
+          strength: "strong" as const,
+        };
+        const ordinal = liveItemOrdinal(previous?.liveOrdinal ?? liveOrdinal);
+        turn.nextItemOrdinal = Math.max(turn.nextItemOrdinal, ordinal + 1);
+        const startedAt = previous?.turnItem.startedAt ?? timestamp;
+        const completedAt = status === "completed" ? timestamp : null;
+        const node: OrchestrationV2ExecutionNode = {
+          id:
+            previous?.node.id ??
+            idAllocator.derive.nodeFromProviderItem({
+              driver: CHATGPT_BROWSER_DRIVER_KIND,
+              nativeItemId,
+            }),
+          threadId: turn.input.threadId,
+          runId: turn.input.runId,
+          parentNodeId: turn.input.rootNodeId,
+          rootNodeId: turn.input.rootNodeId,
+          kind: "tool_call",
+          status,
+          countsForRun: false,
+          providerThreadId: turn.providerTurn.providerThreadId,
+          providerTurnId: turn.providerTurn.id,
+          nativeItemRef,
+          runtimeRequestId: null,
+          checkpointScopeId: null,
+          startedAt,
+          completedAt,
+        };
+        const turnItem: Extract<OrchestrationV2TurnItem, { type: "dynamic_tool" }> = {
+          id:
+            previous?.turnItem.id ??
+            idAllocator.derive.turnItemFromProviderItem({
+              driver: CHATGPT_BROWSER_DRIVER_KIND,
+              nativeItemId,
+            }),
+          threadId: turn.input.threadId,
+          runId: turn.input.runId,
+          nodeId: node.id,
+          providerThreadId: turn.providerTurn.providerThreadId,
+          providerTurnId: turn.providerTurn.id,
+          nativeItemRef,
+          parentItemId: null,
+          ordinal,
+          status,
+          title: title ?? toolName ?? null,
+          startedAt,
+          completedAt,
+          updatedAt: timestamp,
+          type: "dynamic_tool",
+          toolName: toolName ?? null,
+          input: {},
+          ...(output === undefined ? {} : { output }),
+        };
+        turn.toolItems.set(itemId, { liveOrdinal, node, turnItem });
+        yield* emit({ type: "node.updated", driver: CHATGPT_BROWSER_DRIVER_KIND, node });
+        yield* emit(
+          { type: "turn_item.updated", driver: CHATGPT_BROWSER_DRIVER_KIND, turnItem },
+          checkpointFor(turn, checkpointSequence),
         );
       });
 
@@ -516,8 +679,39 @@ export const makeChatGptBrowserAdapterV2 = Effect.fn("makeChatGptBrowserAdapterV
         if (turn.finished || active !== turn) return;
         turn.finished = true;
         const completedAt = yield* DateTime.now;
-        if (turn.assistantMessage?.streaming) {
-          yield* updateAssistant(turn, turn.assistantMessage.text, false);
+        for (const [itemId, assistant] of turn.assistantItems) {
+          if (!assistant.message.streaming) continue;
+          yield* updateAssistant(
+            turn,
+            itemId,
+            assistant.liveOrdinal,
+            assistant.message.text,
+            false,
+            status,
+          );
+        }
+        for (const [itemId, tool] of turn.toolItems) {
+          if (tool.turnItem.status !== "running") continue;
+          const itemStatus: OrchestrationV2ExecutionNode["status"] =
+            status === "completed" ? "completed" : status;
+          const node: OrchestrationV2ExecutionNode = {
+            ...tool.node,
+            status: itemStatus,
+            completedAt,
+          };
+          const turnItem: Extract<OrchestrationV2TurnItem, { type: "dynamic_tool" }> = {
+            ...tool.turnItem,
+            status: itemStatus,
+            completedAt,
+            updatedAt: completedAt,
+          };
+          turn.toolItems.set(itemId, { ...tool, node, turnItem });
+          yield* emit({ type: "node.updated", driver: CHATGPT_BROWSER_DRIVER_KIND, node });
+          yield* emit({
+            type: "turn_item.updated",
+            driver: CHATGPT_BROWSER_DRIVER_KIND,
+            turnItem,
+          });
         }
         if (turn.approval) {
           yield* emit({
@@ -571,7 +765,7 @@ export const makeChatGptBrowserAdapterV2 = Effect.fn("makeChatGptBrowserAdapterV
             nodeId: turn.input.rootNodeId,
             providerThreadId: turn.providerTurn.providerThreadId,
             providerTurnId: turn.providerTurn.id,
-            itemOrdinal: turn.nextItemOrdinal++,
+            itemOrdinal: nextControlItemOrdinal(turn),
             failure,
             occurredAt: completedAt,
           });
@@ -657,18 +851,54 @@ export const makeChatGptBrowserAdapterV2 = Effect.fn("makeChatGptBrowserAdapterV
             pageAdvanced = true;
             cursor = event.sequence;
             switch (event.payload.type) {
-              case "assistant.delta":
+              case "assistant.delta": {
+                const itemId = `operation:${turn.operationId}`;
+                const previous = turn.assistantItems.get(itemId);
                 yield* updateAssistant(
                   turn,
-                  `${turn.assistantMessage?.text ?? ""}${event.payload.text}`,
+                  itemId,
+                  previous?.liveOrdinal ?? 0,
+                  `${previous?.message.text ?? ""}${event.payload.text}`,
                   true,
+                  "completed",
+                  event.sequence,
                 );
                 break;
-              case "assistant.final":
+              }
+              case "assistant.revision":
                 yield* updateAssistant(
                   turn,
+                  event.payload.itemId,
+                  event.payload.ordinal,
+                  event.payload.text,
+                  true,
+                  "completed",
+                  event.sequence,
+                );
+                break;
+              case "assistant.final": {
+                const itemId = event.payload.itemId ?? `operation:${turn.operationId}`;
+                const previous = turn.assistantItems.get(itemId);
+                yield* updateAssistant(
+                  turn,
+                  itemId,
+                  event.payload.ordinal ?? previous?.liveOrdinal ?? 0,
                   yield* readFinalText(transport, turn, event.payload),
                   false,
+                  "completed",
+                  event.sequence,
+                );
+                break;
+              }
+              case "tool.revision":
+                yield* updateTool(
+                  turn,
+                  event.payload.itemId,
+                  event.payload.ordinal,
+                  event.payload.toolName,
+                  event.payload.title,
+                  event.payload.output,
+                  event.payload.status,
                   event.sequence,
                 );
                 break;
@@ -891,7 +1121,7 @@ export const makeChatGptBrowserAdapterV2 = Effect.fn("makeChatGptBrowserAdapterV
             providerTurnId: turn.providerTurn.id,
             nativeItemRef: node.nativeItemRef,
             parentItemId: null,
-            ordinal: turn.nextItemOrdinal++,
+            ordinal: nextControlItemOrdinal(turn),
             status: "waiting",
             title: null,
             startedAt: createdAt,
@@ -1144,7 +1374,8 @@ export const makeChatGptBrowserAdapterV2 = Effect.fn("makeChatGptBrowserAdapterV
           input: args,
           operationId,
           providerTurn,
-          assistantMessage: undefined,
+          assistantItems: new Map(),
+          toolItems: new Map(),
           terminal: undefined,
           interruptRequested: recovery.cancelRequested,
           finished: false,
@@ -1173,7 +1404,12 @@ export const makeChatGptBrowserAdapterV2 = Effect.fn("makeChatGptBrowserAdapterV
           }
         }
         yield* watchApprovals(turn).pipe(Effect.forkIn(scope));
-        yield* consumeOperation(turn, persisted.consumerHighWater).pipe(
+        // Provider WAL replay is also the adapter's bounded current-state hydration after a
+        // process restart. Superseded live revisions are compacted in the provider WAL, so replay
+        // from zero reconstitutes each stable assistant/tool item without replaying an unbounded
+        // draft history. The persisted consumer high-water remains the durable commit watermark:
+        // checkpointing an already-consumed sequence is monotonic/idempotent in the T3 store.
+        yield* consumeOperation(turn, ChatGptBrowserProviderV1EventSequence.make(0)).pipe(
           Effect.catch((cause) => failBackground(turn, cause)),
           Effect.forkIn(scope),
         );

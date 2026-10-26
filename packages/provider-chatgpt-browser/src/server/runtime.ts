@@ -55,8 +55,25 @@ export interface ChatGptBrowserProviderBrowserObservation {
   /** Exact browser-side proof that the one-time Send authorization fence has been crossed. */
   readonly sendAuthorized?: boolean;
   readonly terminalStatus?: ChatGptBrowserProviderV1TerminalStatus;
+  /** Exact-owned browser message snapshots. Revisions replace by item id; the WAL sequences them. */
+  readonly assistantRevisions?: ReadonlyArray<{
+    readonly itemId: string;
+    readonly order: number;
+    readonly text: string;
+  }>;
+  /** Exact-owned native tool snapshots. No arguments or page-private payloads cross this boundary. */
+  readonly toolRevisions?: ReadonlyArray<{
+    readonly itemId: string;
+    readonly order: number;
+    readonly toolName?: string;
+    readonly title?: string;
+    readonly output?: string;
+    readonly status: "running" | "completed";
+  }>;
   /** Canonical complete assistant final. No interim or presentation text is accepted here. */
   readonly finalText?: string;
+  /** Stable browser message identity for the canonical final, when the page exposes one. */
+  readonly finalMessageId?: string;
 }
 
 export interface ChatGptBrowserProviderBrowserSession {
@@ -122,11 +139,29 @@ interface DurableOperation {
   readonly dispatchState: "prepared" | "dispatched";
   readonly state: "claimed" | "sent" | "running" | "terminal" | "drained";
   readonly nativeIdentity: ChatGptBrowserProviderV1NativeIdentity;
+  /** Monotonic provider event sequence, independent from compacted retained event rows. */
+  readonly highWater: number;
   readonly events: ReadonlyArray<ChatGptBrowserProviderV1CoreEvent>;
+  readonly assistantRevisions?: ReadonlyArray<{
+    readonly itemId: string;
+    readonly ordinal: number;
+    readonly text: string;
+  }>;
+  readonly toolRevisions?: ReadonlyArray<{
+    readonly itemId: string;
+    readonly ordinal: number;
+    readonly toolName?: string;
+    readonly title?: string;
+    readonly output?: string;
+    readonly status: "running" | "completed";
+  }>;
   readonly finalText?: string;
+  readonly finalMessageId?: string;
 }
 
 const terminalStates = new Set<DurableOperation["state"]>(["terminal", "drained"]);
+const MAX_LIVE_REVISION_ITEMS = 256;
+const MAX_LIVE_REVISION_BYTES = 4 * 1024 * 1024;
 const stateRank: Record<DurableOperation["state"], number> = {
   claimed: 0,
   sent: 1,
@@ -155,6 +190,33 @@ const hostFailure = (operation: string, cause?: unknown) =>
 
 const sha256 = (value: string): string => createHash("sha256").update(value, "utf8").digest("hex");
 const fileName = (operationId: string): string => `${sha256(operationId)}.json`;
+
+function liveRevisionBudget(
+  assistantRevisions: DurableOperation["assistantRevisions"],
+  toolRevisions: DurableOperation["toolRevisions"],
+): { readonly items: number; readonly bytes: number } {
+  const assistants = assistantRevisions ?? [];
+  const tools = toolRevisions ?? [];
+  let bytes = 0;
+  for (const revision of assistants) {
+    bytes += Buffer.byteLength(revision.itemId, "utf8") + Buffer.byteLength(revision.text, "utf8");
+  }
+  for (const revision of tools) {
+    bytes += Buffer.byteLength(revision.itemId, "utf8");
+    if (revision.toolName) bytes += Buffer.byteLength(revision.toolName, "utf8");
+    if (revision.title) bytes += Buffer.byteLength(revision.title, "utf8");
+    if (revision.output) bytes += Buffer.byteLength(revision.output, "utf8");
+  }
+  return { items: assistants.length + tools.length, bytes };
+}
+
+function liveRevisionBudgetValid(
+  assistantRevisions: DurableOperation["assistantRevisions"],
+  toolRevisions: DurableOperation["toolRevisions"],
+): boolean {
+  const budget = liveRevisionBudget(assistantRevisions, toolRevisions);
+  return budget.items <= MAX_LIVE_REVISION_ITEMS && budget.bytes <= MAX_LIVE_REVISION_BYTES;
+}
 
 function parseOperation(value: unknown): DurableOperation | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
@@ -185,7 +247,65 @@ function parseOperation(value: unknown): DurableOperation | null {
       return null;
     previousSequence = event.sequence;
   }
-  return { ...row, events } as DurableOperation;
+  const highWater = row.highWater ?? Math.max(0, previousSequence);
+  if (!Number.isSafeInteger(highWater) || highWater < Math.max(0, previousSequence)) return null;
+  const assistantRevisions = row.assistantRevisions;
+  if (
+    assistantRevisions !== undefined &&
+    (!Array.isArray(assistantRevisions) ||
+      assistantRevisions.some(
+        (revision) =>
+          !revision ||
+          typeof revision !== "object" ||
+          typeof revision.itemId !== "string" ||
+          revision.itemId.length === 0 ||
+          revision.itemId.length > 256 ||
+          !Number.isSafeInteger(revision.ordinal) ||
+          revision.ordinal < 0 ||
+          typeof revision.text !== "string" ||
+          revision.text.length > 65_536,
+      ))
+  ) {
+    return null;
+  }
+  const toolRevisions = row.toolRevisions;
+  if (
+    toolRevisions !== undefined &&
+    (!Array.isArray(toolRevisions) ||
+      toolRevisions.some(
+        (revision) =>
+          !revision ||
+          typeof revision !== "object" ||
+          typeof revision.itemId !== "string" ||
+          revision.itemId.length === 0 ||
+          revision.itemId.length > 256 ||
+          !Number.isSafeInteger(revision.ordinal) ||
+          revision.ordinal < 0 ||
+          (revision.toolName !== undefined &&
+            (typeof revision.toolName !== "string" ||
+              revision.toolName.length === 0 ||
+              revision.toolName.length > 128)) ||
+          (revision.title !== undefined &&
+            (typeof revision.title !== "string" ||
+              revision.title.length === 0 ||
+              revision.title.length > 512)) ||
+          (revision.output !== undefined &&
+            (typeof revision.output !== "string" || revision.output.length > 32_768)) ||
+          (revision.status !== "running" && revision.status !== "completed"),
+      ))
+  ) {
+    return null;
+  }
+  if (
+    row.finalMessageId !== undefined &&
+    (typeof row.finalMessageId !== "string" ||
+      row.finalMessageId.length === 0 ||
+      row.finalMessageId.length > 256)
+  ) {
+    return null;
+  }
+  if (!liveRevisionBudgetValid(assistantRevisions, toolRevisions)) return null;
+  return { ...row, highWater, events } as DurableOperation;
 }
 
 class ProviderWal {
@@ -321,20 +441,28 @@ class OperationSerial {
   }
 }
 
-function nextSequence(record: DurableOperation): number {
-  return (record.events.at(-1)?.sequence ?? 0) + 1;
-}
-
 function appendEvent(
   record: DurableOperation,
   payload: ChatGptBrowserProviderV1CoreEvent["payload"],
 ): DurableOperation {
+  const sequence = record.highWater + 1;
   const event: ChatGptBrowserProviderV1CoreEvent = {
     providerOperationId: record.providerOperationId as ChatGptBrowserProviderOperationId,
-    sequence: ChatGptBrowserProviderV1EventSequence.make(nextSequence(record)),
+    sequence: ChatGptBrowserProviderV1EventSequence.make(sequence),
     payload,
   };
-  return { ...record, events: [...record.events, event] };
+  // Live snapshots replace older snapshots for the same exact item. Keep the sequence high-water
+  // monotonic while compacting superseded text/tool bodies out of the durable WAL. A consumer
+  // behind the removed row reconstructs the same current state from the newer snapshot; a
+  // consumer ahead of it still receives the newer sequence as the next update.
+  const retained =
+    payload.type === "assistant.revision" || payload.type === "tool.revision"
+      ? record.events.filter(
+          (candidate) =>
+            candidate.payload.type !== payload.type || candidate.payload.itemId !== payload.itemId,
+        )
+      : record.events;
+  return { ...record, highWater: sequence, events: [...retained, event] };
 }
 
 function mergeNativeIdentity(
@@ -373,6 +501,12 @@ async function syncObservation(
 ): Promise<DurableOperation> {
   if (observation.providerOperationId !== record.providerOperationId)
     throw new Error("provider_operation_mismatch");
+  // Drain seals the exact provider event log. Validate that a late observation does not claim a
+  // conflicting browser identity, but never append or mutate semantic state after drain.
+  if (record.state === "drained") {
+    mergeNativeIdentity(record.nativeIdentity, observation.nativeIdentity);
+    return record;
+  }
   let next: DurableOperation = {
     ...record,
     nativeIdentity: mergeNativeIdentity(record.nativeIdentity, observation.nativeIdentity),
@@ -380,13 +514,115 @@ async function syncObservation(
       stateRank[observation.state] > stateRank[record.state] ? observation.state : record.state,
   };
 
+  if (observation.assistantRevisions !== undefined || observation.toolRevisions !== undefined) {
+    const assistantRevisions = new Map(
+      (next.assistantRevisions ?? []).map((value) => [value.itemId, value]),
+    );
+    const toolRevisions = new Map((next.toolRevisions ?? []).map((value) => [value.itemId, value]));
+    const incoming = [
+      ...(observation.assistantRevisions ?? []).map((revision) => ({
+        kind: "assistant" as const,
+        revision,
+      })),
+      ...(observation.toolRevisions ?? []).map((revision) => ({
+        kind: "tool" as const,
+        revision,
+      })),
+    ].sort((left, right) => left.revision.order - right.revision.order);
+    for (const item of incoming) {
+      if (item.kind === "assistant") {
+        const previous = assistantRevisions.get(item.revision.itemId);
+        if (previous?.text === item.revision.text) continue;
+        if (!Number.isSafeInteger(item.revision.order) || item.revision.order < 0)
+          throw new Error("provider_live_order_invalid");
+        const ordinal = previous?.ordinal ?? item.revision.order;
+        next = appendEvent(next, {
+          type: "assistant.revision",
+          itemId: item.revision.itemId,
+          ordinal,
+          text: item.revision.text,
+        });
+        assistantRevisions.set(item.revision.itemId, {
+          itemId: item.revision.itemId,
+          ordinal,
+          text: item.revision.text,
+        });
+        continue;
+      }
+      const previous = toolRevisions.get(item.revision.itemId);
+      if (
+        previous?.toolName === item.revision.toolName &&
+        previous?.title === item.revision.title &&
+        previous?.output === item.revision.output &&
+        previous?.status === item.revision.status
+      ) {
+        continue;
+      }
+      if (!Number.isSafeInteger(item.revision.order) || item.revision.order < 0)
+        throw new Error("provider_live_order_invalid");
+      const ordinal = previous?.ordinal ?? item.revision.order;
+      next = appendEvent(next, {
+        type: "tool.revision",
+        itemId: item.revision.itemId,
+        ordinal,
+        ...(item.revision.toolName === undefined ? {} : { toolName: item.revision.toolName }),
+        ...(item.revision.title === undefined ? {} : { title: item.revision.title }),
+        ...(item.revision.output === undefined ? {} : { output: item.revision.output }),
+        status: item.revision.status,
+      });
+      toolRevisions.set(item.revision.itemId, {
+        itemId: item.revision.itemId,
+        ordinal,
+        ...(item.revision.toolName === undefined ? {} : { toolName: item.revision.toolName }),
+        ...(item.revision.title === undefined ? {} : { title: item.revision.title }),
+        ...(item.revision.output === undefined ? {} : { output: item.revision.output }),
+        status: item.revision.status,
+      });
+    }
+    const nextAssistantRevisions = [...assistantRevisions.values()];
+    const nextToolRevisions = [...toolRevisions.values()];
+    if (!liveRevisionBudgetValid(nextAssistantRevisions, nextToolRevisions))
+      throw new Error("provider_live_revision_budget_exceeded");
+    next = {
+      ...next,
+      assistantRevisions: nextAssistantRevisions,
+      toolRevisions: nextToolRevisions,
+    };
+  }
+
   if (observation.finalText !== undefined) {
     if (next.finalText !== undefined && next.finalText !== observation.finalText)
       throw new Error("provider_final_changed");
-    next = { ...next, finalText: observation.finalText };
+    if (
+      next.finalMessageId !== undefined &&
+      observation.finalMessageId !== undefined &&
+      next.finalMessageId !== observation.finalMessageId
+    ) {
+      throw new Error("provider_final_identity_changed");
+    }
+    next = {
+      ...next,
+      finalText: observation.finalText,
+      ...((observation.finalMessageId ?? next.finalMessageId) === undefined
+        ? {}
+        : { finalMessageId: observation.finalMessageId ?? next.finalMessageId }),
+    };
     if (!finalEvent(next)) {
+      const finalOrdinal =
+        next.finalMessageId === undefined
+          ? undefined
+          : ((next.assistantRevisions ?? []).find(
+              (revision) => revision.itemId === next.finalMessageId,
+            )?.ordinal ??
+            Math.max(
+              -1,
+              ...(next.assistantRevisions ?? []).map((revision) => revision.ordinal),
+              ...(next.toolRevisions ?? []).map((revision) => revision.ordinal),
+            ) + 1);
       next = appendEvent(next, {
         type: "assistant.final",
+        ...(next.finalMessageId === undefined ? {} : { itemId: next.finalMessageId }),
+        ...(finalOrdinal === undefined ? {} : { ordinal: finalOrdinal }),
         contentHash: sha256(observation.finalText),
         contentLength: observation.finalText.length,
       });
@@ -422,8 +658,48 @@ async function syncObservation(
   return next;
 }
 
+async function sealTerminalAfterBrowserOwnershipLoss(
+  wal: ProviderWal,
+  record: DurableOperation,
+  settlement: ChatGptBrowserProviderSettlementPort,
+): Promise<DurableOperation> {
+  if (record.state !== "terminal" || drainedEvent(record)) return record;
+  const terminal = terminalEvent(record);
+  if (!terminal || terminal.payload.type !== "operation.terminal") {
+    throw providerFailure(
+      "invalid_state",
+      "Durable provider state is terminal without an operation.terminal event.",
+    );
+  }
+  if (terminal.payload.status === "completed" && !finalEvent(record)) {
+    throw providerFailure(
+      "invalid_state",
+      "Completed browser operation lost exact browser ownership before final content was durable.",
+    );
+  }
+
+  // A recovered browser session that no longer owns an already-durable terminal operation cannot
+  // append any further exact browser observations for it. Seal from T3's durable provider WAL
+  // instead of waiting forever for a browser drain commit that can no longer occur. Preserve the
+  // same T3-owned settlement fence used by an ordinary browser-driven drain.
+  await settlement.settleBeforeDrain({
+    providerOperationId: record.providerOperationId as ChatGptBrowserProviderOperationId,
+    nativeIdentity: record.nativeIdentity,
+    terminalStatus: terminal.payload.status,
+  });
+  const next = {
+    ...appendEvent(record, {
+      type: "operation.drained" as const,
+      terminalSequence: terminal.sequence,
+    }),
+    state: "drained" as const,
+  };
+  await wal.write(next);
+  return next;
+}
+
 function snapshot(record: DurableOperation): ChatGptBrowserProviderV1OperationSnapshot {
-  const highWater = ChatGptBrowserProviderV1EventSequence.make(record.events.at(-1)?.sequence ?? 0);
+  const highWater = ChatGptBrowserProviderV1EventSequence.make(record.highWater);
   const terminal = terminalEvent(record);
   const drained = drainedEvent(record);
   if (
@@ -583,7 +859,9 @@ export function makeDurableChatGptBrowserRuntime(input: {
         }
         throw providerFailure("operation_unknown", "Provider operation is unknown.");
       }
-      return observed ? syncObservation(wal, record, observed, settlement) : record;
+      return observed
+        ? syncObservation(wal, record, observed, settlement)
+        : sealTerminalAfterBrowserOwnershipLoss(wal, record, settlement);
     });
   };
 
@@ -608,6 +886,11 @@ export function makeDurableChatGptBrowserRuntime(input: {
           observed.state !== current.state ||
           observed.terminalStatus !== terminalStatus ||
           observed.finalText !== current.finalText ||
+          observed.finalMessageId !== current.finalMessageId ||
+          JSON.stringify(observed.assistantRevisions ?? []) !==
+            JSON.stringify(current.assistantRevisions ?? []) ||
+          JSON.stringify(observed.toolRevisions ?? []) !==
+            JSON.stringify(current.toolRevisions ?? []) ||
           JSON.stringify(observed.nativeIdentity) !== JSON.stringify(current.nativeIdentity);
         if (changed) {
           controller.abort(new Error("provider observation already changed"));
@@ -743,6 +1026,7 @@ export function makeDurableChatGptBrowserRuntime(input: {
               dispatchState: "prepared",
               state: "claimed",
               nativeIdentity: {},
+              highWater: 0,
               events: [],
             };
             await wal.write(record);
@@ -782,7 +1066,7 @@ export function makeDurableChatGptBrowserRuntime(input: {
       interruptible("events.replay", async (signal) => {
         for (;;) {
           const record = await loadAndSync(request.providerOperationId, signal);
-          const highWater = record.events.at(-1)?.sequence ?? 0;
+          const highWater = record.highWater;
           if (request.after > highWater)
             throw providerFailure(
               "invalid_state",

@@ -205,9 +205,26 @@ export const ChatGptBrowserProviderV1CoreEventPayload = Schema.Union([
     text: Schema.String.check(Schema.isMaxLength(65_536)),
   }),
   Schema.Struct({
+    type: Schema.Literal("assistant.revision"),
+    itemId: TrimmedNonEmptyString.check(Schema.isMaxLength(256)),
+    ordinal: NonNegativeInt,
+    text: Schema.String.check(Schema.isMaxLength(65_536)),
+  }),
+  Schema.Struct({
     type: Schema.Literal("assistant.final"),
+    itemId: Schema.optional(TrimmedNonEmptyString.check(Schema.isMaxLength(256))),
+    ordinal: Schema.optional(NonNegativeInt),
     contentHash: Schema.String.check(Schema.isMaxLength(128)),
     contentLength: NonNegativeInt,
+  }),
+  Schema.Struct({
+    type: Schema.Literal("tool.revision"),
+    itemId: TrimmedNonEmptyString.check(Schema.isMaxLength(256)),
+    ordinal: NonNegativeInt,
+    toolName: Schema.optional(TrimmedNonEmptyString.check(Schema.isMaxLength(128))),
+    title: Schema.optional(TrimmedNonEmptyString.check(Schema.isMaxLength(512))),
+    output: Schema.optional(Schema.String.check(Schema.isMaxLength(32_768))),
+    status: Schema.Literals(["running", "completed"]),
   }),
   Schema.Struct({
     type: Schema.Literal("operation.terminal"),

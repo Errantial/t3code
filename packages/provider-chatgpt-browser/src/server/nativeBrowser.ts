@@ -34,6 +34,7 @@ export const CHATGPT_BROWSER_NATIVE_PROVIDER_PORTS = [
 ] as const;
 
 const MAX_BODY_BYTES = 5 * 1024 * 1024;
+const MAX_LIVE_REVISION_ITEMS = 256;
 const TOKEN_SECRET = "provider-v1-browser-token";
 const INSTANCE_SECRET = "provider-v1-provider-instance-id";
 const textEncoder = new TextEncoder();
@@ -56,7 +57,21 @@ interface OperationRecord {
   state: BrowserState;
   nativeIdentity: ChatGptBrowserProviderV1NativeIdentity;
   terminalStatus?: ChatGptBrowserProviderV1TerminalStatus;
+  readonly assistantRevisions: Map<string, { readonly text: string; readonly order: number }>;
+  readonly toolRevisions: Map<
+    string,
+    {
+      readonly itemId: string;
+      readonly order: number;
+      readonly toolName?: string;
+      readonly title?: string;
+      readonly output?: string;
+      readonly status: "running" | "completed";
+    }
+  >;
+  nextLiveOrder: number;
   finalText?: string;
+  finalMessageId?: string;
   owner?: string;
   authorized: boolean;
   cancelRequested: boolean;
@@ -88,6 +103,8 @@ interface ExtensionOperationSummary {
   readonly conversationId?: string;
   readonly userMessageId?: string;
   readonly providerTurnId?: string;
+  readonly finalMessageId?: string;
+  readonly finalObserved?: boolean;
   readonly terminalStatus?: ChatGptBrowserProviderV1TerminalStatus;
   readonly authorized?: boolean;
 }
@@ -213,7 +230,20 @@ function observation(record: OperationRecord): ChatGptBrowserProviderBrowserObse
     nativeIdentity: record.nativeIdentity,
     sendAuthorized: record.authorized,
     ...(record.terminalStatus ? { terminalStatus: record.terminalStatus } : {}),
+    ...(record.assistantRevisions.size === 0
+      ? {}
+      : {
+          assistantRevisions: [...record.assistantRevisions].map(([itemId, revision]) => ({
+            itemId,
+            text: revision.text,
+            order: revision.order,
+          })),
+        }),
+    ...(record.toolRevisions.size === 0
+      ? {}
+      : { toolRevisions: [...record.toolRevisions.values()] }),
     ...(record.finalText !== undefined ? { finalText: record.finalText } : {}),
+    ...(record.finalMessageId !== undefined ? { finalMessageId: record.finalMessageId } : {}),
   };
 }
 
@@ -231,6 +261,8 @@ function extensionSummary(record: OperationRecord): ExtensionOperationSummary {
     ...(record.nativeIdentity.providerTurnId
       ? { providerTurnId: record.nativeIdentity.providerTurnId }
       : {}),
+    ...(record.finalMessageId ? { finalMessageId: record.finalMessageId } : {}),
+    finalObserved: record.finalText !== undefined,
     ...(record.terminalStatus ? { terminalStatus: record.terminalStatus } : {}),
     ...(record.authorized ? { authorized: true } : {}),
   };
@@ -403,6 +435,9 @@ export async function startNativeChatGptBrowserBroker(
       stopCommandId: deterministicUuid("stop", providerOperationId),
       state: "claimed",
       nativeIdentity: {},
+      assistantRevisions: new Map(),
+      toolRevisions: new Map(),
+      nextLiveOrder: 0,
       authorized: false,
       cancelRequested: false,
       s8: { approvalGeneration: 0 },
@@ -578,6 +613,16 @@ export async function startNativeChatGptBrowserBroker(
     if (JSON.stringify(nextIdentity) !== JSON.stringify(record.nativeIdentity)) {
       record.nativeIdentity = nextIdentity;
       changed = true;
+    }
+    const incomingFinalMessageId = cleanString(summary.finalMessageId, 256);
+    if (incomingFinalMessageId) {
+      if (record.finalMessageId && record.finalMessageId !== incomingFinalMessageId) {
+        throw new Error("provider_final_identity_conflict");
+      }
+      if (!record.finalMessageId) {
+        record.finalMessageId = incomingFinalMessageId;
+        changed = true;
+      }
     }
     if (summary.terminalStatus && !record.terminalStatus) {
       record.terminalStatus = summary.terminalStatus;
@@ -961,7 +1006,8 @@ export async function startNativeChatGptBrowserBroker(
       const turnId = cleanString(entry.turnId, 256);
       let record = turnId
         ? ([...operations.values()].find(
-            (candidate) => candidate.nativeIdentity.providerTurnId === turnId,
+            (candidate) =>
+              candidate.state !== "drained" && candidate.nativeIdentity.providerTurnId === turnId,
           ) ?? null)
         : null;
       if (!record && kind === "user_message") {
@@ -969,7 +1015,9 @@ export async function startNativeChatGptBrowserBroker(
         if (messageId)
           record =
             [...operations.values()].find(
-              (candidate) => candidate.nativeIdentity.userMessageId === messageId,
+              (candidate) =>
+                candidate.state !== "drained" &&
+                candidate.nativeIdentity.userMessageId === messageId,
             ) ?? null;
       }
       // Conversation identity alone is not enough to mutate an operation. An observer page can
@@ -1015,17 +1063,123 @@ export async function startNativeChatGptBrowserBroker(
       }
       if (
         kind === "assistant_message" &&
-        (entry.final === true || entry.state === "final") &&
-        (!turnId ||
-          !record.nativeIdentity.providerTurnId ||
-          turnId === record.nativeIdentity.providerTurnId)
+        turnId &&
+        record.nativeIdentity.providerTurnId === turnId
       ) {
         const text = typeof entry.text === "string" ? entry.text : undefined;
-        if (text !== undefined) record.finalText = text;
-        const resolvedModel = cleanString(entry.resolvedModel, 80);
-        if (resolvedModel && record.s8?.selection) {
-          record.s8.selection = { ...record.s8.selection, resolvedModel };
+        const messageId = cleanString(entry.messageId, 256);
+        if (messageId && text !== undefined && text.length <= 65_536) {
+          const previous = record.assistantRevisions.get(messageId);
+          const browserOrder =
+            Number.isSafeInteger(entry.order) && Number(entry.order) >= 0
+              ? Number(entry.order)
+              : undefined;
+          if (previous?.text !== text) {
+            if (
+              previous === undefined &&
+              record.assistantRevisions.size + record.toolRevisions.size >= MAX_LIVE_REVISION_ITEMS
+            ) {
+              throw new Error("provider_live_item_budget_exceeded");
+            }
+            const order = previous?.order ?? browserOrder ?? record.nextLiveOrder;
+            record.nextLiveOrder = Math.max(record.nextLiveOrder, order + 1);
+            record.assistantRevisions.set(messageId, {
+              text,
+              order,
+            });
+            touched.add(record);
+          }
         }
+        if (entry.final === true || entry.state === "final") {
+          if (
+            record.finalMessageId !== undefined &&
+            messageId !== undefined &&
+            record.finalMessageId !== messageId
+          ) {
+            throw new Error("provider_final_identity_conflict");
+          }
+          if (text !== undefined) record.finalText = text;
+          if (messageId !== undefined) record.finalMessageId = messageId;
+          const resolvedModel = cleanString(entry.resolvedModel, 80);
+          if (resolvedModel && record.s8?.selection) {
+            record.s8.selection = { ...record.s8.selection, resolvedModel };
+          }
+          touched.add(record);
+        }
+        continue;
+      }
+      if (kind === "tool_evidence" && turnId && record.nativeIdentity.providerTurnId === turnId) {
+        for (const rawCall of Array.isArray(entry.calls) ? entry.calls.slice(0, 200) : []) {
+          const call = asRecord(rawCall);
+          if (!call) continue;
+          const itemId = cleanString(call.messageId, 256);
+          const toolName = cleanString(call.tool, 128);
+          if (!itemId || !toolName) continue;
+          const previous = record.toolRevisions.get(itemId);
+          const status =
+            previous?.status === "completed" || call.answered === true ? "completed" : "running";
+          const browserOrder =
+            Number.isSafeInteger(call.order) && Number(call.order) >= 0
+              ? Number(call.order)
+              : undefined;
+          if (previous?.toolName !== undefined && previous.toolName !== toolName) {
+            throw new Error("provider_tool_identity_conflict");
+          }
+          if (previous?.toolName === toolName && previous.status === status) continue;
+          if (
+            previous === undefined &&
+            record.assistantRevisions.size + record.toolRevisions.size >= MAX_LIVE_REVISION_ITEMS
+          ) {
+            throw new Error("provider_live_item_budget_exceeded");
+          }
+          const order = previous?.order ?? browserOrder ?? record.nextLiveOrder;
+          record.nextLiveOrder = Math.max(record.nextLiveOrder, order + 1);
+          record.toolRevisions.set(itemId, {
+            itemId,
+            order,
+            toolName,
+            status,
+          });
+          touched.add(record);
+        }
+        continue;
+      }
+      if (kind === "page_tool" && turnId && record.nativeIdentity.providerTurnId === turnId) {
+        const itemId = cleanString(entry.messageId, 256);
+        const title = cleanString(entry.text, 512);
+        if (!itemId || !title) continue;
+        const previous = record.toolRevisions.get(itemId);
+        if (previous?.toolName !== undefined && previous.toolName !== "ChatGPT") {
+          throw new Error("provider_tool_identity_conflict");
+        }
+        const status =
+          previous?.status === "completed" || entry.activeNow !== true ? "completed" : "running";
+        const browserOrder =
+          Number.isSafeInteger(entry.order) && Number(entry.order) >= 0
+            ? Number(entry.order)
+            : undefined;
+        if (
+          previous?.toolName === "ChatGPT" &&
+          previous.title === title &&
+          previous.status === status
+        ) {
+          continue;
+        }
+        if (
+          previous === undefined &&
+          record.assistantRevisions.size + record.toolRevisions.size >= MAX_LIVE_REVISION_ITEMS
+        ) {
+          throw new Error("provider_live_item_budget_exceeded");
+        }
+        const order = previous?.order ?? browserOrder ?? record.nextLiveOrder;
+        record.nextLiveOrder = Math.max(record.nextLiveOrder, order + 1);
+        record.toolRevisions.set(itemId, {
+          itemId,
+          order,
+          toolName: "ChatGPT",
+          title,
+          status,
+        });
         touched.add(record);
         continue;
       }
@@ -1072,7 +1226,10 @@ export async function startNativeChatGptBrowserBroker(
       .digest("hex")
       .slice(0, 32);
     if (phase === "probe")
-      return { status: 200, body: { ok: true, applicable: true, drainToken, state: record.state } };
+      return {
+        status: 200,
+        body: { ok: true, applicable: true, nativeProvider: true, drainToken, state: record.state },
+      };
     if (body.drainToken !== drainToken)
       return { status: 409, body: { ok: false, error: "provider_turn_mismatch" } };
     if (record.state !== "drained") {
@@ -1085,6 +1242,7 @@ export async function startNativeChatGptBrowserBroker(
       body: {
         ok: true,
         applicable: true,
+        nativeProvider: true,
         drainToken,
         state: record.state,
         summary: extensionSummary(record),

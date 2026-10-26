@@ -1636,6 +1636,25 @@ async function maintainNativeProviderViews() {
         await persistNativeProviderViews();
       }
       const documentId = Number.isInteger(tab.id) ? tabDocuments[String(tab.id)] : null;
+      // Chrome can restore the exact managed conversation as a discarded/unloaded tab after a
+      // browser restart. Its URL still proves which conversation this native operation owns, but
+      // there is no content document to receive the exact provider refresh. Treating that shell as
+      // a live observer wedges terminal recovery forever. Reload only this already-selected exact
+      // tab, only while it has no registered document and Chrome itself says its renderer is gone.
+      // A loading/complete tab is left alone; the replacement document's normal registration path
+      // re-enters this function and all existing conversation/user/turn/final fences still apply.
+      if (
+        !documentId &&
+        Number.isInteger(tab.id) &&
+        (tab.discarded === true || tab.status === "unloaded")
+      ) {
+        try {
+          await chrome.tabs.reload(tab.id);
+        } catch {
+          // Preserve the exact observer view; a later maintenance pass can retry safely.
+        }
+        continue;
+      }
       if (documentId)
         void tabReply(
           tab.id,
@@ -1645,6 +1664,9 @@ async function maintainNativeProviderViews() {
             conversationId,
             userMessageId: typeof row.userMessageId === "string" ? row.userMessageId : null,
             providerTurnId: typeof row.providerTurnId === "string" ? row.providerTurnId : null,
+            finalMessageId: typeof row.finalMessageId === "string" ? row.finalMessageId : null,
+            finalObserved: row.finalObserved === true,
+            terminalStatus: typeof row.terminalStatus === "string" ? row.terminalStatus : null,
             // `commandId` is a deterministic UUID derived from providerOperationId. Reusing it makes
             // a sent-before-restart turn identity stable across every browser retry without inventing
             // a second provider operation or depending on DOM position/content.
@@ -1708,6 +1730,13 @@ function primeNativeProvider() {
     if (Number.isSafeInteger(reply.data.generation) && reply.data.generation >= 0) {
       nativeProviderGeneration = reply.data.generation;
     }
+    // Prime is the one nonblocking authoritative status read before maintenance switches to a
+    // generation long-poll. Restore observer views here, while we still have local progress.
+    // Otherwise a browser restart can deadlock: prime advances `nativeProviderGeneration` to the
+    // broker's current value, maintainNativeProvider() immediately waits for a *new* generation,
+    // and the terminal/sent operation's conversation tab is never recreated to produce one.
+    await maintainNativeProviderViews();
+    void drainNativeProviderJournal().catch(() => undefined);
     return true;
   })()
     .catch(() => false)
@@ -6266,10 +6295,14 @@ const HANDLERS = {
       if (keepAwake) await noteKeepAwake(result.tab, result.documentId, true);
       result = { ...result, keepAwake };
       // Native provider maintenance may already be blocked in its generation long-poll after it
-      // created this exact ready tab. Registration is independent local progress, so wake the
-      // elected input directly instead of relying on a broker generation change to run another
-      // delivery pass.
+      // created this exact ready tab. Registration is independent local progress, so wake both
+      // the elected input and any already-sent/running/terminal observer view directly instead of
+      // relying on a broker generation change to run another delivery pass. This matters most for
+      // a replacement document of a terminal provider-v1 turn: the broker has no new generation
+      // to publish, but the new MessageSender.documentId is exactly what makes it safe to offer
+      // that durable terminal identity to this document for two-phase drain recovery.
       offerReadyNativeInputsForTab(result.tab);
+      await maintainNativeProviderViews();
     }
     if (result?.ok === true) {
       void maintain(true).catch(() => undefined);
@@ -6797,9 +6830,35 @@ const HANDLERS = {
           ...(message.approvalResult ? { result: message.approvalResult } : {}),
         },
       });
-      return ownsDocument(source) && reply?.ok && reply.data?.ok === true
-        ? { ok: true, data: reply.data.data || {} }
-        : { ok: false, error: "provider_native_approval_unavailable" };
+      if (!(ownsDocument(source) && reply?.ok && reply.data?.ok === true)) {
+        return { ok: false, error: "provider_native_approval_unavailable" };
+      }
+      const providerDrainRecovery =
+        native.state === "terminal" &&
+        native.terminalStatus === "completed" &&
+        typeof native.providerTurnId === "string" &&
+        native.providerTurnId.length > 0 &&
+        typeof native.finalMessageId === "string" &&
+        native.finalMessageId.length > 0
+          ? {
+              kind: "restart_unsealed",
+              nativeProvider: true,
+              outcome: "completed",
+              turnId: native.providerTurnId,
+              userMessageId:
+                typeof native.userMessageId === "string" && native.userMessageId.length > 0
+                  ? native.userMessageId
+                  : null,
+              terminalMessageId: native.finalMessageId,
+            }
+          : null;
+      return {
+        ok: true,
+        data: {
+          ...(reply.data.data || {}),
+          ...(providerDrainRecovery ? { providerDrainRecovery } : {}),
+        },
+      };
     }
     // Goal drafts are conversation-scoped in the app but browser writes are tab-scoped. Tell
     // the app which tab is polling so two tabs showing the same chat cannot both receive and

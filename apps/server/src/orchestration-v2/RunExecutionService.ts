@@ -1256,7 +1256,13 @@ export const layer: Layer.Layer<
           }
           return true;
         });
-        const filterAssistantEvent = makeAssistantStreamingFilter(responseStreamingMode);
+        const filterAssistantEvent = makeAssistantStreamingFilter(responseStreamingMode, {
+          // ChatGPT Browser exposes authoritative full-text snapshots while a turn is still
+          // running. Preserve the global turn-only opt-out, but otherwise project those bounded
+          // revisions directly so an unbroken paragraph or line-oriented response cannot leave
+          // T3 stuck on "thinking" until final.
+          preferLiveRevisions: input.providerThread.driver === "chatgptBrowser",
+        });
         // Held text writes nothing, so its item would take a position only
         // when finally written, behind every item that began after it.
         const reservedHeldTurnItemIds = new Set<TurnItemId>();

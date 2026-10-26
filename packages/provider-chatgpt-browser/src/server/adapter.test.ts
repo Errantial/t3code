@@ -202,6 +202,303 @@ describe("ChatGPT Browser ProviderAdapterV2", () => {
     ),
   );
 
+  it.effect("projects live assistant revisions and tool lifecycle into stable turn items", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const attemptId = RunAttemptId.make("attempt-chatgpt-browser-live-stream");
+        const operationId = chatGptBrowserProviderOperationIdForAttempt(attemptId);
+        const finalText = "Answer";
+        const scriptedEvents: ReadonlyArray<ChatGptBrowserProviderV1CoreEvent> = [
+          {
+            providerOperationId: operationId,
+            sequence: seq(1),
+            payload: {
+              type: "assistant.revision",
+              itemId: "assistant-a",
+              ordinal: 0,
+              text: "Working",
+            },
+          },
+          {
+            providerOperationId: operationId,
+            sequence: seq(2),
+            payload: {
+              type: "tool.revision",
+              itemId: "tool-a",
+              ordinal: 1,
+              toolName: "web.run",
+              title: "Browsing Python.org",
+              status: "running",
+            },
+          },
+          {
+            providerOperationId: operationId,
+            sequence: seq(3),
+            payload: {
+              type: "assistant.revision",
+              itemId: "assistant-a",
+              ordinal: 0,
+              text: "Working more",
+            },
+          },
+          {
+            providerOperationId: operationId,
+            sequence: seq(4),
+            payload: {
+              type: "tool.revision",
+              itemId: "tool-a",
+              ordinal: 1,
+              toolName: "web.run",
+              title: "Browsed Python.org",
+              output: "Python 3.15.1\nhttps://www.python.org/downloads/",
+              status: "completed",
+            },
+          },
+          {
+            providerOperationId: operationId,
+            sequence: seq(5),
+            payload: {
+              type: "assistant.revision",
+              itemId: "assistant-b",
+              ordinal: 2,
+              text: "Answer",
+            },
+          },
+          {
+            providerOperationId: operationId,
+            sequence: seq(6),
+            payload: {
+              type: "assistant.final",
+              itemId: "assistant-b",
+              ordinal: 2,
+              contentHash: "fake-final-content",
+              contentLength: finalText.length,
+            },
+          },
+          {
+            providerOperationId: operationId,
+            sequence: seq(7),
+            payload: { type: "operation.terminal", status: "completed" },
+          },
+          {
+            providerOperationId: operationId,
+            sequence: seq(8),
+            payload: { type: "operation.drained", terminalSequence: seq(7) },
+          },
+        ];
+        const fake = makeFakeChatGptBrowserProviderV1Transport({
+          providerSessionId,
+          events: scriptedEvents,
+          finalText,
+        });
+        const operationStore = yield* memoryOperationStore();
+        const runtime = yield* openRuntime({ host: host(fake.transport), operationStore });
+        const providerThread = yield* runtime.ensureThread({
+          threadId,
+          modelSelection: { instanceId, model: "default" },
+          runtimePolicy: {
+            runtimeMode: "full-access",
+            interactionMode: "default",
+            cwd: "/workspace",
+          },
+        });
+        yield* runtime.startTurn(turnInput(providerThread, attemptId));
+        const events = Array.from(
+          yield* runtime.events.pipe(
+            Stream.tap(checkpointChatGptBrowserProviderEvent),
+            Stream.takeUntil((event) => event.type === "turn.terminal"),
+            Stream.runCollect,
+          ),
+        );
+        const turnItems = events.flatMap((event) =>
+          event.type === "turn_item.updated" ? [event.turnItem] : [],
+        );
+        const firstAssistant = turnItems.filter(
+          (
+            item,
+          ): item is Extract<(typeof turnItems)[number], { readonly type: "assistant_message" }> =>
+            item.type === "assistant_message" && item.nativeItemRef?.nativeId === "assistant-a",
+        );
+        expect(
+          firstAssistant.map((item) => [item.text, item.streaming, item.ordinal]),
+        ).toContainEqual(["Working more", true, 2]);
+        expect(firstAssistant.at(-1)).toMatchObject({
+          type: "assistant_message",
+          text: "Working more",
+          streaming: false,
+          status: "completed",
+          ordinal: 2,
+        });
+        const toolItems = turnItems.filter(
+          (item) => item.type === "dynamic_tool" && item.nativeItemRef?.nativeId === "tool-a",
+        );
+        expect(toolItems.map((item) => [item.status, item.ordinal])).toEqual([
+          ["running", 4],
+          ["completed", 4],
+        ]);
+        expect(toolItems.at(-1)).toMatchObject({
+          type: "dynamic_tool",
+          toolName: "web.run",
+          title: "Browsed Python.org",
+          output: "Python 3.15.1\nhttps://www.python.org/downloads/",
+          status: "completed",
+          ordinal: 4,
+        });
+        expect(
+          turnItems.findLast(
+            (item) =>
+              item.type === "assistant_message" && item.nativeItemRef?.nativeId === "assistant-b",
+          ),
+        ).toMatchObject({
+          type: "assistant_message",
+          text: "Answer",
+          streaming: false,
+          status: "completed",
+          ordinal: 6,
+        });
+        expect(yield* operationStore.get(attemptId)).toMatchObject({ consumerHighWater: 8 });
+      }),
+    ),
+  );
+
+  it.effect(
+    "rehydrates checkpointed live items on restart so terminal cleanup cannot leave thinking behind",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const attemptId = RunAttemptId.make("attempt-chatgpt-browser-restart-live-items");
+          const operationId = chatGptBrowserProviderOperationIdForAttempt(attemptId);
+          const operationStore = yield* memoryOperationStore();
+          const fake = makeFakeChatGptBrowserProviderV1Transport({
+            providerSessionId,
+            initialOperationId: operationId,
+            events: [
+              {
+                providerOperationId: operationId,
+                sequence: seq(1),
+                payload: {
+                  type: "assistant.revision",
+                  itemId: "assistant-before-restart",
+                  ordinal: 0,
+                  text: "Partial answer",
+                },
+              },
+              {
+                providerOperationId: operationId,
+                sequence: seq(2),
+                payload: {
+                  type: "tool.revision",
+                  itemId: "tool-before-restart",
+                  ordinal: 1,
+                  toolName: "web.run",
+                  title: "Browsing",
+                  status: "running",
+                },
+              },
+              {
+                providerOperationId: operationId,
+                sequence: seq(3),
+                payload: { type: "operation.terminal", status: "completed" },
+              },
+              {
+                providerOperationId: operationId,
+                sequence: seq(4),
+                payload: { type: "operation.drained", terminalSequence: seq(3) },
+              },
+            ],
+          });
+          const originalRuntime = yield* openRuntime({
+            host: host(fake.transport),
+            operationStore,
+          });
+          const originalThread = yield* originalRuntime.ensureThread({
+            threadId,
+            modelSelection: { instanceId, model: "default" },
+            runtimePolicy: {
+              runtimeMode: "full-access",
+              interactionMode: "default",
+              cwd: "/workspace",
+            },
+          });
+          const projectedThread: OrchestrationV2ProviderThread = {
+            ...originalThread,
+            status: "active",
+          };
+          yield* operationStore.prepare({
+            attemptId,
+            providerOperationId: operationId,
+            providerSessionId,
+            providerThreadId: projectedThread.id,
+          });
+          yield* operationStore.advanceHighWater({
+            attemptId,
+            providerOperationId: operationId,
+            sequence: seq(2),
+          });
+
+          const recoveredRuntime = yield* openRuntime({
+            host: host(fake.transport),
+            operationStore,
+          });
+          const resumed = yield* recoveredRuntime.resumeThread({
+            providerThread: projectedThread,
+            threadId,
+            modelSelection: { instanceId, model: "default" },
+            runtimePolicy: {
+              runtimeMode: "full-access",
+              interactionMode: "default",
+              cwd: "/workspace",
+            },
+          });
+          yield* recoveredRuntime.startTurn(turnInput(resumed, attemptId));
+          const events = Array.from(
+            yield* recoveredRuntime.events.pipe(
+              Stream.tap(checkpointChatGptBrowserProviderEvent),
+              Stream.takeUntil((event) => event.type === "turn.terminal"),
+              Stream.runCollect,
+            ),
+          );
+          const turnItems = events.flatMap((event) =>
+            event.type === "turn_item.updated" ? [event.turnItem] : [],
+          );
+          const providerTurns = events.flatMap((event) =>
+            event.type === "provider_turn.updated" ? [event.providerTurn] : [],
+          );
+          const providerThreads = events.flatMap((event) =>
+            event.type === "provider_thread.updated" ? [event.providerThread] : [],
+          );
+          expect(fake.calls.sentOperationIds).toEqual([]);
+          expect(fake.calls.replayAfter[0]).toBe(0);
+          expect(
+            turnItems.findLast(
+              (item) =>
+                item.type === "assistant_message" &&
+                item.nativeItemRef?.nativeId === "assistant-before-restart",
+            ),
+          ).toMatchObject({
+            type: "assistant_message",
+            text: "Partial answer",
+            streaming: false,
+            status: "completed",
+          });
+          expect(
+            turnItems.findLast(
+              (item) =>
+                item.type === "dynamic_tool" &&
+                item.nativeItemRef?.nativeId === "tool-before-restart",
+            ),
+          ).toMatchObject({
+            type: "dynamic_tool",
+            status: "completed",
+          });
+          expect(providerTurns.at(-1)).toMatchObject({ status: "completed" });
+          expect(providerThreads.at(-1)).toMatchObject({ status: "idle" });
+          expect(events.at(-1)).toMatchObject({ type: "turn.terminal", status: "completed" });
+          expect(yield* operationStore.get(attemptId)).toMatchObject({ consumerHighWater: 4 });
+        }),
+      ),
+  );
+
   it.live("waits through a terminal settlement gap before the drain event arrives", () =>
     Effect.scoped(
       Effect.gen(function* () {
@@ -562,99 +859,127 @@ describe("ChatGPT Browser ProviderAdapterV2", () => {
     ),
   );
 
-  it.effect("resumes replay after the durable consumer high-water", () =>
-    Effect.scoped(
-      Effect.gen(function* () {
-        const attemptId = RunAttemptId.make("attempt-chatgpt-browser-drained-unconsumed");
-        const operationId = chatGptBrowserProviderOperationIdForAttempt(attemptId);
-        const operationStore = yield* memoryOperationStore();
-        const fake = makeFakeChatGptBrowserProviderV1Transport({
-          providerSessionId,
-          initialOperationId: operationId,
-          events: coreEvents(operationId, "hello"),
-          finalText: "hello",
-        });
-        const runtime = yield* openRuntime({ host: host(fake.transport), operationStore });
-        const providerThread = yield* runtime.ensureThread({
-          threadId,
-          modelSelection: { instanceId, model: "default" },
-          runtimePolicy: {
-            runtimeMode: "full-access",
-            interactionMode: "default",
-            cwd: "/workspace",
-          },
-        });
-        yield* operationStore.prepare({
-          attemptId,
-          providerOperationId: operationId,
-          providerSessionId,
-          providerThreadId: providerThread.id,
-        });
-        yield* operationStore.advanceHighWater({
-          attemptId,
-          providerOperationId: operationId,
-          sequence: seq(2),
-        });
+  it.effect(
+    "rehydrates from bounded replay without regressing the durable consumer high-water",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const attemptId = RunAttemptId.make("attempt-chatgpt-browser-drained-unconsumed");
+          const operationId = chatGptBrowserProviderOperationIdForAttempt(attemptId);
+          const operationStore = yield* memoryOperationStore();
+          const fake = makeFakeChatGptBrowserProviderV1Transport({
+            providerSessionId,
+            initialOperationId: operationId,
+            events: coreEvents(operationId, "hello"),
+            finalText: "hello",
+          });
+          const runtime = yield* openRuntime({ host: host(fake.transport), operationStore });
+          const providerThread = yield* runtime.ensureThread({
+            threadId,
+            modelSelection: { instanceId, model: "default" },
+            runtimePolicy: {
+              runtimeMode: "full-access",
+              interactionMode: "default",
+              cwd: "/workspace",
+            },
+          });
+          yield* operationStore.prepare({
+            attemptId,
+            providerOperationId: operationId,
+            providerSessionId,
+            providerThreadId: providerThread.id,
+          });
+          yield* operationStore.advanceHighWater({
+            attemptId,
+            providerOperationId: operationId,
+            sequence: seq(2),
+          });
 
-        yield* runtime.startTurn(turnInput(providerThread, attemptId));
-        yield* runtime.events.pipe(
-          Stream.filter((event) => event.type === "turn.terminal"),
-          Stream.tap(checkpointChatGptBrowserProviderEvent),
-          Stream.runHead,
-        );
+          yield* runtime.startTurn(turnInput(providerThread, attemptId));
+          const projected = Array.from(
+            yield* runtime.events.pipe(
+              Stream.tap(checkpointChatGptBrowserProviderEvent),
+              Stream.takeUntil((event) => event.type === "turn.terminal"),
+              Stream.runCollect,
+            ),
+          );
+          const assistantItems = projected.flatMap((event) =>
+            event.type === "turn_item.updated" && event.turnItem.type === "assistant_message"
+              ? [event.turnItem]
+              : [],
+          );
 
-        expect(fake.calls.sentOperationIds).toEqual([]);
-        expect(fake.calls.replayAfter).toEqual([2]);
-        expect(yield* operationStore.get(attemptId)).toMatchObject({ consumerHighWater: 4 });
-      }),
-    ),
+          expect(fake.calls.sentOperationIds).toEqual([]);
+          expect(fake.calls.replayAfter).toEqual([0]);
+          expect(new Set(assistantItems.map((item) => item.id)).size).toBe(1);
+          expect(assistantItems.at(-1)).toMatchObject({
+            text: "hello",
+            streaming: false,
+            status: "completed",
+          });
+          expect(yield* operationStore.get(attemptId)).toMatchObject({ consumerHighWater: 4 });
+        }),
+      ),
   );
 
-  it.effect("ignores stale replay rows at or below the durable high-water", () =>
-    Effect.scoped(
-      Effect.gen(function* () {
-        const attemptId = RunAttemptId.make("attempt-chatgpt-browser-stale-event");
-        const operationId = chatGptBrowserProviderOperationIdForAttempt(attemptId);
-        const operationStore = yield* memoryOperationStore();
-        const fake = makeFakeChatGptBrowserProviderV1Transport({
-          providerSessionId,
-          initialOperationId: operationId,
-          replayIncludesStale: true,
-          events: coreEvents(operationId, "hello"),
-          finalText: "hello",
-        });
-        const runtime = yield* openRuntime({ host: host(fake.transport), operationStore });
-        const providerThread = yield* runtime.ensureThread({
-          threadId,
-          modelSelection: { instanceId, model: "default" },
-          runtimePolicy: {
-            runtimeMode: "full-access",
-            interactionMode: "default",
-            cwd: "/workspace",
-          },
-        });
-        yield* operationStore.prepare({
-          attemptId,
-          providerOperationId: operationId,
-          providerSessionId,
-          providerThreadId: providerThread.id,
-        });
-        yield* operationStore.advanceHighWater({
-          attemptId,
-          providerOperationId: operationId,
-          sequence: seq(2),
-        });
+  it.effect(
+    "replays stale rows idempotently while keeping the durable consumer high-water monotonic",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const attemptId = RunAttemptId.make("attempt-chatgpt-browser-stale-event");
+          const operationId = chatGptBrowserProviderOperationIdForAttempt(attemptId);
+          const operationStore = yield* memoryOperationStore();
+          const fake = makeFakeChatGptBrowserProviderV1Transport({
+            providerSessionId,
+            initialOperationId: operationId,
+            replayIncludesStale: true,
+            events: coreEvents(operationId, "hello"),
+            finalText: "hello",
+          });
+          const runtime = yield* openRuntime({ host: host(fake.transport), operationStore });
+          const providerThread = yield* runtime.ensureThread({
+            threadId,
+            modelSelection: { instanceId, model: "default" },
+            runtimePolicy: {
+              runtimeMode: "full-access",
+              interactionMode: "default",
+              cwd: "/workspace",
+            },
+          });
+          yield* operationStore.prepare({
+            attemptId,
+            providerOperationId: operationId,
+            providerSessionId,
+            providerThreadId: providerThread.id,
+          });
+          yield* operationStore.advanceHighWater({
+            attemptId,
+            providerOperationId: operationId,
+            sequence: seq(2),
+          });
 
-        yield* runtime.startTurn(turnInput(providerThread, attemptId));
-        const terminal = yield* runtime.events.pipe(
-          Stream.filter((event) => event.type === "turn.terminal"),
-          Stream.runHead,
-        );
+          yield* runtime.startTurn(turnInput(providerThread, attemptId));
+          const projected = Array.from(
+            yield* runtime.events.pipe(
+              Stream.tap(checkpointChatGptBrowserProviderEvent),
+              Stream.takeUntil((event) => event.type === "turn.terminal"),
+              Stream.runCollect,
+            ),
+          );
+          const assistantItems = projected.flatMap((event) =>
+            event.type === "turn_item.updated" && event.turnItem.type === "assistant_message"
+              ? [event.turnItem]
+              : [],
+          );
 
-        expect(terminal._tag).toBe("Some");
-        expect(fake.calls.replayAfter).toEqual([2]);
-      }),
-    ),
+          expect(projected.at(-1)).toMatchObject({ type: "turn.terminal", status: "completed" });
+          expect(fake.calls.sentOperationIds).toEqual([]);
+          expect(fake.calls.replayAfter).toEqual([0]);
+          expect(new Set(assistantItems.map((item) => item.id)).size).toBe(1);
+          expect(yield* operationStore.get(attemptId)).toMatchObject({ consumerHighWater: 4 });
+        }),
+      ),
   );
 
   it.effect("reissues only the exact durable cancellation after recovery", () =>

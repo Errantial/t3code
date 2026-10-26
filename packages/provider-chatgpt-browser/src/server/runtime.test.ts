@@ -410,6 +410,339 @@ describe("scoped in-process ChatGPT browser provider host", () => {
     }
   });
 
+  it("seals a durable terminal after restart when exact browser ownership is gone", async () => {
+    const root = await tempRoot();
+    const browser = fakeBrowser();
+    const settled: string[] = [];
+    try {
+      const opened = await Effect.runPromise(
+        makeScopedChatGptBrowserHost(options(root, browser, settled)).open,
+      );
+      await Effect.runPromise(opened.transport.send(sendRequest()));
+      browser.observe({
+        providerOperationId: operationId,
+        state: "terminal",
+        nativeIdentity: {
+          conversationId: "conversation-native",
+          userMessageId: "user-message-native",
+          providerTurnId: "provider-turn-native",
+        },
+        terminalStatus: "completed",
+        finalText: "final before restart",
+        finalMessageId: "assistant-before-restart",
+        assistantRevisions: [
+          {
+            itemId: "assistant-before-restart",
+            order: 0,
+            text: "final before restart",
+          },
+        ],
+        toolRevisions: [
+          {
+            itemId: "tool-before-restart",
+            order: 1,
+            toolName: "read",
+            status: "running",
+          },
+        ],
+      });
+      expect(
+        await Effect.runPromise(
+          opened.transport.queryOperation({
+            type: "operation.query",
+            providerOperationId: operationId,
+          }),
+        ),
+      ).toMatchObject({ state: "terminal", terminalStatus: "completed" });
+      expect(settled).toEqual([]);
+      await Effect.runPromise(opened.close);
+
+      const restartedBrowser = fakeBrowser();
+      const reopened = await Effect.runPromise(
+        makeScopedChatGptBrowserHost(options(root, restartedBrowser, settled)).open,
+      );
+      expect(
+        await Effect.runPromise(
+          reopened.transport.queryOperation({
+            type: "operation.query",
+            providerOperationId: operationId,
+          }),
+        ),
+      ).toMatchObject({ state: "drained", terminalStatus: "completed" });
+      expect(settled).toEqual([operationId]);
+
+      const page = await Effect.runPromise(
+        reopened.transport.replay({
+          type: "events.replay",
+          providerOperationId: operationId,
+          after: ChatGptBrowserProviderV1EventSequence.make(0),
+        }),
+      );
+      expect(page.events.map((event) => event.payload.type)).toEqual([
+        "assistant.revision",
+        "tool.revision",
+        "assistant.final",
+        "operation.terminal",
+        "operation.drained",
+      ]);
+      await Effect.runPromise(reopened.close);
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("sequences browser assistant replacements and tool upserts durably before final settlement", async () => {
+    const root = await tempRoot();
+    const browser = fakeBrowser();
+    const settled: string[] = [];
+    try {
+      const opened = await Effect.runPromise(
+        makeScopedChatGptBrowserHost(options(root, browser, settled)).open,
+      );
+      await Effect.runPromise(opened.transport.send(sendRequest()));
+      const nativeIdentity = {
+        conversationId: "conversation-native",
+        userMessageId: "user-message-native",
+        providerTurnId: "provider-turn-native",
+      };
+
+      browser.observe({
+        providerOperationId: operationId,
+        state: "running",
+        nativeIdentity,
+        assistantRevisions: [{ itemId: "assistant-1", order: 0, text: "hel" }],
+        toolRevisions: [{ itemId: "tool-1", order: 1, toolName: "web.run", status: "running" }],
+      });
+      const first = await Effect.runPromise(
+        opened.transport.replay({
+          type: "events.replay",
+          providerOperationId: operationId,
+          after: ChatGptBrowserProviderV1EventSequence.make(0),
+        }),
+      );
+      expect(first.events.map((event) => event.payload)).toEqual([
+        { type: "assistant.revision", itemId: "assistant-1", ordinal: 0, text: "hel" },
+        {
+          type: "tool.revision",
+          itemId: "tool-1",
+          ordinal: 1,
+          toolName: "web.run",
+          status: "running",
+        },
+      ]);
+
+      browser.observe({
+        providerOperationId: operationId,
+        state: "running",
+        nativeIdentity,
+        assistantRevisions: [{ itemId: "assistant-1", order: 0, text: "hello" }],
+        toolRevisions: [{ itemId: "tool-1", order: 1, toolName: "web.run", status: "completed" }],
+      });
+      const second = await Effect.runPromise(
+        opened.transport.replay({
+          type: "events.replay",
+          providerOperationId: operationId,
+          after: first.highWater,
+        }),
+      );
+      expect(second.events.map((event) => event.payload)).toEqual([
+        { type: "assistant.revision", itemId: "assistant-1", ordinal: 0, text: "hello" },
+        {
+          type: "tool.revision",
+          itemId: "tool-1",
+          ordinal: 1,
+          toolName: "web.run",
+          status: "completed",
+        },
+      ]);
+      const compacted = await Effect.runPromise(
+        opened.transport.replay({
+          type: "events.replay",
+          providerOperationId: operationId,
+          after: ChatGptBrowserProviderV1EventSequence.make(0),
+        }),
+      );
+      expect(compacted.highWater).toBe(4);
+      expect(compacted.events.map((event) => [event.sequence, event.payload])).toEqual([
+        [3, { type: "assistant.revision", itemId: "assistant-1", ordinal: 0, text: "hello" }],
+        [
+          4,
+          {
+            type: "tool.revision",
+            itemId: "tool-1",
+            ordinal: 1,
+            toolName: "web.run",
+            status: "completed",
+          },
+        ],
+      ]);
+
+      browser.observe({
+        providerOperationId: operationId,
+        state: "drained",
+        nativeIdentity,
+        assistantRevisions: [{ itemId: "assistant-1", order: 0, text: "hello" }],
+        toolRevisions: [{ itemId: "tool-1", order: 1, toolName: "web.run", status: "completed" }],
+        finalText: "hello",
+        finalMessageId: "assistant-1",
+        terminalStatus: "completed",
+      });
+      const third = await Effect.runPromise(
+        opened.transport.replay({
+          type: "events.replay",
+          providerOperationId: operationId,
+          after: second.highWater,
+        }),
+      );
+      expect(third.events.map((event) => event.payload.type)).toEqual([
+        "assistant.final",
+        "operation.terminal",
+        "operation.drained",
+      ]);
+      expect(third.events[0]?.payload).toMatchObject({
+        type: "assistant.final",
+        itemId: "assistant-1",
+        ordinal: 0,
+        contentLength: 5,
+      });
+      expect(third.highWater).toBe(7);
+      expect(settled).toEqual([operationId]);
+      browser.observe({
+        providerOperationId: operationId,
+        state: "running",
+        nativeIdentity,
+        assistantRevisions: [{ itemId: "assistant-1", order: 0, text: "late stale rewrite" }],
+        toolRevisions: [{ itemId: "late-tool", order: 1, toolName: "late", status: "completed" }],
+      });
+      const sealed = await Effect.runPromise(
+        opened.transport.replay({
+          type: "events.replay",
+          providerOperationId: operationId,
+          after: third.highWater,
+        }),
+      );
+      expect(sealed).toEqual({ providerOperationId: operationId, events: [], highWater: 7 });
+      await Effect.runPromise(opened.close);
+
+      const reopened = await Effect.runPromise(
+        makeScopedChatGptBrowserHost(options(root, browser, settled)).open,
+      );
+      const sealedAfterRestart = await Effect.runPromise(
+        reopened.transport.replay({
+          type: "events.replay",
+          providerOperationId: operationId,
+          after: third.highWater,
+        }),
+      );
+      expect(sealedAfterRestart).toEqual({
+        providerOperationId: operationId,
+        events: [],
+        highWater: 7,
+      });
+      await Effect.runPromise(reopened.close);
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("preserves browser chronology when a lower-order tool is discovered after assistant text", async () => {
+    const root = await tempRoot();
+    const browser = fakeBrowser();
+    const settled: string[] = [];
+    try {
+      const opened = await Effect.runPromise(
+        makeScopedChatGptBrowserHost(options(root, browser, settled)).open,
+      );
+      await Effect.runPromise(opened.transport.send(sendRequest()));
+      const nativeIdentity = {
+        conversationId: "conversation-native",
+        userMessageId: "user-message-native",
+        providerTurnId: "provider-turn-native",
+      };
+      browser.observe({
+        providerOperationId: operationId,
+        state: "running",
+        nativeIdentity,
+        assistantRevisions: [{ itemId: "assistant-late-order", order: 2, text: "working" }],
+      });
+      const assistantPage = await Effect.runPromise(
+        opened.transport.replay({
+          type: "events.replay",
+          providerOperationId: operationId,
+          after: ChatGptBrowserProviderV1EventSequence.make(0),
+        }),
+      );
+      expect(assistantPage.events[0]?.payload).toMatchObject({
+        type: "assistant.revision",
+        ordinal: 2,
+      });
+
+      browser.observe({
+        providerOperationId: operationId,
+        state: "running",
+        nativeIdentity,
+        assistantRevisions: [{ itemId: "assistant-late-order", order: 2, text: "working" }],
+        toolRevisions: [
+          { itemId: "tool-discovered-late", order: 1, toolName: "web.run", status: "running" },
+        ],
+      });
+      const toolPage = await Effect.runPromise(
+        opened.transport.replay({
+          type: "events.replay",
+          providerOperationId: operationId,
+          after: assistantPage.highWater,
+        }),
+      );
+      expect(toolPage.events[0]?.payload).toMatchObject({
+        type: "tool.revision",
+        itemId: "tool-discovered-late",
+        ordinal: 1,
+      });
+      await Effect.runPromise(opened.close);
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("fails closed before persisting an unbounded live revision set", async () => {
+    const root = await tempRoot();
+    const browser = fakeBrowser();
+    const settled: string[] = [];
+    try {
+      const opened = await Effect.runPromise(
+        makeScopedChatGptBrowserHost(options(root, browser, settled)).open,
+      );
+      await Effect.runPromise(opened.transport.send(sendRequest()));
+      browser.observe({
+        providerOperationId: operationId,
+        state: "running",
+        nativeIdentity: {
+          conversationId: "conversation-native",
+          userMessageId: "user-message-native",
+          providerTurnId: "provider-turn-native",
+        },
+        toolRevisions: Array.from({ length: 257 }, (_, index) => ({
+          itemId: `tool-${index}`,
+          order: index,
+          toolName: "bounded-tool",
+          status: "running" as const,
+        })),
+      });
+      await expect(
+        Effect.runPromise(
+          opened.transport.replay({
+            type: "events.replay",
+            providerOperationId: operationId,
+            after: ChatGptBrowserProviderV1EventSequence.make(0),
+          }),
+        ),
+      ).rejects.toMatchObject({ code: "browser_unavailable" });
+      await Effect.runPromise(opened.close);
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("cancels by exact provider operation and seals drain only after the T3 settlement fence", async () => {
     const root = await tempRoot();
     const browser = fakeBrowser();
