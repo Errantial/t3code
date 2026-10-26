@@ -1022,6 +1022,95 @@ describe("ChatGPT Browser ProviderAdapterV2", () => {
       ),
   );
 
+  it.effect("settles a late assistant final as interrupted after a cancelled terminal", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const attemptId = RunAttemptId.make("attempt-chatgpt-browser-cancel-late-final");
+        const operationId = chatGptBrowserProviderOperationIdForAttempt(attemptId);
+        const operationStore = yield* memoryOperationStore();
+        const finalText = "partial assistant text";
+        const fake = makeFakeChatGptBrowserProviderV1Transport({
+          providerSessionId,
+          initialOperationId: operationId,
+          events: [
+            {
+              providerOperationId: operationId,
+              sequence: seq(1),
+              payload: { type: "operation.terminal", status: "cancelled" },
+            },
+            {
+              providerOperationId: operationId,
+              sequence: seq(2),
+              payload: {
+                type: "assistant.revision",
+                itemId: "assistant-late",
+                ordinal: 1,
+                text: "partial assistant",
+              },
+            },
+            {
+              providerOperationId: operationId,
+              sequence: seq(3),
+              payload: {
+                type: "assistant.final",
+                itemId: "assistant-late",
+                ordinal: 1,
+                contentHash: "fake-final-content",
+                contentLength: finalText.length,
+              },
+            },
+            {
+              providerOperationId: operationId,
+              sequence: seq(4),
+              payload: { type: "operation.drained", terminalSequence: seq(1) },
+            },
+          ],
+          finalText,
+        });
+        const runtime = yield* openRuntime({ host: host(fake.transport), operationStore });
+        const providerThread = yield* runtime.ensureThread({
+          threadId,
+          modelSelection: { instanceId, model: "default" },
+          runtimePolicy: {
+            runtimeMode: "full-access",
+            interactionMode: "default",
+            cwd: "/workspace",
+          },
+        });
+        yield* operationStore.prepare({
+          attemptId,
+          providerOperationId: operationId,
+          providerSessionId,
+          providerThreadId: providerThread.id,
+        });
+        yield* operationStore.requestCancel({ attemptId, providerOperationId: operationId });
+
+        yield* runtime.startTurn(turnInput(providerThread, attemptId));
+        const projected = Array.from(
+          yield* runtime.events.pipe(
+            Stream.tap(checkpointChatGptBrowserProviderEvent),
+            Stream.takeUntil((event) => event.type === "turn.terminal"),
+            Stream.runCollect,
+          ),
+        );
+        const assistantItems = projected.flatMap((event) =>
+          event.type === "turn_item.updated" && event.turnItem.type === "assistant_message"
+            ? [event.turnItem]
+            : [],
+        );
+
+        expect(fake.calls.cancelledOperationIds).toEqual([operationId]);
+        expect(assistantItems.at(-1)).toMatchObject({
+          text: finalText,
+          streaming: false,
+          status: "interrupted",
+        });
+        expect(projected.at(-1)).toMatchObject({ type: "turn.terminal", status: "interrupted" });
+        expect(yield* operationStore.get(attemptId)).toMatchObject({ consumerHighWater: 4 });
+      }),
+    ),
+  );
+
   it.effect("reissues only the exact durable cancellation after recovery", () =>
     Effect.scoped(
       Effect.gen(function* () {

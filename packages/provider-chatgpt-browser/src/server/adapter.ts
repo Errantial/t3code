@@ -441,6 +441,16 @@ export const makeChatGptBrowserAdapterV2 = Effect.fn("makeChatGptBrowserAdapterV
               sequence: checkpointSequence,
             });
 
+      const settledAssistantStatus = (
+        turn: ActiveTurn,
+      ): "completed" | "cancelled" | "interrupted" | "failed" => {
+        if (turn.terminal?.status === "cancelled") {
+          return turn.interruptRequested ? "interrupted" : "cancelled";
+        }
+        if (turn.terminal?.status === "failed") return "failed";
+        return "completed";
+      };
+
       const updateAssistant = Effect.fnUntraced(function* (
         turn: ActiveTurn,
         itemId: string,
@@ -885,7 +895,7 @@ export const makeChatGptBrowserAdapterV2 = Effect.fn("makeChatGptBrowserAdapterV
                   event.payload.ordinal ?? previous?.liveOrdinal ?? 0,
                   yield* readFinalText(transport, turn, event.payload),
                   false,
-                  "completed",
+                  settledAssistantStatus(turn),
                   event.sequence,
                 );
                 break;
