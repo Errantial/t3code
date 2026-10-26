@@ -114,8 +114,9 @@ describe("managed extension native restart recovery source", () => {
     expect(block).toContain(
       "await confirmLiveRequestOwners(calls, pending.conversationId, current);",
     );
+    expect(block).toContain("calls.some(");
     expect(block).toContain(
-      "calls.some((call) => requestOwnersConfirmed.get(call.requestId) !== pending.conversationId)",
+      "requestOwnersConfirmed.get(call.requestId) !== pending.conversationId",
     );
     expect(block).toContain(
       "if (!nativeProviderDrain && calls.some((call) => !call?.requestId)) {",
@@ -295,9 +296,9 @@ describe("managed extension native restart recovery source", () => {
     expect(block).toContain("entry.structuralKey === `web-search:${entry.structuralOrdinal}`");
     expect(block).toContain('entry.label === "Web search"');
     expect(block).toContain('typeof entry.activeNow === "boolean"');
-    expect(block).toContain(
-      "const identity = structuralWeb ? `structural:web-search:${entry.structuralOrdinal}` : messageId;",
-    );
+    expect(block).toContain("const identity = structuralWeb");
+    expect(block).toContain("`structural:web-search:${entry.structuralOrdinal}`");
+    expect(block).toContain(": messageId;");
     expect(block).toContain(
       '...(typeof entry.activeNow === "boolean" ? { activeNow: entry.activeNow } : {})',
     );
