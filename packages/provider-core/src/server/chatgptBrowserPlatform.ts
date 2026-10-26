@@ -114,6 +114,22 @@ interface SpawnBrowserInput {
   readonly environment: NodeJS.ProcessEnv;
 }
 
+/** @internal Exported only so process-launch semantics can be regression tested without Chromium. */
+export function chatGptBrowserSpawnOptions(
+  input: Pick<SpawnBrowserInput, "detached" | "visible" | "environment">,
+): NodeChildProcess.SpawnOptions {
+  return {
+    env: input.environment,
+    detached: input.detached,
+    shell: false,
+    // Ordinary provider Chromium is positioned off-screen by its browser args. Do not translate
+    // that presentation intent into SW_HIDE: Chromium can suspend an actually hidden top-level
+    // window and stop advancing ChatGPT DOM/tool observations until the window is shown again.
+    windowsHide: false,
+    stdio: "ignore",
+  };
+}
+
 /** @internal Exported only so the platform boundary can be tested without launching a real browser. */
 export interface ChatGptBrowserPlatformRuntime {
   readonly spawnBrowser: (input: SpawnBrowserInput) => Promise<SpawnedBrowserProcess>;
@@ -184,13 +200,11 @@ function commandResult(
 
 function spawnBrowser(input: SpawnBrowserInput): Promise<SpawnedBrowserProcess> {
   return new Promise((resolve, reject) => {
-    const child = NodeChildProcess.spawn(input.executablePath, [...input.args], {
-      env: input.environment,
-      detached: input.detached,
-      shell: false,
-      windowsHide: !input.visible,
-      stdio: "ignore",
-    });
+    const child = NodeChildProcess.spawn(
+      input.executablePath,
+      [...input.args],
+      chatGptBrowserSpawnOptions(input),
+    );
     let settled = false;
     const wait = new Promise<void>((waitResolve) => child.once("exit", () => waitResolve()));
     child.once("error", (cause) => {

@@ -9,6 +9,7 @@ import { describe, expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 
 import {
+  chatGptBrowserSpawnOptions,
   chatGptBrowserManagedTargetForHost,
   makeChatGptBrowserPlatformForHost,
   makeLinuxChatGptBrowserPlatform,
@@ -149,6 +150,16 @@ describe("ChatGPT browser managed target", () => {
 });
 
 describe("Windows ChatGPT browser platform", () => {
+  it("keeps ordinary managed Chromium as a normal OS window instead of SW_HIDE", () => {
+    expect(
+      chatGptBrowserSpawnOptions({
+        detached: false,
+        visible: false,
+        environment: {},
+      }).windowsHide,
+    ).toBe(false);
+  });
+
   it.effect("uses deterministic managed paths and principal-only secret operations", () =>
     withTempRoot((root) =>
       Effect.gen(function* () {

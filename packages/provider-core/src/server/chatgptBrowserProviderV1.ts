@@ -404,7 +404,7 @@ export interface ChatGptBrowserPlatformPort {
     readonly profileDirectory: string;
     readonly extensionRoot: string;
     readonly args: ReadonlyArray<string>;
-    /** Interactive authentication needs a real window; all ordinary provider work stays hidden. */
+    /** Interactive authentication is on-screen; ordinary provider work uses an off-screen window. */
     readonly visible?: boolean;
   }) => Effect.Effect<ChatGptBrowserProcessHandle, ChatGptBrowserHostError>;
   readonly stopBrowser: (
