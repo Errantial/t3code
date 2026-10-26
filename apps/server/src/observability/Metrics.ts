@@ -39,6 +39,10 @@ export const providerTurnDuration = Metric.timer("t3_provider_turn_duration", {
   description: "Time for the provider adapter to start a turn, not how long the turn runs.",
 });
 
+export const providerStreamRecoveriesTotal = Metric.counter("t3_provider_stream_recoveries_total", {
+  description: "Recoverable provider event-stream losses by recovery stage and driver.",
+});
+
 // OTLP carries the unit, and Prometheus names the series by it: a unitless gauge gains `_ratio`.
 export const serverResidentBytes = Metric.gauge("t3_server_resident_bytes", {
   description: "Resident memory of the server process.",

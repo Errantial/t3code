@@ -41,6 +41,7 @@ import * as Stream from "effect/Stream";
 import * as McpSessionRegistry from "../mcp/McpSessionRegistry.ts";
 import * as McpAppModelContext from "../mcpApps/McpAppModelContext.ts";
 import * as ServerSettings from "../serverSettings.ts";
+import { increment, providerStreamRecoveriesTotal } from "../observability/Metrics.ts";
 import * as CheckpointService from "./CheckpointService.ts";
 import * as EventSink from "./EventSink.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
@@ -1529,6 +1530,10 @@ export const layer: Layer.Layer<
                     ],
                   });
                   if (recovery.committed) {
+                    yield* increment(providerStreamRecoveriesTotal, {
+                      stage: "reopen_enqueued",
+                      driver: input.providerThread.driver,
+                    });
                     yield* Effect.logWarning("orchestration-v2.provider-stream-recovery-enqueued", {
                       runId: input.run.id,
                       attemptId: input.attempt.id,

@@ -1,10 +1,12 @@
 import {
+  CommandId,
   EnvironmentId,
   EventId,
   MessageId,
   ORCHESTRATION_V2_WS_METHODS,
   ThreadId,
   TurnItemId,
+  type OrchestrationV2Command,
   type OrchestrationV2ThreadDetailSnapshot,
   type OrchestrationV2ThreadProjection,
   type OrchestrationV2ThreadStreamItem,
@@ -126,6 +128,7 @@ const makeHarness = Effect.fn("TestEnvironmentThreads.makeHarness")(function* (o
   const wakeups = yield* Queue.unbounded<ConnectionWakeups.ConnectionWakeup>();
   const savedThreads = yield* Ref.make<ReadonlyArray<OrchestrationV2ThreadDetailSnapshot>>([]);
   const removedThreads = yield* Ref.make<ReadonlyArray<ThreadId>>([]);
+  const dispatchedCommands = yield* Ref.make<ReadonlyArray<OrchestrationV2Command>>([]);
   const supervisorState = yield* SubscriptionRef.make<SupervisorConnectionState>(
     AVAILABLE_CONNECTION_STATE,
   );
@@ -136,6 +139,10 @@ const makeHarness = Effect.fn("TestEnvironmentThreads.makeHarness")(function* (o
       ),
     );
   const client = {
+    [ORCHESTRATION_V2_WS_METHODS.dispatchCommand]: (command: OrchestrationV2Command) =>
+      Ref.updateAndGet(dispatchedCommands, (current) => [...current, command]).pipe(
+        Effect.map((current) => ({ sequence: current.length })),
+      ),
     [ORCHESTRATION_V2_WS_METHODS.subscribeThread]: (input: {
       readonly afterSequence?: number;
       readonly requestCompletionMarker?: true;
@@ -270,7 +277,10 @@ const makeHarness = Effect.fn("TestEnvironmentThreads.makeHarness")(function* (o
     supervisorSession,
     savedThreads,
     removedThreads,
+    dispatchedCommands,
     wakeups,
+    dispatchCommand: (command: OrchestrationV2Command) =>
+      client[ORCHESTRATION_V2_WS_METHODS.dispatchCommand](command),
     replaceSession: SubscriptionRef.set(
       supervisorSession,
       Option.some(testSession(client, options)),
@@ -1248,6 +1258,92 @@ describe("EnvironmentThreads", () => {
 
       expect(Option.isNone(recovered.error)).toBe(true);
       expect(yield* Ref.get(harness.subscriptionCount)).toBe(2);
+    }),
+  );
+
+  it.effect("replays after transport replacement without dispatching the active turn again", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness({ cached: BASE_PROJECTION, completionMarker: true });
+      const command = {
+        type: "message.dispatch",
+        commandId: CommandId.make("transport-loss-send"),
+        createdBy: "user",
+        creationSource: "web",
+        threadId: THREAD_ID,
+        messageId: MessageId.make("transport-loss-message"),
+        text: "Keep working through a temporary T3 Connect outage.",
+        attachments: [],
+        dispatchMode: { type: "start_immediately" },
+      } satisfies OrchestrationV2Command;
+
+      // This is the one client send that can cause the server/provider turn to start.
+      yield* harness.dispatchCommand(command);
+      yield* Queue.offer(harness.inputs, titleUpdated("Before transport loss", 8));
+      yield* Queue.offer(harness.inputs, synchronized());
+      yield* awaitThreadState(
+        harness.observed,
+        (value) =>
+          value.status === "live" &&
+          Option.getOrNull(value.data)?.thread.title === "Before transport loss",
+      );
+      expect(yield* Ref.get(harness.dispatchedCommands)).toEqual([command]);
+
+      // Model the environment transport disappearing: the live RPC session is
+      // removed and thread data becomes cached, but no command is re-issued.
+      yield* SubscriptionRef.set(harness.supervisorSession, Option.none());
+      yield* SubscriptionRef.set(harness.supervisorState, {
+        desired: true,
+        network: "online",
+        phase: "backoff",
+        stage: null,
+        attempt: 1,
+        generation: 1,
+        lastFailure: null,
+        retryAt: 1,
+      });
+      yield* awaitThreadState(harness.observed, (value) => value.status === "cached");
+      expect(yield* Ref.get(harness.dispatchedCommands)).toEqual([command]);
+
+      yield* SubscriptionRef.set(harness.supervisorState, {
+        desired: true,
+        network: "online",
+        phase: "connecting",
+        stage: null,
+        attempt: 2,
+        generation: 1,
+        lastFailure: null,
+        retryAt: null,
+      });
+      yield* harness.replaceSession;
+      yield* SubscriptionRef.set(harness.supervisorState, {
+        desired: true,
+        network: "online",
+        phase: "connected",
+        stage: null,
+        attempt: 2,
+        generation: 2,
+        lastFailure: null,
+        retryAt: null,
+      });
+      for (let attempt = 0; attempt < 100; attempt += 1) {
+        if ((yield* Ref.get(harness.subscriptionCount)) >= 2) break;
+        yield* Effect.yieldNow;
+      }
+      expect(yield* Ref.get(harness.subscriptionCount)).toBe(2);
+      expect(yield* Ref.get(harness.lastSubscribeAfterSequence)).toBe(8);
+
+      yield* Queue.offer(harness.inputs, titleUpdated("Replayed after reconnect", 9));
+      yield* Queue.offer(harness.inputs, synchronized());
+      const recovered = yield* awaitThreadState(
+        harness.observed,
+        (value) =>
+          value.status === "live" &&
+          Option.getOrNull(value.data)?.thread.title === "Replayed after reconnect",
+      );
+      expect(Option.isNone(recovered.error)).toBe(true);
+      // Replacement-session replay/resubscribe must not emit another
+      // orchestration.dispatchCommand, therefore it cannot trigger another provider send.
+      expect(yield* Ref.get(harness.dispatchedCommands)).toEqual([command]);
     }),
   );
 

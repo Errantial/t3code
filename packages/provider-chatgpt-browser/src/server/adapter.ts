@@ -30,8 +30,11 @@ import {
 } from "@t3tools/provider-core/server/failure";
 import { turnScopedSelectionTransition } from "@t3tools/provider-core/server/selectionTransition";
 import * as Cause from "effect/Cause";
+import * as Clock from "effect/Clock";
 import * as DateTime from "effect/DateTime";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
+import * as Metric from "effect/Metric";
 import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
@@ -52,6 +55,21 @@ import {
 } from "./operationRecovery.ts";
 
 export const CHATGPT_BROWSER_DRIVER_KIND = ProviderDriverKind.make("chatgptBrowser");
+
+const chatGptBrowserTransportRecoveriesTotal = Metric.counter(
+  "t3_chatgpt_browser_transport_recoveries_total",
+  {
+    description:
+      "ChatGPT Browser exact-operation transport recovery events by stage and operation.",
+  },
+);
+const chatGptBrowserTransportRecoveryDuration = Metric.timer(
+  "t3_chatgpt_browser_transport_recovery_duration",
+  {
+    description:
+      "Time from the first retryable ChatGPT Browser transport interruption to recovery.",
+  },
+);
 
 export const ChatGptBrowserProviderCapabilitiesV2 = {
   sessions: {
@@ -360,7 +378,12 @@ export const makeChatGptBrowserAdapterV2 = Effect.fn("makeChatGptBrowserAdapterV
         Effect.gen(function* () {
           let recovering = false;
           let recoveryAttempt = 0;
+          let recoveryStartedAt: bigint | undefined;
+          let lastError: ChatGptBrowserProviderV1Error | undefined;
           for (;;) {
+            if ((turn.finished || active !== turn) && lastError !== undefined) {
+              return yield* Effect.fail(lastError);
+            }
             const result = yield* attempt().pipe(
               Effect.match({
                 onFailure: (error) => ({ ok: false as const, error }),
@@ -368,6 +391,29 @@ export const makeChatGptBrowserAdapterV2 = Effect.fn("makeChatGptBrowserAdapterV
               }),
             );
             if (result.ok) {
+              if (recovering && recoveryStartedAt !== undefined) {
+                const recoveryDuration = Duration.nanos(
+                  (yield* Clock.monotonicTimeNanos) - recoveryStartedAt,
+                );
+                yield* Metric.update(
+                  Metric.withAttributes(chatGptBrowserTransportRecoveriesTotal, [
+                    ["stage", "recovered"],
+                    ["operation", operation],
+                  ]),
+                  1,
+                );
+                yield* Metric.update(chatGptBrowserTransportRecoveryDuration, recoveryDuration);
+                yield* Effect.logInfo("ChatGPT Browser transport recovered exact operation", {
+                  operation,
+                  providerOperationId: turn.operationId,
+                  providerSessionId: input.providerSessionId,
+                  providerInstanceId: options.instanceId,
+                  runId: turn.input.runId,
+                  runAttemptId: turn.input.attemptId,
+                  recoveryAttempts: recoveryAttempt,
+                  recoveryDurationMs: Duration.toMillis(recoveryDuration),
+                });
+              }
               if (recovering && !turn.finished && active === turn) {
                 yield* updateSession("running", null);
               }
@@ -376,8 +422,18 @@ export const makeChatGptBrowserAdapterV2 = Effect.fn("makeChatGptBrowserAdapterV
             if (!isRetryableTransportInterruption(result.error)) {
               return yield* Effect.fail(result.error);
             }
+            lastError = result.error;
             recoveryAttempt += 1;
             const delayMs = Math.min(5_000, 100 * 2 ** Math.min(6, recoveryAttempt - 1));
+            recoveryStartedAt ??= yield* Clock.monotonicTimeNanos;
+            yield* Metric.update(
+              Metric.withAttributes(chatGptBrowserTransportRecoveriesTotal, [
+                ["stage", "interrupted"],
+                ["operation", operation],
+                ["code", result.error.code],
+              ]),
+              1,
+            );
             if (!recovering && !turn.finished && active === turn) {
               recovering = true;
               yield* updateSession("starting", null);
@@ -387,6 +443,10 @@ export const makeChatGptBrowserAdapterV2 = Effect.fn("makeChatGptBrowserAdapterV
               {
                 operation,
                 providerOperationId: turn.operationId,
+                providerSessionId: input.providerSessionId,
+                providerInstanceId: options.instanceId,
+                runId: turn.input.runId,
+                runAttemptId: turn.input.attemptId,
                 code: result.error.code,
                 recoveryAttempt,
                 delayMs,

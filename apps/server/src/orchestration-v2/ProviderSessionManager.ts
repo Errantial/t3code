@@ -36,7 +36,9 @@ import * as Stream from "effect/Stream";
 
 import { normalizeModelMetricLabel } from "../observability/Attributes.ts";
 import {
+  increment,
   providerSessionsTotal,
+  providerStreamRecoveriesTotal,
   providerTurnDuration,
   providerTurnsTotal,
   withMetrics,
@@ -2188,6 +2190,10 @@ export const layerWithOptions = (
                   reason: "runtime_recovery",
                   detail: Cause.pretty(cause),
                 }).pipe(logReleaseFailure(entry.runtime.providerSessionId));
+                yield* increment(providerStreamRecoveriesTotal, {
+                  stage: "stream_lost",
+                  driver: entry.runtime.driver,
+                });
                 yield* Effect.logWarning("orchestration-v2.provider-stream-recovery-requested", {
                   providerSessionId: entry.runtime.providerSessionId,
                   providerInstanceId: entry.runtime.instanceId,

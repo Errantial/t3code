@@ -19,8 +19,11 @@ import {
 } from "@t3tools/provider-core/server/chatgptBrowserProviderV1";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
+import * as Logger from "effect/Logger";
 import * as Stream from "effect/Stream";
 
 import { makeFakeChatGptBrowserProviderV1Transport } from "../testing.ts";
@@ -1303,6 +1306,10 @@ describe("ChatGPT Browser ProviderAdapterV2", () => {
   it.live("recovers a retryable replay interruption without resending the exact operation", () =>
     Effect.scoped(
       Effect.gen(function* () {
+        const recoveryLogs: string[] = [];
+        const recoveryLogger = Logger.make(({ message }) => {
+          recoveryLogs.push(String([message].flat()[0]));
+        });
         const attemptId = RunAttemptId.make("attempt-chatgpt-browser-replay-error");
         const operationId = chatGptBrowserProviderOperationIdForAttempt(attemptId);
         const replayError: ChatGptBrowserProviderV1Error = {
@@ -1337,7 +1344,9 @@ describe("ChatGPT Browser ProviderAdapterV2", () => {
             cwd: "/workspace",
           },
         });
-        yield* runtime.startTurn(turnInput(providerThread, attemptId));
+        yield* runtime
+          .startTurn(turnInput(providerThread, attemptId))
+          .pipe(Effect.provide(Logger.layer([recoveryLogger])));
         const events = Array.from(
           yield* runtime.events.pipe(
             Stream.takeUntil((event) => event.type === "turn.terminal"),
@@ -1363,6 +1372,82 @@ describe("ChatGPT Browser ProviderAdapterV2", () => {
           type: "turn.terminal",
           status: "completed",
         });
+        expect(recoveryLogs).toEqual(
+          expect.arrayContaining([
+            "ChatGPT Browser transport interrupted; retrying exact operation",
+            "ChatGPT Browser transport recovered exact operation",
+          ]),
+        );
+      }),
+    ),
+  );
+
+  it.live("stops retrying exact cancellation after the turn finishes", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const attemptId = RunAttemptId.make("attempt-chatgpt-browser-cancel-recovery-finished");
+        const operationId = chatGptBrowserProviderOperationIdForAttempt(attemptId);
+        const replayGate = yield* Deferred.make<void>();
+        const cancelAttempted = yield* Deferred.make<void>();
+        const retryableError: ChatGptBrowserProviderV1Error = {
+          code: "browser_unavailable",
+          retryable: true,
+          message: "Browser connection closed.",
+        };
+        const fake = makeFakeChatGptBrowserProviderV1Transport({
+          providerSessionId,
+          events: coreEvents(operationId, "hello"),
+          finalText: "hello",
+        });
+        let cancelCalls = 0;
+        const transport = {
+          ...fake.transport,
+          replay: (request: Parameters<typeof fake.transport.replay>[0]) =>
+            Deferred.await(replayGate).pipe(Effect.andThen(fake.transport.replay(request))),
+          cancel: (_request: Parameters<typeof fake.transport.cancel>[0]) =>
+            Effect.gen(function* () {
+              cancelCalls += 1;
+              yield* Deferred.succeed(cancelAttempted, undefined);
+              return yield* Effect.fail(retryableError);
+            }),
+        };
+        const runtime = yield* openRuntime({ host: host(transport) });
+        const providerThread = yield* runtime.ensureThread({
+          threadId,
+          modelSelection: { instanceId, model: "default" },
+          runtimePolicy: {
+            runtimeMode: "full-access",
+            interactionMode: "default",
+            cwd: "/workspace",
+          },
+        });
+        yield* runtime.startTurn(turnInput(providerThread, attemptId));
+        const started = Array.from(
+          yield* runtime.events.pipe(
+            Stream.takeUntil((event) => event.type === "provider_turn.updated"),
+            Stream.runCollect,
+          ),
+        );
+        const providerTurn = started.findLast((event) => event.type === "provider_turn.updated");
+        expect(providerTurn?.type).toBe("provider_turn.updated");
+        if (providerTurn?.type !== "provider_turn.updated") return;
+
+        const interruptFiber = yield* runtime
+          .interruptTurn({ providerThread, providerTurnId: providerTurn.providerTurn.id })
+          .pipe(Effect.exit, Effect.forkScoped);
+        yield* Deferred.await(cancelAttempted);
+        yield* Deferred.succeed(replayGate, undefined);
+        const terminal = Array.from(
+          yield* runtime.events.pipe(
+            Stream.takeUntil((event) => event.type === "turn.terminal"),
+            Stream.runCollect,
+          ),
+        );
+        expect(terminal.at(-1)).toMatchObject({ type: "turn.terminal", status: "completed" });
+        const interrupted = yield* Fiber.join(interruptFiber).pipe(Effect.timeout("1 second"));
+        expect(interrupted._tag).toBe("Failure");
+        expect(cancelCalls).toBe(1);
+        expect(fake.calls.sentOperationIds).toEqual([operationId]);
       }),
     ),
   );
