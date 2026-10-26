@@ -5233,6 +5233,20 @@ async function maintainOnce() {
       .map(cleanConversationId)
       .filter(Boolean),
   );
+  // Provider-v1 owns its browser observation lifecycle independently of the legacy/app status
+  // projection above. After an MV3 worker restart the ordinary `/status` response can briefly
+  // classify that same conversation as closable even though the exact native operation is still
+  // sent/running/terminal and awaiting replay/drain. Never let generic managed-tab pruning close
+  // an exact provider observer while the durable operation is active; drain is the release point.
+  for (const row of nativeProviderOperationSummaries()) {
+    const conversationId = cleanConversationId(row?.conversationId);
+    if (
+      conversationId &&
+      (row?.state === "sent" || row?.state === "running" || row?.state === "terminal")
+    ) {
+      nonDiscardable.add(conversationId);
+    }
+  }
   const protectionWork = nonDiscardable.size > 0 || Object.keys(discardProtectedTabs).length > 0;
   // Chats the app has finished with: compacted source chats and stopped worker chats beyond
   // the ones the prime is likely to come back to. Their tabs are memory and nothing else.

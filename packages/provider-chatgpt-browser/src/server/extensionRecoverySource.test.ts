@@ -241,6 +241,20 @@ describe("managed extension native restart recovery source", () => {
     expect(block).toContain("await chrome.tabs.reload(tab.id);");
   });
 
+  it("protects active exact provider conversations from ordinary managed-tab pruning", async () => {
+    const source = await backgroundSource();
+    const block = sourceBetween(source, "const nonDiscardable = new Set(", "const managedWork =");
+
+    expect(block).toContain("for (const row of nativeProviderOperationSummaries()) {");
+    expect(block).toContain('row?.state === "sent"');
+    expect(block).toContain('row?.state === "running"');
+    expect(block).toContain('row?.state === "terminal"');
+    expect(block).toContain("nonDiscardable.add(conversationId);");
+    expect(block.indexOf("nonDiscardable.add(conversationId);")).toBeLessThan(
+      block.indexOf("const closable = new Set("),
+    );
+  });
+
   it("keeps native drain final evidence refresh bounded away from repair and continuation control waits", async () => {
     const source = await contentSource();
     const block = sourceBetween(
