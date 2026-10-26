@@ -1,6 +1,9 @@
 import type {
   OrchestrationV2PendingBackgroundTask,
   OrchestrationV2ProviderGoal,
+  OrchestrationV2ProviderSession,
+  OrchestrationV2ProviderTurn,
+  RunAttemptId,
   ThreadId,
 } from "@t3tools/contracts";
 import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/shell";
@@ -9,12 +12,45 @@ import {
   presentProviderGoal,
 } from "@t3tools/client-runtime/state/thread-execution";
 import { childThreadInputsTitle } from "@t3tools/client-runtime/state/threads";
-import { GitBranchIcon, MessageCircleIcon, ShieldQuestionIcon, TargetIcon } from "lucide-react";
+import {
+  GitBranchIcon,
+  MessageCircleIcon,
+  RefreshCwIcon,
+  ShieldQuestionIcon,
+  TargetIcon,
+} from "lucide-react";
 import { Fragment } from "react";
 import { cn } from "~/lib/utils";
 import { Button, InlineButton } from "../ui/button";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import type { ComposerBannerStackItem } from "./ComposerBannerStack";
+
+export function isProviderStreamRecoveryVisible(input: {
+  readonly providerSession: Pick<OrchestrationV2ProviderSession, "driver" | "status"> | null;
+  readonly activeAttemptId: RunAttemptId | null | undefined;
+  readonly providerTurns: ReadonlyArray<Pick<OrchestrationV2ProviderTurn, "runAttemptId">>;
+}): boolean {
+  return (
+    input.providerSession?.driver === "chatgptBrowser" &&
+    input.providerSession.status === "starting" &&
+    input.activeAttemptId != null &&
+    input.providerTurns.some((turn) => turn.runAttemptId === input.activeAttemptId)
+  );
+}
+
+export function providerStreamRecoveryBannerItem(input: {
+  readonly providerSessionId: string;
+}): ComposerBannerStackItem {
+  return {
+    id: `provider-stream-recovery:${input.providerSessionId}`,
+    variant: "info",
+    priority: "activity",
+    icon: <RefreshCwIcon className="motion-safe:animate-spin" />,
+    title: "Provider stream reconnecting",
+    description:
+      "ChatGPT may still be working. T3 will resume live updates from the existing turn when the stream reconnects.",
+  };
+}
 
 /** Subagents waiting on the user, unless the parent is itself waiting on them. */
 export function childInputBannerItem(input: {

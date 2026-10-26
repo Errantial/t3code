@@ -28,6 +28,7 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
+import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import { TestClock } from "effect/testing";
 import { HttpServer } from "effect/http";
@@ -178,7 +179,10 @@ interface TestProviderRuntimeState {
   readonly unloadedNativeThreadIds: ReadonlyArray<string>;
   readonly eventQueues: ReadonlyMap<
     string,
-    Queue.Queue<ProviderAdapter.ProviderAdapterV2Event, Cause.Done>
+    Queue.Queue<
+      ProviderAdapter.ProviderAdapterV2Event,
+      ProviderAdapter.ProviderAdapterV2Error | Cause.Done
+    >
   >;
 }
 
@@ -357,6 +361,7 @@ const makeProviderAdapter = Effect.fnUntraced(function* (
   state: Ref.Ref<TestProviderRuntimeState>,
   options: {
     readonly failEventStream?: boolean;
+    readonly eventStreamRecovery?: "exact_operation_replay";
     readonly capabilities?: OrchestrationV2ProviderCapabilities;
     readonly mcpConfigs?: Ref.Ref<
       ReadonlyArray<McpProviderSession.McpProviderSessionConfig | undefined>
@@ -414,7 +419,10 @@ const makeProviderAdapter = Effect.fnUntraced(function* (
           yield* Ref.update(options.mcpConfigs, (configs) => [...configs, mcpConfig]);
         }
         const now = yield* DateTime.now;
-        const events = yield* Queue.unbounded<ProviderAdapter.ProviderAdapterV2Event, Cause.Done>();
+        const events = yield* Queue.unbounded<
+          ProviderAdapter.ProviderAdapterV2Event,
+          ProviderAdapter.ProviderAdapterV2Error | Cause.Done
+        >();
         const session = makeProviderSession({
           providerSessionId: input.providerSessionId,
           now,
@@ -439,6 +447,9 @@ const makeProviderAdapter = Effect.fnUntraced(function* (
           driver: CODEX_DRIVER,
           providerSessionId: input.providerSessionId,
           providerSession: session,
+          ...(options.eventStreamRecovery === undefined
+            ? {}
+            : { eventStreamRecovery: options.eventStreamRecovery }),
           events: options.failEventStream
             ? Stream.fail(
                 new ProviderAdapter.ProviderAdapterEventStreamError({
@@ -498,6 +509,7 @@ function layerTest(input: {
   readonly idleTimeoutMs: number;
   readonly maxIdlePinMs?: number;
   readonly failEventStream?: boolean;
+  readonly eventStreamRecovery?: "exact_operation_replay";
   readonly capabilities?: OrchestrationV2ProviderCapabilities;
   readonly mcpConfigs?: Ref.Ref<
     ReadonlyArray<McpProviderSession.McpProviderSessionConfig | undefined>
@@ -539,6 +551,9 @@ function layerTest(input: {
   const layerRegistry = Layer.unwrap(
     makeProviderAdapter(input.state, {
       failEventStream: input.failEventStream ?? false,
+      ...(input.eventStreamRecovery === undefined
+        ? {}
+        : { eventStreamRecovery: input.eventStreamRecovery }),
       ...(input.capabilities === undefined ? {} : { capabilities: input.capabilities }),
       ...(input.mcpConfigs === undefined ? {} : { mcpConfigs: input.mcpConfigs }),
       ...(input.beforeOpen === undefined ? {} : { beforeOpen: input.beforeOpen }),
@@ -1972,6 +1987,83 @@ it.effect("ProviderSessionManagerV2 interrupts event subscriptions on server shu
   }),
 );
 
+it.effect.each(["failure", "clean-close"] as const)(
+  "ProviderSessionManagerV2 marks exact-operation raw stream %s recoverable after removing the old session",
+  (mode) =>
+    Effect.gen(function* () {
+      const state = yield* Ref.make(emptyState);
+      const effect = Effect.gen(function* () {
+        const eventSink = yield* EventSink.EventSinkV2;
+        const idAllocator = yield* IdAllocator.IdAllocatorV2;
+        const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+        const now = yield* DateTime.now;
+        const threadId = ThreadId.make(`thread-provider-session-manager-recoverable-${mode}`);
+        const providerSessionId = yield* idAllocator.allocate.providerSession({
+          providerInstanceId: modelSelection.instanceId,
+          threadId,
+        });
+        yield* eventSink.write({
+          events: [yield* makeThreadCreatedEvent({ idAllocator, threadId, now })],
+        });
+        const runtime = yield* manager.open({
+          threadId,
+          providerSessionId,
+          modelSelection,
+          runtimePolicy,
+        });
+        const subscription = yield* runtime.subscribeEvents!;
+        const adapterQueue = (yield* Ref.get(state)).eventQueues.get(String(providerSessionId));
+        assert.isDefined(adapterQueue);
+
+        if (mode === "failure") {
+          yield* Queue.fail(
+            adapterQueue!,
+            new ProviderAdapter.ProviderAdapterEventStreamError({
+              driver: CODEX_DRIVER,
+              providerSessionId,
+              cause: "simulated raw adapter stream loss",
+            }),
+          );
+        } else {
+          yield* Queue.end(adapterQueue!);
+        }
+
+        const exit = yield* subscription.events.pipe(Stream.runCollect, Effect.exit);
+        assert.isTrue(Exit.isFailure(exit));
+        if (Exit.isFailure(exit)) {
+          const error = Cause.findErrorOption(exit.cause);
+          assert.isTrue(Option.isSome(error));
+          if (Option.isSome(error)) {
+            assert.isTrue(Schema.is(ProviderAdapter.ProviderAdapterEventStreamError)(error.value));
+            if (Schema.is(ProviderAdapter.ProviderAdapterEventStreamError)(error.value)) {
+              assert.equal(error.value.recovery, "exact_operation_replay");
+            }
+          }
+        }
+
+        assert.isTrue(Option.isNone(yield* manager.get(providerSessionId)));
+        const reopened = yield* manager.open({
+          threadId,
+          providerSessionId,
+          modelSelection,
+          runtimePolicy,
+        });
+        assert.notStrictEqual(reopened, runtime);
+        assert.equal((yield* Ref.get(state)).openCount, 2);
+      });
+
+      yield* effect.pipe(
+        Effect.provide(
+          layerTest({
+            state,
+            idleTimeoutMs: 60_000,
+            eventStreamRecovery: "exact_operation_replay",
+          }),
+        ),
+      );
+    }),
+);
+
 it.effect("ProviderSessionManagerV2 drains subscribers when the provider stops", () =>
   Effect.gen(function* () {
     const state = yield* Ref.make(emptyState);
@@ -3107,6 +3199,77 @@ it.effect("ProviderSessionManagerV2 marks pending runtime requests non-live on r
       assert.equal(request?.responseCapability.type, "not_resumable");
       assert.equal(requestNode?.status, "failed");
       assert.equal(requestTurnItem?.status, "failed");
+    });
+
+    yield* effect.pipe(Effect.provide(layerTest({ state, idleTimeoutMs: 1000 })));
+  }),
+);
+
+it.effect("ProviderSessionManagerV2 preserves pending runtime requests during exact recovery", () =>
+  Effect.gen(function* () {
+    const state = yield* Ref.make(emptyState);
+    const effect = Effect.gen(function* () {
+      const eventSink = yield* EventSink.EventSinkV2;
+      const idAllocator = yield* IdAllocator.IdAllocatorV2;
+      const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+      const projectionStore = yield* ProjectionStore.ProjectionStoreV2;
+      const now = yield* DateTime.now;
+      const projectId = yield* idAllocator.allocate.project({
+        fixtureName: "provider-session-manager-request-recover",
+      });
+      const threadId = yield* idAllocator.allocate.thread({
+        fixtureName: "provider-session-manager-request-recover",
+        projectId,
+      });
+      const providerSessionId = yield* idAllocator.allocate.providerSession({
+        providerInstanceId: modelSelection.instanceId,
+        threadId,
+      });
+      const providerThread = makeProviderThread({
+        idAllocator,
+        threadId,
+        providerSessionId,
+        now,
+      });
+
+      yield* eventSink.write({
+        events: [yield* makeThreadCreatedEvent({ idAllocator, threadId, now })],
+      });
+      const pendingRequest = yield* makePendingRuntimeRequestEvents({
+        idAllocator,
+        threadId,
+        providerSessionId,
+        providerThread,
+        now,
+      });
+      yield* eventSink.write({ events: pendingRequest.events });
+      yield* manager.open({
+        threadId,
+        providerSessionId,
+        modelSelection,
+        runtimePolicy,
+      });
+      yield* manager.release({
+        providerSessionId,
+        reason: "runtime_recovery",
+        detail: "recoverable stream loss",
+      });
+
+      const projection = yield* projectionStore.getThreadProjection(threadId);
+      const request = projection.runtimeRequests.find(
+        (candidate) => candidate.id === pendingRequest.requestId,
+      );
+      const requestNode = projection.nodes.find((node) => node.id === pendingRequest.nodeId);
+      const requestTurnItem = projection.turnItems.find(
+        (item) => item.type === "approval_request" && item.requestId === pendingRequest.requestId,
+      );
+
+      assert.equal(request?.status, "pending");
+      assert.equal(request?.responseCapability.type, "live");
+      assert.equal(requestNode?.status, "waiting");
+      assert.equal(requestTurnItem?.status, "waiting");
+      assert.equal(projection.providerSessions.at(-1)?.status, "starting");
+      assert.isNull(projection.providerSessions.at(-1)?.lastError ?? null);
     });
 
     yield* effect.pipe(Effect.provide(layerTest({ state, idleTimeoutMs: 1000 })));

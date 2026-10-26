@@ -2488,6 +2488,133 @@ it.effect("refreshes pull requests after a provider stream exits with an error",
   }),
 );
 
+it.effect("requeues an accepted exact-operation stream loss without interrupting or failing", () =>
+  Effect.gen(function* () {
+    const loseStream = yield* Deferred.make<void>();
+    const interrupts = yield* Ref.make(0);
+    const recoveryGuards = yield* Ref.make<
+      ReadonlyArray<Parameters<EventSink.EventSinkV2["Service"]["writeIfRunCurrent"]>[0]>
+    >([]);
+    const providerSessionId = ProviderSessionId.make("session:recoverable-stream-loss");
+    const result = yield* captureRootRunTermination({
+      key: "recoverable-stream-loss",
+      shouldFinalizeRun: () => Effect.succeed(true),
+      eventStreamRecovery: "exact_operation_replay",
+      events: () =>
+        Stream.unwrap(
+          Deferred.await(loseStream).pipe(
+            Effect.as(
+              Stream.fail(
+                new ProviderAdapter.ProviderAdapterEventStreamError({
+                  driver,
+                  providerSessionId,
+                  recovery: "exact_operation_replay",
+                  cause: "raw stream lost",
+                }),
+              ),
+            ),
+          ),
+        ),
+      interruptTurn: () => Ref.update(interrupts, (count) => count + 1),
+      beforeTerminalWrite: (request) =>
+        Ref.update(recoveryGuards, (current) => [...current, request]).pipe(Effect.as(true)),
+      afterStart: () => Deferred.succeed(loseStream, undefined),
+    });
+
+    assert.equal(yield* Ref.get(interrupts), 0);
+    assert.deepEqual(result.written, []);
+    assert.deepEqual(result.observed, ["run:starting"]);
+    assert.equal(result.committedEffects.length, 1);
+    assert.deepEqual(result.committedEffects[0]?.request, {
+      type: "chatgpt-browser-operation.recover",
+      runId: backgroundScenarioIds("recoverable-stream-loss").runId,
+    });
+    const guards = yield* Ref.get(recoveryGuards);
+    assert.equal(guards.length, 1);
+    assert.equal(guards[0]?.expectedStatus, "running");
+    assert.equal(
+      guards[0]?.activeAttemptId,
+      backgroundScenarioIds("recoverable-stream-loss").attemptId,
+    );
+    assert.deepEqual(
+      result.finalEvents.flatMap((event) =>
+        event.type === "run.updated" ? [[event.runId, event.payload.status]] : [],
+      ),
+      [[backgroundScenarioIds("recoverable-stream-loss").runId, "starting"]],
+    );
+  }),
+);
+
+it.effect("does not commit exact-operation recovery when the running attempt is stale", () =>
+  Effect.gen(function* () {
+    const loseStream = yield* Deferred.make<void>();
+    const interrupts = yield* Ref.make(0);
+    const result = yield* captureRootRunTermination({
+      key: "recoverable-stream-loss-stale",
+      shouldFinalizeRun: () => Effect.succeed(true),
+      eventStreamRecovery: "exact_operation_replay",
+      events: () =>
+        Stream.unwrap(
+          Deferred.await(loseStream).pipe(
+            Effect.as(
+              Stream.fail(
+                new ProviderAdapter.ProviderAdapterEventStreamError({
+                  driver,
+                  providerSessionId: ProviderSessionId.make(
+                    "session:recoverable-stream-loss-stale",
+                  ),
+                  recovery: "exact_operation_replay",
+                  cause: "raw stream lost",
+                }),
+              ),
+            ),
+          ),
+        ),
+      interruptTurn: () => Ref.update(interrupts, (count) => count + 1),
+      beforeTerminalWrite: () => Effect.succeed(false),
+      afterStart: () => Deferred.succeed(loseStream, undefined),
+    });
+
+    assert.equal(yield* Ref.get(interrupts), 0);
+    assert.deepEqual(result.observed, []);
+    assert.deepEqual(result.committedEffects, []);
+    assert.deepEqual(result.written, []);
+  }),
+);
+
+it.effect("does not recover a marked stream loss before the provider accepts the turn", () =>
+  Effect.gen(function* () {
+    const allowStart = yield* Deferred.make<void>();
+    const result = yield* captureRootRunTermination({
+      key: "recoverable-stream-loss-before-accept",
+      shouldFinalizeRun: () => Effect.succeed(true),
+      eventStreamRecovery: "exact_operation_replay",
+      events: () =>
+        Stream.fail(
+          new ProviderAdapter.ProviderAdapterEventStreamError({
+            driver,
+            providerSessionId: ProviderSessionId.make(
+              "session:recoverable-stream-loss-before-accept",
+            ),
+            recovery: "exact_operation_replay",
+            cause: "raw stream lost before start acknowledgement",
+          }),
+        ),
+      startTurn: () => Deferred.await(allowStart),
+      beforeTerminalWrite: () => Deferred.succeed(allowStart, undefined).pipe(Effect.as(true)),
+    });
+
+    assert.deepEqual(
+      result.committedEffects.filter(
+        (effect) => effect.request.type === "chatgpt-browser-operation.recover",
+      ),
+      [],
+    );
+    assert.include(result.observed, "run:failed");
+    assert.equal(result.written.filter((item) => item.type === "error").length, 1);
+  }),
+);
+
 it.effect.each(["failure", "defect", "interrupt-failure", "ownership-lost"] as const)(
   "stops the live provider and background work before settling an ingestion %s",
   (failureMode) =>
@@ -2760,6 +2887,7 @@ function captureRootRunTermination(input: {
   >;
   readonly startTurn?: ProviderAdapter.ProviderAdapterV2SessionRuntime["startTurn"];
   readonly interruptTurn?: ProviderAdapter.ProviderAdapterV2SessionRuntime["interruptTurn"];
+  readonly eventStreamRecovery?: "exact_operation_replay";
   readonly initialProviderTurnId?: ProviderTurnId | null;
   readonly onStartFailure?: (
     error: RunExecutionService.RunExecutionServiceV2Error,
@@ -2869,6 +2997,9 @@ function captureRootRunTermination(input: {
         providerSessionId: ProviderSessionId.make(`session:${input.key}`),
         session: {
           events: Stream.empty,
+          ...(input.eventStreamRecovery === undefined
+            ? {}
+            : { eventStreamRecovery: input.eventStreamRecovery }),
           subscribeEvents: Effect.succeed({
             events:
               input.events?.(ids) ??

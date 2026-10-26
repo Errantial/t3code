@@ -223,6 +223,17 @@ function transportFailureBreaksThread(error: ChatGptBrowserProviderV1Error): boo
   return error.code === "protocol_mismatch" || error.code === "browser_unavailable";
 }
 
+function isRetryableTransportInterruption(error: unknown): error is ChatGptBrowserProviderV1Error {
+  return (
+    isTransportError(error) &&
+    error.retryable &&
+    (error.code === "not_ready" ||
+      error.code === "browser_unavailable" ||
+      error.code === "provider_unavailable" ||
+      error.code === "internal")
+  );
+}
+
 export const makeChatGptBrowserAdapterV2 = Effect.fn("makeChatGptBrowserAdapterV2")(function* (
   options: ChatGptBrowserAdapterV2Options,
 ) {
@@ -340,6 +351,50 @@ export const makeChatGptBrowserAdapterV2 = Effect.fn("makeChatGptBrowserAdapterV
           providerSession: session,
         });
       });
+
+      const recoverExactTransport = <A>(
+        turn: ActiveTurn,
+        operation: string,
+        attempt: () => Effect.Effect<A, ChatGptBrowserProviderV1Error>,
+      ): Effect.Effect<A, ChatGptBrowserProviderV1Error> =>
+        Effect.gen(function* () {
+          let recovering = false;
+          let recoveryAttempt = 0;
+          for (;;) {
+            const result = yield* attempt().pipe(
+              Effect.match({
+                onFailure: (error) => ({ ok: false as const, error }),
+                onSuccess: (value) => ({ ok: true as const, value }),
+              }),
+            );
+            if (result.ok) {
+              if (recovering && !turn.finished && active === turn) {
+                yield* updateSession("running", null);
+              }
+              return result.value;
+            }
+            if (!isRetryableTransportInterruption(result.error)) {
+              return yield* Effect.fail(result.error);
+            }
+            recoveryAttempt += 1;
+            const delayMs = Math.min(5_000, 100 * 2 ** Math.min(6, recoveryAttempt - 1));
+            if (!recovering && !turn.finished && active === turn) {
+              recovering = true;
+              yield* updateSession("starting", null);
+            }
+            yield* Effect.logWarning(
+              "ChatGPT Browser transport interrupted; retrying exact operation",
+              {
+                operation,
+                providerOperationId: turn.operationId,
+                code: result.error.code,
+                recoveryAttempt,
+                delayMs,
+              },
+            );
+            yield* Effect.sleep(`${delayMs} millis`);
+          }
+        });
       const updateThread = Effect.fnUntraced(function* (
         patch: Partial<OrchestrationV2ProviderThread>,
       ) {
@@ -635,12 +690,14 @@ export const makeChatGptBrowserAdapterV2 = Effect.fn("makeChatGptBrowserAdapterV
         do {
           const remaining = Math.max(2, event.contentLength - offset);
           const limit = Math.min(CHATGPT_BROWSER_PROVIDER_V1_FINAL_CONTENT_MAX_UTF16, remaining);
-          const chunk = yield* transport.readFinalContent({
-            type: "assistant.read_final",
-            providerOperationId: turn.operationId,
-            offset,
-            limit,
-          });
+          const chunk = yield* recoverExactTransport(turn, "assistant.read_final", () =>
+            transport.readFinalContent({
+              type: "assistant.read_final",
+              providerOperationId: turn.operationId,
+              offset,
+              limit,
+            }),
+          );
           if (
             chunk.providerOperationId !== turn.operationId ||
             chunk.offset !== offset ||
@@ -837,11 +894,13 @@ export const makeChatGptBrowserAdapterV2 = Effect.fn("makeChatGptBrowserAdapterV
         let drained = false;
         let drainedSequence: ChatGptBrowserProviderV1EventSequence | undefined;
         while (!drained) {
-          const page = yield* transport.replay({
-            type: "events.replay",
-            providerOperationId: turn.operationId,
-            after: cursor,
-          });
+          const page = yield* recoverExactTransport(turn, "events.replay", () =>
+            transport.replay({
+              type: "events.replay",
+              providerOperationId: turn.operationId,
+              after: cursor,
+            }),
+          );
           if (page.providerOperationId !== turn.operationId) {
             return yield* protocolError("ChatGPT Browser replay returned a different operation");
           }
@@ -942,10 +1001,12 @@ export const makeChatGptBrowserAdapterV2 = Effect.fn("makeChatGptBrowserAdapterV
             return yield* protocolError("ChatGPT Browser replay high-water moved backwards");
           }
           if (!drained && !pageAdvanced) {
-            const snapshot = yield* transport.queryOperation({
-              type: "operation.query",
-              providerOperationId: turn.operationId,
-            });
+            const snapshot = yield* recoverExactTransport(turn, "operation.query", () =>
+              transport.queryOperation({
+                type: "operation.query",
+                providerOperationId: turn.operationId,
+              }),
+            );
             if (snapshot.providerOperationId !== turn.operationId) {
               return yield* protocolError("ChatGPT Browser query returned a different operation");
             }
@@ -1405,10 +1466,12 @@ export const makeChatGptBrowserAdapterV2 = Effect.fn("makeChatGptBrowserAdapterV
           providerTurn,
         });
         if (recovery.cancelRequested) {
-          const cancelled = yield* transport.cancel({
-            type: "operation.cancel",
-            providerOperationId: operationId,
-          });
+          const cancelled = yield* recoverExactTransport(turn, "operation.cancel", () =>
+            transport.cancel({
+              type: "operation.cancel",
+              providerOperationId: operationId,
+            }),
+          );
           if (cancelled.providerOperationId !== operationId) {
             return yield* protocolError("ChatGPT Browser cancel returned a different operation");
           }
@@ -1432,6 +1495,7 @@ export const makeChatGptBrowserAdapterV2 = Effect.fn("makeChatGptBrowserAdapterV
         driver: CHATGPT_BROWSER_DRIVER_KIND,
         providerSessionId: input.providerSessionId,
         providerSession: session,
+        eventStreamRecovery: "exact_operation_replay" as const,
         events: Stream.fromQueue(events),
         ensureThread: (args) =>
           ensureBoundThread(args).pipe(
@@ -1490,10 +1554,12 @@ export const makeChatGptBrowserAdapterV2 = Effect.fn("makeChatGptBrowserAdapterV
               attemptId: turn.input.attemptId,
               providerOperationId: turn.operationId,
             });
-            const snapshot = yield* transport.cancel({
-              type: "operation.cancel",
-              providerOperationId: turn.operationId,
-            });
+            const snapshot = yield* recoverExactTransport(turn, "operation.cancel", () =>
+              transport.cancel({
+                type: "operation.cancel",
+                providerOperationId: turn.operationId,
+              }),
+            );
             if (snapshot.providerOperationId !== turn.operationId) {
               return yield* protocolError("ChatGPT Browser cancel returned a different operation");
             }

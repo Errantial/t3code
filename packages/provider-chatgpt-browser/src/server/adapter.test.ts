@@ -1300,10 +1300,11 @@ describe("ChatGPT Browser ProviderAdapterV2", () => {
     ),
   );
 
-  it.effect("fails a replay transport outage through the V2 terminal path", () =>
+  it.live("recovers a retryable replay interruption without resending the exact operation", () =>
     Effect.scoped(
       Effect.gen(function* () {
         const attemptId = RunAttemptId.make("attempt-chatgpt-browser-replay-error");
+        const operationId = chatGptBrowserProviderOperationIdForAttempt(attemptId);
         const replayError: ChatGptBrowserProviderV1Error = {
           code: "browser_unavailable",
           retryable: true,
@@ -1311,10 +1312,22 @@ describe("ChatGPT Browser ProviderAdapterV2", () => {
         };
         const fake = makeFakeChatGptBrowserProviderV1Transport({
           providerSessionId,
-          events: [],
-          replayError,
+          events: coreEvents(operationId, "hello"),
+          finalText: "hello",
         });
-        const runtime = yield* openRuntime({ host: host(fake.transport) });
+        let replayInterrupted = false;
+        const recoveringTransport = {
+          ...fake.transport,
+          replay: (request: Parameters<typeof fake.transport.replay>[0]) => {
+            if (!replayInterrupted) {
+              replayInterrupted = true;
+              fake.calls.replayAfter.push(request.after);
+              return Effect.fail(replayError);
+            }
+            return fake.transport.replay(request);
+          },
+        };
+        const runtime = yield* openRuntime({ host: host(recoveringTransport) });
         const providerThread = yield* runtime.ensureThread({
           threadId,
           modelSelection: { instanceId, model: "default" },
@@ -1325,20 +1338,31 @@ describe("ChatGPT Browser ProviderAdapterV2", () => {
           },
         });
         yield* runtime.startTurn(turnInput(providerThread, attemptId));
-        const terminal = yield* runtime.events.pipe(
-          Stream.filter((event) => event.type === "turn.terminal"),
-          Stream.runHead,
+        const events = Array.from(
+          yield* runtime.events.pipe(
+            Stream.takeUntil((event) => event.type === "turn.terminal"),
+            Stream.runCollect,
+          ),
+        );
+        const sessionStatuses = events.flatMap((event) =>
+          event.type === "provider_session.updated" ? [event.providerSession] : [],
         );
 
-        expect(terminal._tag).toBe("Some");
-        if (terminal._tag === "Some") {
-          expect(terminal.value).toMatchObject({
-            type: "turn.terminal",
-            status: "failed",
-            failure: { class: "transport_error", code: "browser_unavailable" },
-            threadDisposition: "broken",
-          });
-        }
+        expect(fake.calls.sentOperationIds).toEqual([operationId]);
+        expect(fake.calls.replayAfter.slice(0, 2)).toEqual([0, 0]);
+        expect(sessionStatuses).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              status: "starting",
+              lastError: null,
+            }),
+            expect.objectContaining({ status: "running", lastError: null }),
+          ]),
+        );
+        expect(events.at(-1)).toMatchObject({
+          type: "turn.terminal",
+          status: "completed",
+        });
       }),
     ),
   );

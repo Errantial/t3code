@@ -353,6 +353,7 @@ export class ProviderAdapterEventStreamError extends Schema.TaggedError<Provider
   {
     driver: ProviderDriverKind,
     providerSessionId: ProviderSessionId,
+    recovery: Schema.optional(Schema.Literal("exact_operation_replay")),
     cause: Schema.optional(Schema.Defect()),
   },
 ) {
@@ -554,6 +555,12 @@ export interface ProviderAdapterV2SessionRuntime {
   readonly providerSessionId: ProviderSessionId;
   readonly providerSession: OrchestrationV2ProviderSession;
   readonly events: Stream.Stream<ProviderAdapterV2Event, ProviderAdapterV2Error>;
+  /**
+   * Declares that an unexpected raw adapter event-stream loss can be recovered by
+   * reopening the same run attempt and replaying its durable exact provider
+   * operation. The session manager never infers this for other providers.
+   */
+  readonly eventStreamRecovery?: "exact_operation_replay";
   /**
    * Manager-owned runtimes expose a synchronous subscription so concurrent
    * provider threads receive independent copies of the process event stream.

@@ -70,6 +70,7 @@ const UNLOAD_THREAD_TIMEOUT_MS = 10 * 1000;
 
 export const ProviderSessionReleaseReason = Schema.Literals([
   "idle_timeout",
+  "runtime_recovery",
   "runtime_error",
   "manual_shutdown",
   "server_shutdown",
@@ -242,6 +243,7 @@ export interface ProviderSessionManagerV2LayerOptions {
 function releaseStatusFor(
   reason: ProviderSessionReleaseReason,
 ): OrchestrationV2ProviderSession["status"] {
+  if (reason === "runtime_recovery") return "starting";
   return reason === "runtime_error" ? "error" : "stopped";
 }
 
@@ -895,11 +897,13 @@ export const layerWithOptions = (
             input.replaced
               ? Effect.succeed(Exit.void)
               : Effect.exit(writeReleasedSessionEvents(input)),
-            Effect.exit(
-              writeReleasedRuntimeRequestEvents(input).pipe(
-                input.entry.requestEventPermit.withPermits(1),
-              ),
-            ),
+            input.reason === "runtime_recovery"
+              ? Effect.succeed(Exit.void)
+              : Effect.exit(
+                  writeReleasedRuntimeRequestEvents(input).pipe(
+                    input.entry.requestEventPermit.withPermits(1),
+                  ),
+                ),
             Effect.exit(writeReleasedBackgroundWorkEvents(input.releasedBackgroundTasks)),
           ],
           { concurrency: 1 },
@@ -2016,7 +2020,21 @@ export const layerWithOptions = (
 
       const startEventPump = (entry: LiveSessionEntry) => {
         let stoppedByProvider = false;
-        return entry.runtime.events.pipe(
+        const adapterEvents =
+          entry.runtime.eventStreamRecovery === "exact_operation_replay"
+            ? entry.runtime.events.pipe(
+                Stream.mapError(
+                  (cause) =>
+                    new ProviderAdapter.ProviderAdapterEventStreamError({
+                      driver: entry.runtime.driver,
+                      providerSessionId: entry.runtime.providerSessionId,
+                      recovery: "exact_operation_replay",
+                      cause,
+                    }),
+                ),
+              )
+            : entry.runtime.events;
+        return adapterEvents.pipe(
           Stream.runForEach((event) => {
             if (shutdownSignal.received) return Effect.void;
             // Live output skips run subscribers and ingestion entirely: it is
@@ -2149,9 +2167,39 @@ export const layerWithOptions = (
                       new ProviderAdapter.ProviderAdapterEventStreamError({
                         driver: entry.runtime.driver,
                         providerSessionId: entry.runtime.providerSessionId,
+                        ...(entry.runtime.eventStreamRecovery === "exact_operation_replay"
+                          ? { recovery: "exact_operation_replay" as const }
+                          : {}),
                         cause: "Provider event stream ended unexpectedly.",
                       }),
                     );
+              const streamFailure = Cause.findErrorOption(cause);
+              const recoverableStreamLoss =
+                Option.isSome(streamFailure) &&
+                Schema.is(ProviderAdapter.ProviderAdapterEventStreamError)(streamFailure.value) &&
+                streamFailure.value.recovery === "exact_operation_replay";
+              if (recoverableStreamLoss) {
+                // Remove and close the dead runtime before waking consumers. A recovery
+                // effect may reopen this same providerSessionId immediately; notifying
+                // first would let it reacquire the stale cached runtime.
+                const subscribers = yield* Ref.getAndSet(entry.eventSubscribers, new Map());
+                yield* releaseEntry({
+                  providerSessionId: entry.runtime.providerSessionId,
+                  reason: "runtime_recovery",
+                  detail: Cause.pretty(cause),
+                }).pipe(logReleaseFailure(entry.runtime.providerSessionId));
+                yield* Effect.logWarning("orchestration-v2.provider-stream-recovery-requested", {
+                  providerSessionId: entry.runtime.providerSessionId,
+                  providerInstanceId: entry.runtime.instanceId,
+                  driver: entry.runtime.driver,
+                });
+                yield* Effect.forEach(
+                  subscribers.values(),
+                  (queue) => Queue.offer(queue, { type: "failure", cause }),
+                  { discard: true },
+                );
+                return;
+              }
               yield* publishToSubscribers(entry.eventSubscribers, {
                 type: "failure",
                 cause,

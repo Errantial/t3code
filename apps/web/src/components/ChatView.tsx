@@ -347,7 +347,11 @@ import { ThreadVisitWatermark } from "./chat/ThreadVisitWatermark";
 import { ChatTerminalDrawers } from "./chat/ChatTerminalDrawers";
 import { ChatRightPanel } from "./chat/ChatRightPanel";
 import { useDraftEnvironmentRouting } from "./chat/useDraftEnvironmentRouting";
-import { branchMismatchBannerItem } from "./chat/ThreadActivityBanners";
+import {
+  branchMismatchBannerItem,
+  isProviderStreamRecoveryVisible,
+  providerStreamRecoveryBannerItem,
+} from "./chat/ThreadActivityBanners";
 import { useTimelineFollow } from "./chat/useTimelineFollow";
 import {
   type EnvironmentUnavailableState,
@@ -879,6 +883,19 @@ export default function ChatView(props: ChatViewProps) {
   );
   const browserAvailable = isPreviewSupportedInRuntime() || activeEnvironmentServerBrowser;
   const activeThreadShell = serverThread;
+  const activeProviderSession =
+    serverProjection?.providerSessions.findLast(
+      (session) => session.providerInstanceId === serverProjection.thread.providerInstanceId,
+    ) ?? null;
+  const activeProviderRun =
+    activeLatestRun === null
+      ? null
+      : (serverProjection?.runs.find((run) => run.id === activeLatestRun.runId) ?? null);
+  const providerStreamRecovering = isProviderStreamRecoveryVisible({
+    providerSession: activeProviderSession,
+    activeAttemptId: activeProviderRun?.activeAttemptId,
+    providerTurns: serverProjection?.providerTurns ?? [],
+  });
   const timelineThreadError =
     serverRuntime?.status === "failed" &&
     serverRuntime.lastErrorClass === "usage_limit" &&
@@ -2582,6 +2599,10 @@ export default function ChatView(props: ChatViewProps) {
     });
     return item ? [item] : [];
   });
+  const providerStreamRecoveryBanner =
+    providerStreamRecovering && activeProviderSession !== null
+      ? providerStreamRecoveryBannerItem({ providerSessionId: activeProviderSession.id })
+      : null;
   const limitRecoveryBanner =
     serverRuntime?.status === "failed" &&
     serverRuntime.lastErrorClass === "usage_limit" &&
@@ -2602,6 +2623,8 @@ export default function ChatView(props: ChatViewProps) {
         })
       : null;
   const composerBannerItems = (() => {
+    const providerStreamRecoveryItems =
+      providerStreamRecoveryBanner === null ? [] : [providerStreamRecoveryBanner];
     const limitRecoveryItems = limitRecoveryBanner === null ? [] : [limitRecoveryBanner];
     const backgroundWorkItems = [childInputBanner, goalBanner, backgroundWorkBanner].filter(
       (item) => item !== null,
@@ -2611,6 +2634,7 @@ export default function ChatView(props: ChatViewProps) {
     if (!localCheckoutBranchMismatch || !showBranchMismatchBanner || !activeBranchMismatchKey) {
       return [
         ...feedbackBannerItems,
+        ...providerStreamRecoveryItems,
         ...limitRecoveryItems,
         ...usageLimitsItems,
         ...projectCloneItems,
@@ -2620,6 +2644,7 @@ export default function ChatView(props: ChatViewProps) {
     }
     return [
       ...feedbackBannerItems,
+      ...providerStreamRecoveryItems,
       ...limitRecoveryItems,
       ...usageLimitsItems,
       ...projectCloneItems,

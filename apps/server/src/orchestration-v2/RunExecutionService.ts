@@ -32,6 +32,7 @@ import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
 import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
@@ -979,6 +980,7 @@ export const layer: Layer.Layer<
         if (responseStreamingMode === null) {
           return;
         }
+        const providerTurnAccepted = yield* Ref.make(false);
         const terminalEvent = yield* Ref.make<ProviderTerminalEvent | null>(null);
         const latestTurnItemOrdinal = yield* Ref.make(input.providerTurnOrdinal * 100);
         const latestProviderThread = yield* Ref.make(input.providerThread);
@@ -1474,6 +1476,68 @@ export const layer: Layer.Layer<
                   cause,
                 });
                 if (yield* Ref.get(rootRunFinalized)) return;
+                const ingestFailure = Cause.findErrorOption(cause);
+                const nestedFailure =
+                  Option.isSome(ingestFailure) &&
+                  Schema.is(RunExecutionIngestError)(ingestFailure.value)
+                    ? ingestFailure.value.cause
+                    : undefined;
+                const recoverableExactOperationLoss =
+                  input.session.eventStreamRecovery === "exact_operation_replay" &&
+                  Schema.is(ProviderAdapter.ProviderAdapterEventStreamError)(nestedFailure) &&
+                  nestedFailure.recovery === "exact_operation_replay" &&
+                  (yield* Ref.get(providerTurnAccepted));
+                if (recoverableExactOperationLoss) {
+                  const commandId = CommandId.make(
+                    `command:provider-stream-recover:${input.run.id}:${DateTime.formatIso(completedAt)}`,
+                  );
+                  const recovery = yield* eventSink.writeIfRunCurrent({
+                    commandId,
+                    threadId: input.run.threadId,
+                    runId: input.run.id,
+                    activeAttemptId: input.attempt.id,
+                    expectedStatus: "running",
+                    events: [
+                      {
+                        id: yield* idAllocator.allocate.event({
+                          threadId: input.run.threadId,
+                          commandId,
+                        }),
+                        type: "run.updated",
+                        threadId: input.run.threadId,
+                        runId: input.run.id,
+                        providerInstanceId: input.run.providerInstanceId,
+                        occurredAt: completedAt,
+                        payload: {
+                          ...input.run,
+                          status: "starting",
+                          queuePosition: null,
+                          completedAt: null,
+                        },
+                      },
+                    ],
+                    effects: [
+                      {
+                        id: `effect:chatgpt-browser-operation-recover:${input.run.id}:${DateTime.formatIso(completedAt)}`,
+                        commandId,
+                        threadId: input.run.threadId,
+                        request: {
+                          type: "chatgpt-browser-operation.recover",
+                          runId: input.run.id,
+                        },
+                      },
+                    ],
+                  });
+                  if (recovery.committed) {
+                    yield* Effect.logWarning("orchestration-v2.provider-stream-recovery-enqueued", {
+                      runId: input.run.id,
+                      attemptId: input.attempt.id,
+                      providerSessionId: input.providerSessionId,
+                      providerThreadId: input.providerThread.id,
+                    });
+                  }
+                  return;
+                }
                 const providerThread = yield* Ref.get(latestProviderThread);
                 const routing = yield* Ref.get(eventRouting);
                 // Stop background work too; the failed consumer cannot persist terminal events.
@@ -1637,9 +1701,13 @@ export const layer: Layer.Layer<
           // Wait for acceptance so abandoned startup cannot leave a refresher
           // on the already-detached ingestion fiber.
           Effect.tap(() =>
-            Fiber.await(providerEventFiber).pipe(
-              Effect.raceFirst(touchMcpCredential.pipe(Effect.delay("1 hour"), Effect.forever)),
-              Effect.forkDetach,
+            Ref.set(providerTurnAccepted, true).pipe(
+              Effect.andThen(
+                Fiber.await(providerEventFiber).pipe(
+                  Effect.raceFirst(touchMcpCredential.pipe(Effect.delay("1 hour"), Effect.forever)),
+                  Effect.forkDetach,
+                ),
+              ),
             ),
           ),
           Effect.catchCause((cause) =>
