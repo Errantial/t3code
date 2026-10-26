@@ -286,6 +286,90 @@ describe("ChatGPT Browser ProviderAdapterV2", () => {
     ),
   );
 
+  it.effect("replays again when a concurrent sync advances high-water after an empty page", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const attemptId = RunAttemptId.make("attempt-chatgpt-browser-concurrent-replay-advance");
+        const operationId = chatGptBrowserProviderOperationIdForAttempt(attemptId);
+        const finalText = "hello";
+        const scriptedEvents = coreEvents(operationId, finalText);
+        const fake = makeFakeChatGptBrowserProviderV1Transport({
+          providerSessionId,
+          events: scriptedEvents,
+          finalText,
+        });
+        const operationStore = yield* memoryOperationStore();
+        let sent = false;
+        let replayIndex = 0;
+        const replayPages = [
+          { events: scriptedEvents.slice(0, 2), highWater: seq(2) },
+          { events: [], highWater: seq(2) },
+          { events: scriptedEvents.slice(2), highWater: seq(4) },
+        ] as const;
+        const transport = {
+          ...fake.transport,
+          send: (request: Parameters<typeof fake.transport.send>[0]) =>
+            fake.transport.send(request).pipe(Effect.tap(() => Effect.sync(() => (sent = true)))),
+          queryOperation: (request: Parameters<typeof fake.transport.queryOperation>[0]) =>
+            Effect.sync(() => {
+              fake.calls.queriedOperationIds.push(request.providerOperationId);
+              if (!sent) {
+                return {
+                  providerOperationId: request.providerOperationId,
+                  providerSessionId,
+                  nativeIdentity: {},
+                  highWater: seq(0),
+                  state: "unknown" as const,
+                };
+              }
+              return {
+                providerOperationId: request.providerOperationId,
+                providerSessionId,
+                nativeIdentity: {},
+                highWater: seq(4),
+                state: "drained" as const,
+                terminalStatus: "completed" as const,
+                terminalSequence: seq(3),
+                drainedThrough: seq(4),
+              };
+            }),
+          replay: (request: Parameters<typeof fake.transport.replay>[0]) =>
+            Effect.sync(() => {
+              fake.calls.replayAfter.push(request.after);
+              const page = replayPages[Math.min(replayIndex, replayPages.length - 1)]!;
+              replayIndex += 1;
+              return {
+                providerOperationId: request.providerOperationId,
+                events: page.events,
+                highWater: page.highWater,
+              };
+            }),
+        };
+        const runtime = yield* openRuntime({ host: host(transport), operationStore });
+        const providerThread = yield* runtime.ensureThread({
+          threadId,
+          modelSelection: { instanceId, model: "default" },
+          runtimePolicy: {
+            runtimeMode: "full-access",
+            interactionMode: "default",
+            cwd: "/workspace",
+          },
+        });
+
+        yield* runtime.startTurn(turnInput(providerThread, attemptId));
+        const events = yield* runtime.events.pipe(
+          Stream.tap(checkpointChatGptBrowserProviderEvent),
+          Stream.takeUntil((event) => event.type === "turn.terminal"),
+          Stream.runCollect,
+        );
+
+        expect(fake.calls.replayAfter).toEqual([0, 2, 2]);
+        expect(events.at(-1)).toMatchObject({ type: "turn.terminal", status: "completed" });
+        expect(yield* operationStore.get(attemptId)).toMatchObject({ consumerHighWater: 4 });
+      }),
+    ),
+  );
+
   it.effect("rebinds a projected thread after restart and recovers without sending again", () =>
     Effect.scoped(
       Effect.gen(function* () {

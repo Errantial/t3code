@@ -96,6 +96,7 @@ interface NativeBrokerOptions {
   readonly secrets: ChatGptBrowserProviderSecretsPort;
   readonly ports?: ReadonlyArray<number>;
   readonly readyTimeoutMs?: number;
+  readonly stopAckTimeoutMs?: number;
   readonly buildMismatchGraceMs?: number;
   readonly expectedExtensionBuildId?: string;
   readonly persistObservation?: (
@@ -697,14 +698,36 @@ export async function startNativeChatGptBrowserBroker(
       }
       record.cancelRequested = true;
       delete record.stopAck;
-      const version = record.version;
       touch(record);
-      if (!record.nativeIdentity.providerTurnId || !record.nativeIdentity.conversationId)
-        return observation(record);
-      await Promise.race([
-        waitForOperationChange(providerOperationId, version + 1, signal),
-        abortableDelay(5_000, signal),
-      ]);
+      const isSettled = () => record.state === "terminal" || record.state === "drained";
+      const waitForExactChangeUntil = async (deadline: number, error: string) => {
+        const remaining = deadline - Date.now();
+        if (remaining <= 0) throw new Error(error);
+        const version = record.version;
+        await Promise.race([
+          waitForOperationChange(providerOperationId, version, signal),
+          abortableDelay(remaining, signal),
+        ]);
+      };
+      const timeoutMs = options.stopAckTimeoutMs ?? 5_000;
+      const turnDeadline = Date.now() + timeoutMs;
+      while (
+        (!record.nativeIdentity.providerTurnId || !record.nativeIdentity.conversationId) &&
+        !isSettled()
+      ) {
+        await waitForExactChangeUntil(turnDeadline, "native_stop_turn_unobserved");
+      }
+      if (isSettled()) return observation(record);
+      if (!record.nativeIdentity.providerTurnId || !record.nativeIdentity.conversationId) {
+        throw new Error("native_stop_turn_unobserved");
+      }
+      const deadline = Date.now() + timeoutMs;
+      while (record.stopAck === undefined && !isSettled()) {
+        await waitForExactChangeUntil(deadline, "native_stop_unacknowledged");
+      }
+      if (record.stopAck === undefined && !isSettled()) {
+        throw new Error("native_stop_unacknowledged");
+      }
       if (record.stopAck === "failed") throw new Error("native_stop_failed");
       return observation(record);
     },

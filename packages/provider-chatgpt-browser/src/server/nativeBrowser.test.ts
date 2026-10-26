@@ -3,7 +3,6 @@ import * as NodeHttp from "node:http";
 
 import { describe, expect, it } from "@effect/vitest";
 import { ProviderSessionId, RunAttemptId } from "@t3tools/contracts";
-import * as Effect from "effect/Effect";
 import { chatGptBrowserProviderOperationIdForAttempt } from "@t3tools/provider-core/server/chatgptBrowserProviderV1";
 
 import { CHATGPT_BROWSER_S8_FEATURE } from "./features.ts";
@@ -764,6 +763,7 @@ describe("native ChatGPT browser broker", () => {
     const broker = await startNativeChatGptBrowserBroker({
       ports: [0],
       readyTimeoutMs: 5_000,
+      stopAckTimeoutMs: 100,
       secrets: {
         read: async (key) => secrets.get(key) ?? null,
         write: async (key, value) => {
@@ -839,6 +839,12 @@ describe("native ChatGPT browser broker", () => {
           ack: true,
         },
       });
+      const cancellation = session.cancelExact(providerOperationId, controller.signal);
+      let cancellationSettled = false;
+      void cancellation.finally(() => {
+        cancellationSettled = true;
+      });
+
       const started = await requestJson({
         port: broker.port,
         path: "/provider-v1/browser/events",
@@ -850,6 +856,7 @@ describe("native ChatGPT browser broker", () => {
         },
       });
       expect(started.status).toBe(200);
+      expect(cancellationSettled).toBe(false);
       await expect(
         session.queryExact(providerOperationId, controller.signal),
       ).resolves.toMatchObject({
@@ -861,7 +868,18 @@ describe("native ChatGPT browser broker", () => {
         },
       });
 
-      const cancellation = session.cancelExact(providerOperationId, controller.signal);
+      const repeatedStart = await requestJson({
+        port: broker.port,
+        path: "/provider-v1/browser/events",
+        headers,
+        body: {
+          conversationId,
+          entries: [{ conversationId, event: { kind: "turn_start", turnId } }],
+          operations: [],
+        },
+      });
+      expect(repeatedStart.status).toBe(200);
+      expect(cancellationSettled).toBe(false);
       const stopStatus = await requestJson<{
         stopTurns: Array<{
           id: string;
@@ -910,13 +928,11 @@ describe("native ChatGPT browser broker", () => {
         body: { providerOperationId, id: stop.id, conversationId, turnId, status: "sent" },
       });
       expect(acknowledged.status).toBe(200);
-      const outcome = await Promise.race([
-        cancellation.then((snapshot) => ({ kind: "cancelled" as const, snapshot })),
-        Effect.runPromise(Effect.sleep("2 seconds")).then(() => ({ kind: "timeout" as const })),
-      ]);
-      expect(outcome.kind).toBe("cancelled");
-      if (outcome.kind === "cancelled")
-        expect(outcome.snapshot).toMatchObject({ state: "running" });
+      await expect(cancellation).resolves.toMatchObject({ state: "running" });
+
+      await expect(session.cancelExact(providerOperationId, controller.signal)).rejects.toThrow(
+        "native_stop_unacknowledged",
+      );
     } finally {
       await broker.close();
     }
@@ -1293,6 +1309,230 @@ describe("native ChatGPT browser broker", () => {
       });
       expect(exact.status).toBe(200);
       expect(accepted.at(-1)).toMatchObject({ finalText: "answer", terminalStatus: "completed" });
+    } finally {
+      await broker.close();
+    }
+  });
+
+  it("does not let a stale terminal from another operation settle the target session", async () => {
+    const secrets = new Map<string, Uint8Array>();
+    const broker = await startNativeChatGptBrowserBroker({
+      ports: [0],
+      readyTimeoutMs: 5_000,
+      secrets: {
+        read: async (key) => secrets.get(key) ?? null,
+        write: async (key, value) => {
+          secrets.set(key, value);
+        },
+        delete: async (key) => {
+          secrets.delete(key);
+        },
+      },
+      persistObservation: async () => undefined,
+    });
+    try {
+      const pair = await requestJson<{ token: string }>({
+        port: broker.port,
+        path: "/provider-v1/pair",
+        body: { reuse: true },
+      });
+      const headers = { authorization: `Bearer ${pair.body.token}` };
+      await requestJson({
+        port: broker.port,
+        path: "/provider-v1/browser/status",
+        headers,
+        body: { operations: [], after: 0, wait: false },
+      });
+      const session = await broker.waitForSession();
+      const operationA = chatGptBrowserProviderOperationIdForAttempt(
+        RunAttemptId.make("attempt-native-cross-session-stale-a"),
+      );
+      const operationB = chatGptBrowserProviderOperationIdForAttempt(
+        RunAttemptId.make("attempt-native-cross-session-stale-b"),
+      );
+      const controller = new AbortController();
+      await session.sendExact(
+        {
+          type: "operation.send",
+          providerOperationId: operationA,
+          providerSessionId: ProviderSessionId.make("provider-session-native-cross-session-a"),
+          text: "source",
+        },
+        controller.signal,
+      );
+      await session.sendExact(
+        {
+          type: "operation.send",
+          providerOperationId: operationB,
+          providerSessionId: ProviderSessionId.make("provider-session-native-cross-session-b"),
+          text: "target",
+        },
+        controller.signal,
+      );
+      const status = await requestJson<{
+        inputs: Array<{ id: string; providerOperationId: string }>;
+      }>({
+        port: broker.port,
+        path: "/provider-v1/browser/status",
+        headers,
+        body: { operations: [], after: 0, wait: false },
+      });
+      const inputA = status.body.inputs.find((input) => input.providerOperationId === operationA)!;
+      const inputB = status.body.inputs.find((input) => input.providerOperationId === operationB)!;
+      const conversationA = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+      const conversationB = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+      const turnA = "turn-cross-session-a";
+      const turnB = "turn-cross-session-b";
+      const bind = async (
+        input: { id: string; providerOperationId: string },
+        conversationId: string,
+      ) => {
+        const owner = `${input.providerOperationId}:document`;
+        await requestJson({
+          port: broker.port,
+          path: "/provider-v1/browser/input",
+          headers,
+          body: {
+            providerOperationId: input.providerOperationId,
+            id: input.id,
+            owner,
+            conversationId,
+          },
+        });
+        await requestJson({
+          port: broker.port,
+          path: "/provider-v1/browser/input",
+          headers,
+          body: {
+            providerOperationId: input.providerOperationId,
+            id: input.id,
+            owner,
+            conversationId,
+            authorize: true,
+          },
+        });
+        await requestJson({
+          port: broker.port,
+          path: "/provider-v1/browser/input",
+          headers,
+          body: {
+            providerOperationId: input.providerOperationId,
+            id: input.id,
+            owner,
+            conversationId,
+            messageId: `user-${input.providerOperationId}`,
+            ack: true,
+          },
+        });
+      };
+      await bind(inputA, conversationA);
+      await bind(inputB, conversationB);
+      await requestJson({
+        port: broker.port,
+        path: "/provider-v1/browser/events",
+        headers,
+        body: {
+          conversationId: conversationA,
+          entries: [
+            { conversationId: conversationA, event: { kind: "turn_start", turnId: turnA } },
+          ],
+          operations: [],
+        },
+      });
+      await requestJson({
+        port: broker.port,
+        path: "/provider-v1/browser/events",
+        headers,
+        body: {
+          conversationId: conversationB,
+          entries: [
+            { conversationId: conversationB, event: { kind: "turn_start", turnId: turnB } },
+          ],
+          operations: [],
+        },
+      });
+
+      const stale = await requestJson({
+        port: broker.port,
+        path: "/provider-v1/browser/events",
+        headers,
+        body: {
+          conversationId: conversationB,
+          entries: [
+            {
+              conversationId: conversationB,
+              event: { kind: "turn_end", turnId: turnA, outcome: "cancelled" },
+            },
+          ],
+          operations: [],
+        },
+      });
+      expect(stale.status).toBe(200);
+      await expect(session.queryExact(operationA, controller.signal)).resolves.toMatchObject({
+        state: "terminal",
+        terminalStatus: "cancelled",
+        nativeIdentity: { conversationId: conversationA, providerTurnId: turnA },
+      });
+      await expect(session.queryExact(operationB, controller.signal)).resolves.toMatchObject({
+        state: "running",
+        nativeIdentity: { conversationId: conversationB, providerTurnId: turnB },
+      });
+
+      await requestJson({
+        port: broker.port,
+        path: "/provider-v1/browser/events",
+        headers,
+        body: {
+          conversationId: conversationB,
+          entries: [
+            {
+              conversationId: conversationB,
+              event: {
+                kind: "assistant_message",
+                turnId: turnB,
+                state: "final",
+                final: true,
+                text: "target answer",
+              },
+            },
+            {
+              conversationId: conversationB,
+              event: { kind: "turn_end", turnId: turnB, outcome: "completed" },
+            },
+          ],
+          operations: [],
+        },
+      });
+      const probe = await requestJson<{ drainToken: string }>({
+        port: broker.port,
+        path: "/provider-v1/browser/drain",
+        headers,
+        body: {
+          providerOperationId: operationB,
+          conversationId: conversationB,
+          turnId: turnB,
+          phase: "probe",
+        },
+      });
+      expect(probe.status).toBe(200);
+      const committed = await requestJson({
+        port: broker.port,
+        path: "/provider-v1/browser/drain",
+        headers,
+        body: {
+          providerOperationId: operationB,
+          conversationId: conversationB,
+          turnId: turnB,
+          phase: "commit",
+          drainToken: probe.body.drainToken,
+        },
+      });
+      expect(committed.status).toBe(200);
+      await expect(session.queryExact(operationB, controller.signal)).resolves.toMatchObject({
+        state: "drained",
+        terminalStatus: "completed",
+        nativeIdentity: { conversationId: conversationB, providerTurnId: turnB },
+      });
     } finally {
       await broker.close();
     }

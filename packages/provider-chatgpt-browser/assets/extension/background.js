@@ -1587,11 +1587,29 @@ async function maintainNativeProviderViews() {
       cleanConversationId(row.conversationId),
   );
   const activeIds = new Set(active.map((row) => row.commandId));
+  const activeConversations = new Set(
+    active.map((row) => cleanConversationId(row.conversationId)).filter(Boolean),
+  );
   let changed = false;
-  for (const id of Object.keys(nativeProviderViews)) {
+  for (const [id, view] of Object.entries(nativeProviderViews)) {
     if (activeIds.has(id)) continue;
     delete nativeProviderViews[id];
     changed = true;
+    // Native-provider observer tabs are execution resources, not product state. Once the exact
+    // operation is drained/cancelled they otherwise retain the entire completed ChatGPT renderer
+    // indefinitely. Close only the exact managed tab recorded for this view, only while it still
+    // shows the same conversation, and never while another active operation owns that conversation. T3 retains
+    // the durable conversation identity and can reopen it for a later same-thread continuation.
+    const conversationId = cleanConversationId(view?.conversationId);
+    if (!Number.isInteger(view?.tab) || !conversationId || activeConversations.has(conversationId))
+      continue;
+    try {
+      const tab = await chrome.tabs.get(view.tab);
+      if (conversationFromUrl(tab.pendingUrl || tab.url) === conversationId)
+        await chrome.tabs.remove(view.tab);
+    } catch {
+      // A user/navigation close or a racing browser teardown already retired the execution view.
+    }
   }
   if (changed) await persistNativeProviderViews();
   if (!active.length) return;

@@ -709,6 +709,13 @@ export const makeChatGptBrowserAdapterV2 = Effect.fn("makeChatGptBrowserAdapterV
             if (snapshot.providerOperationId !== turn.operationId) {
               return yield* protocolError("ChatGPT Browser query returned a different operation");
             }
+            // Replay and query are separate exact-operation reads. Another sync can durably append
+            // rows after replay returned an empty page but before query observes the operation.
+            // When query proves provider high-water is now ahead of this consumer cursor, replay
+            // again from the same cursor so the new rows are still validated and projected in order.
+            if (snapshot.highWater > cursor) {
+              continue;
+            }
             // Provider-v1 publishes terminal before the T3-owned settlement fence can seal drain.
             // During that interval replay is allowed to return an empty page at the same high-water:
             // the terminal row was already observed locally, and the only remaining work is to wait
