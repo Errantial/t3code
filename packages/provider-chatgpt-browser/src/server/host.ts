@@ -12,6 +12,7 @@ export type ChatGptBrowserAuthenticationStatus = "authenticated" | "unauthentica
 export interface ChatGptBrowserHostStatus {
   readonly identity: ChatGptBrowserHostIdentity;
   readonly authentication: ChatGptBrowserAuthenticationStatus;
+  readonly availability: "ready" | "recovering";
 }
 
 export interface ChatGptBrowserHostService extends ChatGptBrowserHostPort {

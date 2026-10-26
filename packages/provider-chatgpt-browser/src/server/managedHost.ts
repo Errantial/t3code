@@ -330,13 +330,18 @@ export const makeNativeManagedChatGptBrowserHost = Effect.fn(
             }),
           )
         : broker.authenticationStatus();
-    return { identity: session.identity, authentication } satisfies ChatGptBrowserHostStatus;
+    return {
+      identity: session.identity,
+      authentication,
+      availability: broker.sessionAvailability(),
+    } satisfies ChatGptBrowserHostStatus;
   });
   const probeStatus = Effect.suspend(() =>
     activeBroker
       ? Effect.succeed({
           identity: options.release.identity,
           authentication: activeBroker.authenticationStatus(),
+          availability: activeBroker.sessionAvailability(),
         } satisfies ChatGptBrowserHostStatus)
       : Effect.acquireUseRelease(managed.open, statusForSession, (session) =>
           session.close.pipe(Effect.ignore),

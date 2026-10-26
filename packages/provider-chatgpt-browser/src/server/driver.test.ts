@@ -106,11 +106,40 @@ describe("ChatGptBrowserDriver", () => {
             Effect.succeed({
               identity: hostIdentity,
               authentication: "authenticated",
+              availability: "ready",
             }),
           ),
         ),
       ),
     ),
+  );
+
+  it.effect(
+    "reports a stale managed extension as reconnecting without a terminal provider error",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const instance = yield* ChatGptBrowserDriver.create(driverInput);
+          const snapshot = yield* instance.snapshot.refresh;
+          expect(snapshot).toMatchObject({
+            installed: true,
+            status: "warning",
+            auth: { status: "authenticated", canLogout: false },
+            message:
+              "ChatGPT Browser is reconnecting to the managed extension. ChatGPT may still be working.",
+          });
+        }).pipe(
+          Effect.provide(
+            layerForStatus(
+              Effect.succeed({
+                identity: hostIdentity,
+                authentication: "authenticated",
+                availability: "recovering",
+              }),
+            ),
+          ),
+        ),
+      ),
   );
 
   it.effect("reports launch/prerequisite failures as unavailable rather than not installed", () =>
@@ -166,11 +195,16 @@ describe("ChatGptBrowserDriver", () => {
         const status = Effect.sync(() => ({
           identity: hostIdentity,
           authentication: signedIn ? ("authenticated" as const) : ("unauthenticated" as const),
+          availability: "ready" as const,
         }));
         const authenticate = Effect.sync(() => {
           authenticateCalls += 1;
           signedIn = true;
-          return { identity: hostIdentity, authentication: "authenticated" as const };
+          return {
+            identity: hostIdentity,
+            authentication: "authenticated" as const,
+            availability: "ready" as const,
+          };
         });
         const instance = yield* ChatGptBrowserDriver.create(driverInput).pipe(
           Effect.provide(layerForStatus(status, authenticate)),

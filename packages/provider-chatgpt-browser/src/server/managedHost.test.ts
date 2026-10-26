@@ -30,8 +30,16 @@ describe("shared managed ChatGPT browser host", () => {
         };
         const physical: ChatGptBrowserHostService = {
           readiness: Effect.succeed(identity),
-          status: Effect.succeed({ identity, authentication: "authenticated" }),
-          authenticate: Effect.succeed({ identity, authentication: "authenticated" }),
+          status: Effect.succeed({
+            identity,
+            authentication: "authenticated",
+            availability: "ready",
+          }),
+          authenticate: Effect.succeed({
+            identity,
+            authentication: "authenticated",
+            availability: "ready",
+          }),
           open: Effect.sync(() => {
             opens += 1;
             return {
@@ -85,9 +93,17 @@ describe("shared managed ChatGPT browser host", () => {
           yield* Deferred.succeed(statusEntered, undefined);
           yield* Deferred.await(releaseStatus);
           probeOpen = false;
-          return { identity, authentication: "authenticated" as const };
+          return {
+            identity,
+            authentication: "authenticated" as const,
+            availability: "ready" as const,
+          };
         }),
-        authenticate: Effect.succeed({ identity, authentication: "authenticated" }),
+        authenticate: Effect.succeed({
+          identity,
+          authentication: "authenticated",
+          availability: "ready",
+        }),
         open: Effect.sync(() => {
           if (probeOpen) throw new Error("opening-browser-while-browser-open");
           opens += 1;
@@ -110,6 +126,7 @@ describe("shared managed ChatGPT browser host", () => {
       expect(yield* Fiber.join(statusFiber)).toEqual({
         identity,
         authentication: "authenticated",
+        availability: "ready",
       });
       const session = yield* Fiber.join(openFiber);
       expect(opens).toBe(1);
@@ -154,17 +171,29 @@ describe("shared managed ChatGPT browser host", () => {
           return makeSession();
         }),
         authenticateSession: (session) =>
-          Effect.succeed({ identity: session.identity, authentication: "authenticated" }),
+          Effect.succeed({
+            identity: session.identity,
+            authentication: "authenticated",
+            availability: "ready",
+          }),
       });
       const physical: ChatGptBrowserHostService = {
         readiness: Effect.succeed(identity),
-        status: Effect.succeed({ identity, authentication: "authenticated" }),
+        status: Effect.succeed({
+          identity,
+          authentication: "authenticated",
+          availability: "ready",
+        }),
         authenticate: reusable.authenticate,
         open: reusable.open,
       };
       const shared = shareChatGptBrowserHost(physical);
 
-      expect(yield* shared.authenticate).toEqual({ identity, authentication: "authenticated" });
+      expect(yield* shared.authenticate).toEqual({
+        identity,
+        authentication: "authenticated",
+        availability: "ready",
+      });
       expect(interactiveOpens).toBe(1);
       expect(normalOpens).toBe(0);
       expect(closes).toBe(0);
@@ -238,10 +267,18 @@ describe("shared managed ChatGPT browser host", () => {
         open: Effect.succeed(session),
         openInteractive: Effect.succeed(session),
         authenticateSession: () =>
-          Effect.succeed({ identity, authentication: "authenticated" as const }),
+          Effect.succeed({
+            identity,
+            authentication: "authenticated" as const,
+            availability: "ready" as const,
+          }),
       });
 
-      expect(yield* reusable.authenticate).toEqual({ identity, authentication: "authenticated" });
+      expect(yield* reusable.authenticate).toEqual({
+        identity,
+        authentication: "authenticated",
+        availability: "ready",
+      });
       expect(closes).toBe(0);
       yield* reusable.shutdown;
       expect(closes).toBe(1);

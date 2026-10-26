@@ -1404,10 +1404,24 @@ let nativeProviderMaintenance = null;
 let nativeProviderDrain = null;
 let nativeProviderPrime = null;
 let nativeProviderGeneration = 0;
+const NATIVE_PROVIDER_RETRY_BASE_MS = 250;
+const NATIVE_PROVIDER_RETRY_MAX_MS = 10_000;
+let nativeProviderRetryFailures = 0;
 let nativeProviderLocalWriteQueue = Promise.resolve();
 let nativeProviderSessionWriteQueue = Promise.resolve();
 const MAX_NATIVE_PROVIDER_JOURNAL_BATCHES = 400;
 const MAX_NATIVE_PROVIDER_JOURNAL_BYTES = 3 * 1024 * 1024;
+
+function nativeProviderRetryDelayMs(failures) {
+  const exponent = Math.max(0, Math.min(failures - 1, 6));
+  const ceiling = Math.min(
+    NATIVE_PROVIDER_RETRY_MAX_MS,
+    NATIVE_PROVIDER_RETRY_BASE_MS * 2 ** exponent,
+  );
+  // Equal jitter keeps the first retry quick without making several recovering browsers march in
+  // lockstep. The 30-second Chrome alarm remains the durable fallback if MV3 suspends this timer.
+  return Math.round(ceiling * (0.5 + Math.random() * 0.5));
+}
 
 function queueNativeProviderSessionWrite(values) {
   const write = nativeProviderSessionWriteQueue.then(() => chrome.storage.session.set(values));
@@ -1759,6 +1773,7 @@ async function maintainNativeProvider() {
         chatGptSignedIn: await nativeProviderChatGptSignedIn(),
       });
       if (!reply.ok || !reply.data) return false;
+      nativeProviderRetryFailures = 0;
       if (Number.isSafeInteger(reply.data.generation) && reply.data.generation >= 0)
         nativeProviderGeneration = reply.data.generation;
       // `nativeProviderCall` already merged and durably persisted the broker's complete
@@ -1799,10 +1814,13 @@ async function maintainNativeProvider() {
   })()
     .catch(() => false)
     .then((ok) => {
-      if (!ok)
+      if (!ok) {
+        nativeProviderRetryFailures += 1;
+        const retryDelayMs = nativeProviderRetryDelayMs(nativeProviderRetryFailures);
         setTimeout(() => {
           void maintainNativeProvider().catch(() => undefined);
-        }, 1000);
+        }, retryDelayMs);
+      }
       return ok;
     })
     .finally(() => {

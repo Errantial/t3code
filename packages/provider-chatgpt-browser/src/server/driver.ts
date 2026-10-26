@@ -159,23 +159,29 @@ export const ChatGptBrowserDriver: ProviderDriver<ChatGptBrowserSettings, ChatGp
                     ? "The bundled ChatGPT Browser runtime could not be resolved."
                     : `ChatGPT Browser failed its managed runtime readiness check (${cause.operation}).`,
               }),
-            onSuccess: ({ identity, authentication }) => {
+            onSuccess: ({ identity, authentication, availability }) => {
               const authenticated = authentication === "authenticated";
               const unauthenticated = authentication === "unauthenticated";
+              const recovering = availability === "recovering";
               return makeSnapshot({
                 installed: true,
                 version: identity.extensionVersion,
-                status: authenticated ? "ready" : "warning",
+                status: authenticated && !recovering ? "ready" : "warning",
                 auth: { status: authentication, canLogout: false },
                 canAuthenticate: true,
                 checkedAt,
-                ...(!authenticated
+                ...(recovering
                   ? {
-                      message: unauthenticated
-                        ? "Sign in to ChatGPT in the managed ChatGPT Browser profile."
-                        : "ChatGPT Browser is available, but T3 could not verify the ChatGPT sign-in.",
+                      message:
+                        "ChatGPT Browser is reconnecting to the managed extension. ChatGPT may still be working.",
                     }
-                  : {}),
+                  : !authenticated
+                    ? {
+                        message: unauthenticated
+                          ? "Sign in to ChatGPT in the managed ChatGPT Browser profile."
+                          : "ChatGPT Browser is available, but T3 could not verify the ChatGPT sign-in.",
+                      }
+                    : {}),
               });
             },
           }),

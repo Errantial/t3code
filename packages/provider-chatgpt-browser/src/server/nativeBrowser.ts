@@ -116,6 +116,7 @@ interface NativeBrokerOptions {
   readonly stopAckTimeoutMs?: number;
   readonly buildMismatchGraceMs?: number;
   readonly expectedExtensionBuildId?: string;
+  readonly now?: () => number;
   readonly persistObservation?: (
     observation: ChatGptBrowserProviderBrowserObservation,
   ) => Promise<void>;
@@ -130,6 +131,7 @@ export interface NativeChatGptBrowserBroker {
   readonly port: number;
   readonly waitForSession: (signal?: AbortSignal) => Promise<ChatGptBrowserProviderBrowserSession>;
   readonly authenticationStatus: () => NativeChatGptBrowserAuthenticationStatus;
+  readonly sessionAvailability: () => "ready" | "recovering";
   readonly waitForAuthenticationStatus: (
     signal?: AbortSignal,
   ) => Promise<NativeChatGptBrowserAuthenticationStatus>;
@@ -332,6 +334,7 @@ export async function startNativeChatGptBrowserBroker(
   let brokerGeneration = 0;
   let peer: BrowserPeer | null = null;
   let chatGptSignedIn: boolean | null = null;
+  let lastAuthenticatedRequestAt: number | null = null;
   let closed = false;
   let readyResolve: ((session: ChatGptBrowserProviderBrowserSession) => void) | null = null;
   let readyReject: ((cause: unknown) => void) | null = null;
@@ -404,6 +407,12 @@ export async function startNativeChatGptBrowserBroker(
       : chatGptSignedIn === false
         ? "unauthenticated"
         : "unknown";
+
+  const sessionAvailability = (): "ready" | "recovering" => {
+    if (!session || lastAuthenticatedRequestAt === null) return "recovering";
+    const now = options.now?.() ?? Date.now();
+    return now - lastAuthenticatedRequestAt <= 35_000 ? "ready" : "recovering";
+  };
 
   const waitForAuthenticationStatus = async (
     signal?: AbortSignal,
@@ -1433,6 +1442,7 @@ export async function startNativeChatGptBrowserBroker(
         readinessDiagnostics.authRejected += 1;
         return json(response, 401, { error: "unauthorised" }, origin);
       }
+      lastAuthenticatedRequestAt = options.now?.() ?? Date.now();
       const body = asRecord(await readJson(request));
       if (!body) return json(response, 400, { error: "bad_request" }, origin);
       if (!session) session = browserSession(browserPeer);
@@ -1536,6 +1546,7 @@ export async function startNativeChatGptBrowserBroker(
     port,
     waitForSession,
     authenticationStatus,
+    sessionAvailability,
     waitForAuthenticationStatus,
     waitForAuthentication,
     close: closeServer,

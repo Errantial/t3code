@@ -205,6 +205,28 @@ describe("managed extension native restart recovery source", () => {
     );
   });
 
+  it("backs off native provider maintenance retries while keeping the first retry fast", async () => {
+    const source = await backgroundSource();
+    const retry = sourceBetween(
+      source,
+      "const NATIVE_PROVIDER_RETRY_BASE_MS = 250;",
+      "function queueNativeProviderSessionWrite(values) {",
+    );
+    const maintenance = sourceBetween(
+      source,
+      "async function maintainNativeProvider() {",
+      "/**\n * Finds the app, preferring the port that worked last time.",
+    );
+
+    expect(retry).toContain("const NATIVE_PROVIDER_RETRY_MAX_MS = 10_000;");
+    expect(retry).toContain("Math.min(failures - 1, 6)");
+    expect(retry).toContain("0.5 + Math.random() * 0.5");
+    expect(maintenance).toContain("nativeProviderRetryFailures = 0;");
+    expect(maintenance).toContain("nativeProviderRetryFailures += 1;");
+    expect(maintenance).toContain("nativeProviderRetryDelayMs(nativeProviderRetryFailures)");
+    expect(maintenance).not.toContain("}, 1000);");
+  });
+
   it("reloads only an exact retained native observer tab that Chrome restored unloaded", async () => {
     const source = await backgroundSource();
     const block = sourceBetween(

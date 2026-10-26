@@ -63,11 +63,12 @@ function requestJson<T>(input: {
   });
 }
 
-async function startReadyBroker() {
+async function startReadyBroker(options: { readonly now?: () => number } = {}) {
   const secrets = new Map<string, Uint8Array>();
   const broker = await startNativeChatGptBrowserBroker({
     ports: [0],
     readyTimeoutMs: 5_000,
+    ...(options.now ? { now: options.now } : {}),
     secrets: {
       read: async (key) => secrets.get(key) ?? null,
       write: async (key, value) => {
@@ -95,6 +96,27 @@ async function startReadyBroker() {
 }
 
 describe("native ChatGPT browser broker", () => {
+  it("downgrades a paired session after extension traffic goes stale and recovers on reconnect", async () => {
+    let now = 1_000;
+    const { broker, headers } = await startReadyBroker({ now: () => now });
+    try {
+      expect(broker.sessionAvailability()).toBe("ready");
+
+      now += 35_001;
+      expect(broker.sessionAvailability()).toBe("recovering");
+
+      await requestJson({
+        port: broker.port,
+        path: "/provider-v1/browser/status",
+        headers,
+        body: { operations: [], after: 0, wait: false },
+      });
+      expect(broker.sessionAvailability()).toBe("ready");
+    } finally {
+      await broker.close();
+    }
+  });
+
   it("tracks the managed ChatGPT sign-in and wakes authentication waiters", async () => {
     const { broker, headers } = await startReadyBroker();
     try {
