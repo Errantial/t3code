@@ -197,6 +197,46 @@ describe("ChatGPT Browser ProviderAdapterV2", () => {
         expect(
           finalMessage?.type === "message.updated" ? finalMessage.message : undefined,
         ).toMatchObject({ text: finalText, streaming: false });
+        const assistantNodes = events.filter(
+          (event) => event.type === "node.updated" && event.node.kind === "assistant_message",
+        );
+        expect(assistantNodes).toHaveLength(2);
+        expect(assistantNodes[0]).toMatchObject({
+          type: "node.updated",
+          node: { status: "running", completedAt: null },
+        });
+        expect(assistantNodes.at(-1)).toMatchObject({
+          type: "node.updated",
+          node: { status: "completed" },
+        });
+        const assistantItems = events.filter(
+          (event) =>
+            event.type === "turn_item.updated" && event.turnItem.type === "assistant_message",
+        );
+        expect(assistantItems).toHaveLength(2);
+        expect(assistantItems[0]).toMatchObject({
+          type: "turn_item.updated",
+          turnItem: { text: "hel", streaming: true, status: "running" },
+        });
+        expect(assistantItems.at(-1)).toMatchObject({
+          type: "turn_item.updated",
+          turnItem: { text: finalText, streaming: false, status: "completed" },
+        });
+        const firstAssistantItem = assistantItems[0];
+        const finalAssistantItem = assistantItems.at(-1);
+        if (
+          finalMessage?.type !== "message.updated" ||
+          firstAssistantItem?.type !== "turn_item.updated" ||
+          firstAssistantItem.turnItem.type !== "assistant_message" ||
+          finalAssistantItem?.type !== "turn_item.updated" ||
+          finalAssistantItem.turnItem.type !== "assistant_message"
+        ) {
+          throw new Error("Expected assistant projection events");
+        }
+        expect(firstAssistantItem.turnItem.id).toBe(finalAssistantItem.turnItem.id);
+        expect(firstAssistantItem.turnItem.ordinal).toBe(finalAssistantItem.turnItem.ordinal);
+        expect(finalAssistantItem.turnItem.messageId).toBe(finalMessage.message.id);
+        expect(finalAssistantItem.turnItem.nodeId).toBe(finalMessage.message.nodeId);
         expect(events.at(-1)).toMatchObject({ type: "turn.terminal", status: "completed" });
       }),
     ),
