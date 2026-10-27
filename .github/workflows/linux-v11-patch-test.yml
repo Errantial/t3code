@@ -2,6 +2,10 @@
 
 on:
   workflow_dispatch:
+  pull_request:
+    branches: [main]
+    paths:
+      - ".github/workflows/linux-v11-patch-test.yml"
 
 permissions:
   contents: read
