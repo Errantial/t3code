@@ -1,0 +1,77 @@
+﻿name: Linux v1.1 patch test artifact
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [main]
+    paths:
+      - ".github/workflows/linux-v11-patch-test.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  build-linux-arm64:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 50
+    env:
+      T3CODE_RELAY_URL: ${{ secrets.PATCH_T3CODE_RELAY_URL }}
+      T3CODE_CLERK_PUBLISHABLE_KEY: ${{ secrets.PATCH_T3CODE_CLERK_PUBLISHABLE_KEY }}
+      T3CODE_CLERK_JWT_TEMPLATE: ${{ secrets.PATCH_T3CODE_CLERK_JWT_TEMPLATE }}
+      T3CODE_CLERK_CLI_OAUTH_CLIENT_ID: ${{ secrets.PATCH_T3CODE_CLERK_CLI_OAUTH_CLIENT_ID }}
+      T3CODE_TELEMETRY_CHANNEL: dev
+      BUILD_VERSION: 0.1.3-v1.1.1.20261026.d87d50f.linux1
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          sparse-checkout: |
+            /*
+            !/.repos/
+          sparse-checkout-cone-mode: false
+
+      - uses: voidzero-dev/setup-vp@250f29ce396baf5e8f24498e17c0dfdebabc26eb
+        with:
+          node-version-file: package.json
+          cache: true
+          run-install: false
+
+      - name: Install dependencies
+        run: vp install --filter=@t3tools/desktop... --filter=t3... --filter=@t3tools/scripts...
+
+      - name: Install native build prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libsecret-1-dev pkg-config imagemagick
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+        with:
+          toolchain: stable
+          targets: aarch64-unknown-linux-gnu
+
+      - name: Install managed Chromium
+        run: node apps/server/node_modules/playwright-core/cli.js install --with-deps chromium
+
+      - name: Run changed platform regression
+        run: vp exec vitest run packages/provider-core/src/server/chatgptBrowserPlatform.test.ts
+
+      - name: Build Linux arm64 AppImage
+        run: vp run dist:desktop:artifact --platform linux --target AppImage --arch arm64 --build-version "$BUILD_VERSION" --verbose
+
+      - name: Smoke AppImage version
+        run: |
+          set -euo pipefail
+          app=$(ls release/*.AppImage | head -n 1)
+          chmod +x "$app"
+          APPIMAGE_EXTRACT_AND_RUN=1 "$app" --version
+          sha256sum "$app" | tee release/SHA256SUMS-linux-arm64-patch-test
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: linux-arm64-v11-patch-d87d50f
+          path: |
+            release/*.AppImage
+            release/SHA256SUMS-linux-arm64-patch-test
+          if-no-files-found: error
+          retention-days: 1
