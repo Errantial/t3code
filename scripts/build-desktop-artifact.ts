@@ -3459,7 +3459,9 @@ export const validateLinuxPackagedPayload = Effect.fn(
 )(function* (input: { readonly stageDistDir: string; readonly targetArch: typeof BuildArch.Type }) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
-  const packagedAppDir = path.join(input.stageDistDir, "linux-unpacked");
+  const unpackedDirName =
+    input.targetArch === "x64" ? "linux-unpacked" : `linux-${input.targetArch}-unpacked`;
+  const packagedAppDir = path.join(input.stageDistDir, unpackedDirName);
   const packagedStat = yield* fs.stat(packagedAppDir).pipe(Effect.orElseSucceed(() => null));
   if (packagedStat?.type !== "Directory") {
     return yield* new LinuxPackagedPayloadValidationError({

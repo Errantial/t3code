@@ -807,6 +807,23 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
     ),
   );
 
+  it.effect("validates the arch-specific Linux arm64 packaged application directory", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-linux-arm64-payload-" });
+        const stageDistDir = path.join(root, "dist");
+        const packagedAppDir = path.join(stageDistDir, "linux-arm64-unpacked");
+        yield* fs.makeDirectory(packagedAppDir, { recursive: true });
+
+        const result = yield* validateLinuxPackagedPayload({ stageDistDir, targetArch: "arm64" });
+        assert.equal(result.packagedAppDir, packagedAppDir);
+        assert.equal(result.chatGptBrowserFileCount, 0);
+      }),
+    ),
+  );
+
   // pnpm writes "set this to true or false" placeholders into allowBuilds when a
   // tarball changes. pnpm ignores them, but the release build decode rejects them.
   it.effect("decodes the repo allowBuilds and every file: tarball it names exists", () =>
