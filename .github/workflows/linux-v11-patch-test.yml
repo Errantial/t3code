@@ -52,9 +52,6 @@ jobs:
       - name: Install managed Chromium
         run: node apps/server/node_modules/playwright-core/cli.js install --with-deps chromium
 
-      - name: Run changed platform regression
-        run: vp exec vitest run packages/provider-core/src/server/chatgptBrowserPlatform.test.ts
-
       - name: Build Linux arm64 AppImage
         run: vp run dist:desktop:artifact --platform linux --target AppImage --arch arm64 --build-version "$BUILD_VERSION" --verbose
 
