@@ -116,7 +116,6 @@ type CountsRow = {
 
 type ProjectContextRow = ProjectStateRow & CountsRow & { readonly project_title: string };
 type PacketDataRow = ProjectContextRow & {
-  readonly roster_json: string;
   readonly notes_json: string;
 };
 
@@ -1258,59 +1257,22 @@ const make = Effect.gen(function* () {
         SELECT COALESCE(s.census_revision, 0) AS census_revision,
                COALESCE(s.notes_revision, 0) AS notes_revision,
                COALESCE(s.mail_revision, 0) AS mail_revision,
-               COALESCE((
-                 SELECT COUNT(*)
-                 FROM civilization_citizens
-                 WHERE project_id = ${input.projectId} AND deleted = 0
-               ), 0) AS total,
-               COALESCE((
-                 SELECT COUNT(*)
-                 FROM civilization_citizens
-                 WHERE project_id = ${input.projectId} AND closed = 0 AND deleted = 0
-               ), 0) AS open_count,
-               COALESCE((
-                 SELECT COUNT(*)
-                 FROM civilization_citizens
-                 WHERE project_id = ${input.projectId} AND deleted = 0 AND observed_only = 1
-               ), 0) AS observed_count,
+               COALESCE(citizens.total, 0) AS total,
+               COALESCE(citizens.open_count, 0) AS open_count,
+               COALESCE(citizens.observed_count, 0) AS observed_count,
                COALESCE(p.title, '') AS project_title,
-               COALESCE(roster.items, '[]') AS roster_json,
                COALESCE(notes.items, '[]') AS notes_json
         FROM (SELECT 1) seed
         LEFT JOIN civilization_project_state s ON s.project_id = ${input.projectId}
         LEFT JOIN projection_projects p
           ON p.project_id = ${input.projectId} AND p.deleted_at IS NULL
         LEFT JOIN (
-          SELECT json_group_array(json_object(
-                   'thread_id', thread_id,
-                   'project_id', project_id,
-                   'parent_thread_id', parent_thread_id,
-                   'relationship_to_parent', relationship_to_parent,
-                   'generation', generation,
-                   'lineage_status', lineage_status,
-                   'observed_only', observed_only,
-                   'name_display', name_display,
-                   'name_key', name_key,
-                   'profile_label', profile_label,
-                   'profile_rich_label', profile_rich_label,
-                   'epoch', epoch,
-                   'closed', closed,
-                   'deleted', deleted,
-                   'revision', revision,
-                   'updated_at', updated_at
-                 )) AS items
-          FROM (
-            SELECT thread_id, project_id, parent_thread_id, relationship_to_parent,
-                   generation, lineage_status, observed_only, name_display, name_key,
-                   profile_label, profile_rich_label,
-                   epoch, closed, deleted, revision, updated_at
-            FROM civilization_citizens
-            WHERE project_id = ${input.projectId} AND deleted = 0
-              AND (${effective.config.participation.showObservedAgents ? 1 : 0} = 1 OR observed_only = 0)
-            ORDER BY name_key ASC, thread_id ASC
-            LIMIT ${Math.max(0, rosterLimit + 1)}
-          )
-        ) roster ON 1 = 1
+          SELECT COUNT(*) AS total,
+                 SUM(CASE WHEN closed = 0 THEN 1 ELSE 0 END) AS open_count,
+                 SUM(CASE WHEN observed_only = 1 THEN 1 ELSE 0 END) AS observed_count
+          FROM civilization_citizens
+          WHERE project_id = ${input.projectId} AND deleted = 0
+        ) citizens ON 1 = 1
         LEFT JOIN (
           SELECT json_group_array(json_object(
                    'note_id', note_id,
@@ -1339,7 +1301,16 @@ const make = Effect.gen(function* () {
     const state: ProjectStateRow = packetData;
     const counts: CountsRow = packetData;
     const projectTitle = packetData.project_title;
-    const rosterCandidates = JSON.parse(packetData.roster_json) as Array<CitizenRow>;
+    const rosterCandidates = yield* sql<CitizenRow>`
+      SELECT thread_id, project_id, parent_thread_id, relationship_to_parent,
+             generation, lineage_status, observed_only, name_display, name_key,
+             profile_label, profile_rich_label, epoch, closed, deleted, revision, updated_at
+      FROM civilization_citizens
+      WHERE project_id = ${input.projectId} AND deleted = 0
+        AND (${effective.config.participation.showObservedAgents ? 1 : 0} = 1 OR observed_only = 0)
+      ORDER BY name_key ASC, thread_id ASC
+      LIMIT ${Math.max(0, rosterLimit + 1)}
+    `;
     const rawNotes = JSON.parse(packetData.notes_json) as Array<NoteRow>;
     const noteCandidates = rawNotes
       .filter(
@@ -2034,7 +2005,10 @@ const make = Effect.gen(function* () {
   } as const satisfies CivilizationContextExecutionPolicy;
   const explicitReadExecutionPolicy = {
     inbox: "omit",
-    persistence: "reference",
+    // Explicit reads run under a read-only MCP approval, so they must not
+    // persist a reference row. Historical references are written only for a
+    // real provider turn.
+    persistence: "none",
     suppressNonActionableTurn: false,
     strictProviderCapability: false,
   } as const satisfies CivilizationContextExecutionPolicy;

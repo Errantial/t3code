@@ -28,8 +28,8 @@ const v2TableCount = Effect.gen(function* () {
 describe("runMigrations", () => {
   it("keeps v1.5 migrations after the upstream migration ids", () => {
     assert.deepStrictEqual(migrationManifest.slice(-2), [
-      [79, "CivilizationProjectBrief"],
       [80, "CivilizationMailContentKind"],
+      [81, "CivilizationMaintenanceIndexes"],
     ]);
   });
 
