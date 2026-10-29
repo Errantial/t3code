@@ -17,6 +17,7 @@ import {
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as SqlClient from "effect/sql/SqlClient";
 
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
 import * as CitizenService from "./CitizenService.ts";
@@ -120,6 +121,7 @@ export const onboardingPresetCandidates = (
 ];
 
 const make = Effect.gen(function* () {
+  const sql = yield* SqlClient.SqlClient;
   const config = yield* ConfigService.CivilizationConfigService;
   const citizens = yield* CitizenService.CivilizationCitizenService;
   const context = yield* ContextService.CivilizationContextService;
@@ -127,7 +129,9 @@ const make = Effect.gen(function* () {
 
   const currentProjectOverride = Effect.fn("CivilizationOnboarding.currentProjectOverride")(
     function* (projectId: ProjectId) {
-      // `getEffective` performs the authoritative open-project validation.
+      yield* ConfigService.assertOpenCivilizationProject(projectId).pipe(
+        Effect.provideService(SqlClient.SqlClient, sql),
+      );
       const effective = yield* config.getEffective(projectId);
       const stored = yield* config.readProject(projectId);
       return {

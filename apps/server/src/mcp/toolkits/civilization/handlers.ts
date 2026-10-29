@@ -54,6 +54,17 @@ const resolveReadProject = Effect.fn("CivilizationMcp.resolveReadProject")(funct
   projectId: ProjectId | undefined,
 ) {
   const caller = yield* readCaller();
+  if (
+    caller.caller !== undefined &&
+    projectId !== undefined &&
+    projectId !== caller.caller.projectId
+  ) {
+    return yield* new OrchestratorMcpFailure({
+      code: "invalid_request",
+      message:
+        "Civilization reads from a thread are restricted to the calling thread's own project.",
+    });
+  }
   return { caller, projectId: yield* resolveProjectId(caller, projectId) } as const;
 });
 

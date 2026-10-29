@@ -30,7 +30,11 @@ import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
 
 import { exceededDispatchModeLimit } from "../orchestration-v2/DispatchModeLimit.ts";
-import { getEffectiveCivilizationConfig, normalizeCivilizationName } from "./ConfigService.ts";
+import {
+  assertOpenCivilizationProject,
+  getEffectiveCivilizationConfig,
+  normalizeCivilizationName,
+} from "./ConfigService.ts";
 
 const CURSOR_VERSION = 1 as const;
 const MAX_SOURCE_REFERENCES = 16;
@@ -618,6 +622,9 @@ const make = Effect.gen(function* () {
   const searchCitizens = Effect.fn("CivilizationKnowledge.searchCitizens")(function* (
     input: CivilizationCitizenSearchInput,
   ) {
+    yield* assertOpenCivilizationProject(input.projectId).pipe(
+      Effect.provideService(SqlClient.SqlClient, sql),
+    );
     const effective = yield* getEffectiveCivilizationConfig(input.projectId).pipe(
       Effect.provideService(SqlClient.SqlClient, sql),
     );
