@@ -34,6 +34,7 @@ it.each([
           activityMode={activityMode}
           contextMode={contextMode}
           navigate={vi.fn()}
+          hasUnsavedChanges={false}
         />,
       );
     });
