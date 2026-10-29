@@ -1386,6 +1386,97 @@ describe("AcpAdapterV2", () => {
     }).pipe(Effect.provide(layerTest), Effect.scoped),
   );
 
+  it.effect.each([
+    {
+      name: "reports complete per-turn usage when the agent returns input and output tokens",
+      usage: { totalTokens: 150, inputTokens: 100, outputTokens: 50 },
+      expected: { usageStatus: "complete", inputTokens: 100, outputTokens: 50 },
+    },
+    {
+      name: "marks usage partial when thought tokens leave the output share ambiguous",
+      usage: { totalTokens: 180, inputTokens: 100, outputTokens: 50, thoughtTokens: 30 },
+      expected: { usageStatus: "partial", inputTokens: 100, outputTokens: 50 },
+    },
+    {
+      name: "leaves usage unset when the agent reports none",
+      usage: undefined,
+      expected: undefined,
+    },
+  ] as const)("$name", ({ usage, expected }) =>
+    Effect.gen(function* () {
+      const childProcessSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+      const path = yield* Path.Path;
+      const mockAgentPath = yield* path.fromFileUrl(
+        new URL("../../../scripts/acp-mock-agent.ts", import.meta.url),
+      );
+      const instanceId = ProviderInstanceId.make("acp-turn-token-usage");
+      const adapter = yield* makeAcpAdapterV2({
+        instanceId,
+        selfInvocation: yield* resolveSelfInvocation(),
+        flavor: {
+          driver: ACP_TEST_DRIVER,
+          capabilities: AcpProviderCapabilitiesV2,
+          makeRuntime: makeMockRuntime({
+            childProcessSpawner,
+            mockAgentPath,
+            wrapRuntime: (runtime) => ({
+              ...runtime,
+              prompt: () =>
+                Effect.succeed({
+                  stopReason: "end_turn" as const,
+                  ...(usage === undefined ? {} : { usage }),
+                }),
+            }),
+          }),
+        },
+      });
+      const threadId = ThreadId.make("acp-turn-token-usage");
+      const modelSelection = { instanceId, model: "default" };
+      const runtimePolicy = ProviderAdapter.ProviderAdapterV2RuntimePolicy.make({
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        cwd: process.cwd(),
+      });
+      const runtime = yield* adapter.openSession({
+        threadId,
+        providerSessionId: ProviderSessionId.make("acp-turn-token-usage-session"),
+        modelSelection,
+        runtimePolicy,
+      });
+      const providerThread = yield* runtime.ensureThread({
+        threadId,
+        modelSelection,
+        runtimePolicy,
+      });
+      yield* runtime.startTurn(
+        makeTurnInput({
+          threadId,
+          providerThread,
+          instanceId,
+          runtimePolicy,
+          now: yield* DateTime.now,
+        }),
+      );
+      const turns = Array.from(
+        yield* runtime.events.pipe(
+          Stream.takeUntil((event) => event.type === "turn.terminal"),
+          Stream.runCollect,
+        ),
+      ).flatMap((event) => (event.type === "provider_turn.updated" ? [event.providerTurn] : []));
+      const completed = turns.findLast((turn) => turn.status === "completed");
+      assert.isDefined(completed);
+      if (expected === undefined) {
+        assert.isUndefined(completed?.turnTokenUsage);
+      } else {
+        assert.deepInclude(completed?.turnTokenUsage, {
+          usageScope: "main_agent",
+          hasSubagents: false,
+          ...expected,
+        });
+      }
+    }).pipe(Effect.provide(layerTest), Effect.scoped),
+  );
+
   it.effect("persists a bounded subset of streamed root and child tool updates", () =>
     Effect.gen(function* () {
       const childProcessSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;

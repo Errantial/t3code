@@ -82,6 +82,7 @@ import {
   type AcpSessionModeState,
   type AcpToolCallState,
 } from "./runtimeModel.ts";
+import { acpTurnTokenUsage } from "./turnTokenUsage.ts";
 import {
   acpClientExecuteDisposition,
   acpMcpToolApprovalElicitationDisposition,
@@ -1089,6 +1090,8 @@ interface ActiveAcpTurn {
   promptSettled: boolean;
   promptSettledStatus: "completed" | "interrupted" | "failed" | "cancelled" | null;
   workAccepted: boolean;
+  /** Usage the agent reported with the `session/prompt` response, if any. */
+  promptUsage: EffectAcpSchema.Usage | null;
   readonly promptWireSettled: Deferred.Deferred<void, never>;
   backgroundFinalizeGeneration: number;
 }
@@ -6897,6 +6900,11 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
           lastError: null,
         };
 
+        const optionalTurnTokenUsage = (context: ActiveAcpTurn) => {
+          const turnTokenUsage = acpTurnTokenUsage(context.promptUsage, context.subagents.size > 0);
+          return turnTokenUsage === undefined ? {} : { turnTokenUsage };
+        };
+
         const providerTurnPayload = (
           context: ActiveAcpTurn,
           status: OrchestrationV2ProviderTurn["status"],
@@ -6915,6 +6923,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
           status,
           startedAt: context.startedAt,
           completedAt,
+          ...optionalTurnTokenUsage(context),
         });
 
         const terminalizeOpenRunOwnedItems = Effect.fnUntraced(function* (
@@ -7457,6 +7466,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
               promptSettled: false,
               promptSettledStatus: null,
               workAccepted: false,
+              promptUsage: null,
               promptWireSettled,
               backgroundFinalizeGeneration: 0,
             };
@@ -7628,6 +7638,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                   promptGeneration,
                   Effect.gen(function* () {
                     if (context.finalized || followsAgentWorkState) return;
+                    context.promptUsage = result.usage ?? null;
                     // ACP v2 reports a failed prompt as an idle `error`, not an RPC error.
                     const idleError = result.stopReason === "error" && !context.interrupted;
                     const status = idleError
