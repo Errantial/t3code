@@ -1,4 +1,6 @@
 import { Button } from "../ui/button";
+import type { ScopedThreadRef } from "@t3tools/contracts";
+import { TokenRateToggleRow, useThreadTokenRate } from "./ThreadTokenRate";
 import { type ContextWindowSnapshot, formatContextWindowTokens } from "~/lib/contextWindow";
 import { Popover, PopoverPopup, PopoverTrigger } from "../ui/popover";
 import {
@@ -20,12 +22,15 @@ function formatPercentage(value: number | null): string | null {
 
 export function ContextWindowMeter(props: {
   usage: ContextWindowSnapshot;
+  /** Enables the per-thread tokens/sec option when the thread is known. */
+  threadRef?: ScopedThreadRef | undefined;
   modelDisplayName?: string | null;
   onCompact?: (() => void) | undefined;
   compactDisabled?: boolean | undefined;
   compactDisabledReason?: string | null | undefined;
 }) {
   const { usage, modelDisplayName, onCompact, compactDisabled, compactDisabledReason } = props;
+  const tokenRate = useThreadTokenRate(props.threadRef);
   const usedPercentage = formatPercentage(usage.usedPercentage);
   const normalizedPercentage = Math.max(0, Math.min(100, usage.usedPercentage ?? 0));
   const radius = 9.75;
@@ -143,6 +148,13 @@ export function ContextWindowMeter(props: {
                 {formatContextWindowCost(usage.cost)}
               </span>
             </div>
+          ) : null}
+          {props.threadRef ? (
+            <TokenRateToggleRow
+              enabled={tokenRate.enabled}
+              hasReading={tokenRate.throughput !== null}
+              onEnabledChange={tokenRate.setEnabled}
+            />
           ) : null}
           {usage.compactsAutomatically ? (
             <div className="mt-1 text-pretty text-secondary-label text-2xs font-medium">

@@ -3,6 +3,7 @@ import type {
   ProviderInstanceId,
   ProviderInteractionMode,
   RuntimeMode,
+  ScopedThreadRef,
 } from "@t3tools/contracts";
 import { createModelSelection } from "@t3tools/shared/model";
 import { BotIcon, PencilRulerIcon } from "lucide-react";
@@ -16,6 +17,7 @@ import { ComposerControl, ComposerControlIcon } from "./ComposerControl";
 import { focusRequestedPermission, useComposerMenuProps } from "./composerEventScope";
 import { ComposerPrimaryActions } from "./ComposerPrimaryActions";
 import { ContextWindowMeter, ContextWindowMeterPlaceholder } from "./ContextWindowMeter";
+import { ThreadTokenRateBadge } from "./ThreadTokenRate";
 import { resolveModelPickerSelectedModel } from "./ModelPickerContent";
 import { ProviderModelPicker } from "./ProviderModelPicker";
 import { runtimeModeConfig } from "./runtimeModeConfig";
@@ -245,6 +247,7 @@ export const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryA
   compact: boolean;
   canOperateThread: boolean;
   activeContextWindow: ContextWindowSnapshot | null;
+  contextWindowThreadRef?: ScopedThreadRef | undefined;
   reserveContextWindowMeter: boolean;
   activeThreadModelDisplayName: string | null;
   isPreparingWorktree: boolean;
@@ -284,8 +287,12 @@ export const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryA
   return (
     <>
       {props.activeContextWindow ? (
+        <ThreadTokenRateBadge threadRef={props.contextWindowThreadRef} />
+      ) : null}
+      {props.activeContextWindow ? (
         <ContextWindowMeter
           usage={props.activeContextWindow}
+          threadRef={props.contextWindowThreadRef}
           modelDisplayName={props.activeThreadModelDisplayName}
           onCompact={props.onCompactContext}
           compactDisabled={props.compactDisabled}
