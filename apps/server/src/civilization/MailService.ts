@@ -2676,6 +2676,24 @@ const make = Effect.gen(function* () {
         `;
         const deletedMessages =
           (yield* sql<{ readonly count: number }>`SELECT changes() AS count`)[0]?.count ?? 0;
+        // Acknowledged mail is still readable through the current delivery
+        // epoch, so it is not terminalized. It must still leave retained
+        // storage after the published terminal-retention window; otherwise
+        // the project's retained-count cap eventually blocks every send.
+        yield* sql`
+          DELETE FROM civilization_messages
+          WHERE message_id IN (
+            SELECT message_id FROM civilization_messages
+            WHERE project_id = ${projectId}
+              AND terminal_at IS NULL
+              AND acknowledged_at IS NOT NULL
+              AND strftime('%Y-%m-%dT%H:%M:%fZ', acknowledged_at, '+' || terminal_retention_days || ' days') <= ${time.now}
+            ORDER BY acknowledged_at ASC, message_id ASC
+            LIMIT ${batch}
+          )
+        `;
+        const deletedAcknowledged =
+          (yield* sql<{ readonly count: number }>`SELECT changes() AS count`)[0]?.count ?? 0;
         yield* sql`
           DELETE FROM civilization_mail_operation_receipts
           WHERE rowid IN (
@@ -2701,6 +2719,7 @@ const make = Effect.gen(function* () {
         return {
           expired,
           deletedMessages,
+          deletedAcknowledged,
           deletedReceipts,
           deletedQuotaWindows,
         } as const;

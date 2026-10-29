@@ -24,7 +24,9 @@ const state = vi.hoisted(() => ({
   onboardingResults: [] as Array<
     | { readonly kind: "resolve"; readonly value: unknown }
     | { readonly kind: "reject"; readonly error: unknown }
+    | { readonly kind: "deferred" }
   >,
+  deferredOnboarding: [] as Array<(value: unknown) => void>,
   configResults: [] as Array<
     | { readonly kind: "resolve"; readonly value: unknown }
     | { readonly kind: "reject"; readonly error: unknown }
@@ -40,8 +42,11 @@ vi.mock("@effect/atom-react", () => ({
     (token === state.onboardingActionToken ? state.onboardingCalls : state.configCalls).push(input);
     const result = queue.shift();
     if (!result) throw new Error("Unexpected action.");
-    if (result.kind === "reject") throw result.error;
-    return result.value;
+    if ((result as { readonly kind: string }).kind === "deferred") {
+      return new Promise((resolve) => state.deferredOnboarding.push(resolve));
+    }
+    if ("error" in result) throw result.error;
+    return (result as { readonly value: unknown }).value;
   },
 }));
 
@@ -135,6 +140,24 @@ const contentPreview = {
   warnings: [],
 } as unknown as CivilizationOnboardingContentPreviewResult;
 
+const adaCitizen = {
+  threadId: citizenThreadId,
+  projectId,
+  name: "Ada",
+  profileId: "profile-ada",
+  profileLabel: "Builder",
+  generation: 0,
+  lineageStatus: "resolved",
+  parentThreadId: null,
+  relationshipToParent: null,
+  observedOnly: false,
+  epoch: 0,
+  closed: false,
+  deleted: false,
+  titleManaged: true,
+  revision: 1,
+};
+
 vi.mock("../../state/civilization", () => ({
   civilizationOnboardingAction: state.onboardingActionToken,
   civilizationConfigAction: state.configActionToken,
@@ -147,31 +170,25 @@ vi.mock("../../state/civilization", () => ({
   },
   useCivilizationCensusPage: (...args: unknown[]) => {
     state.censusHookCalls.push(args);
+    const cursor = args[2];
+    const hasMore = cursor !== "cursor-2";
+    const pageCitizen =
+      cursor === "cursor-2"
+        ? {
+            ...adaCitizen,
+            threadId: ThreadId.make("thread:onboarding:grace"),
+            name: "Grace",
+            profileId: "profile-grace",
+            profileLabel: "Reviewer",
+          }
+        : adaCitizen;
     return {
       data: {
         projectId,
         revision: 5,
-        citizens: [
-          {
-            threadId: citizenThreadId,
-            projectId,
-            name: "Ada",
-            profileId: "profile-ada",
-            profileLabel: "Builder",
-            generation: 0,
-            lineageStatus: "resolved",
-            parentThreadId: null,
-            relationshipToParent: null,
-            observedOnly: false,
-            epoch: 0,
-            closed: false,
-            deleted: false,
-            titleManaged: true,
-            revision: 1,
-          },
-        ],
-        nextCursor: null,
-        partial: false,
+        citizens: [pageCitizen],
+        nextCursor: hasMore ? "cursor-2" : null,
+        partial: hasMore,
       },
       error: null,
       isPending: false,
@@ -285,6 +302,7 @@ beforeEach(() => {
   state.onboardingCalls = [];
   state.configCalls = [];
   state.onboardingResults = [];
+  state.deferredOnboarding = [];
   state.configResults = [];
   state.refreshPresets = 0;
   state.popupProps = null;
@@ -354,6 +372,41 @@ describe("CivilizationOnboardingDialog", () => {
     });
     expect(JSON.stringify(renderer!.toJSON())).toContain("sensitive packet body");
     expect(JSON.stringify(renderer!.toJSON())).toContain("full-access");
+  });
+
+  it("pages through citizens past the first census page instead of truncating the picker", async () => {
+    await renderDialog();
+    const citizenSelect = renderer!.root.findByProps({ "data-select": true });
+    expect(JSON.stringify(renderer!.toJSON())).not.toContain("Grace");
+
+    await act(() => citizenSelect.props.onValueChange("__next_citizens__"));
+    expect(state.censusHookCalls.at(-1)?.[2]).toBe("cursor-2");
+    expect(JSON.stringify(renderer!.toJSON())).toContain("Grace");
+    expect(JSON.stringify(renderer!.toJSON())).toContain("Previous citizens");
+
+    await act(() => citizenSelect.props.onValueChange("__previous_citizens__"));
+    expect(state.censusHookCalls.at(-1)?.[2]).toBe(null);
+    expect(JSON.stringify(renderer!.toJSON())).toContain("Ada");
+  });
+
+  it("ignores a stale preview response after the citizen changes", async () => {
+    const stale = { ...preview, projectRevision: 4 } as CivilizationOnboardingPreviewResult;
+    const fresh = { ...preview, projectRevision: 99 } as CivilizationOnboardingPreviewResult;
+    state.onboardingResults = [{ kind: "deferred" }, { kind: "resolve", value: fresh }];
+    await renderDialog();
+
+    await click("Preview");
+    const citizenSelect = renderer!.root.findByProps({ "data-select": true });
+    await act(() => citizenSelect.props.onValueChange(citizenThreadId));
+    await click("Preview");
+    expect(JSON.stringify(renderer!.toJSON())).toContain("99");
+
+    await act(async () => {
+      state.deferredOnboarding[0]!(stale);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(JSON.stringify(renderer!.toJSON())).toContain("99");
   });
 
   it("clears revealed packet text when settings:write is revoked after Reveal", async () => {

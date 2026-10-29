@@ -238,6 +238,19 @@ it.effect("search visibility excludes deleted citizens and follows observed-agen
   }).pipe(Effect.provide(Layer.fresh(layer))),
 );
 
+it.effect("search fails closed for an unknown or deleted project", () =>
+  Effect.gen(function* () {
+    const service = yield* KnowledgeService.CivilizationKnowledgeService;
+    const error = yield* service
+      .searchCitizens({ projectId: ProjectId.make("project:unknown"), query: "Ada" })
+      .pipe(Effect.flip);
+    assert.equal(error._tag, "CivilizationUnavailableError");
+    if (error._tag === "CivilizationUnavailableError") {
+      assert.equal(error.reason, "project_unavailable");
+    }
+  }).pipe(Effect.provide(Layer.fresh(layer))),
+);
+
 it.effect("search includes observed citizens when the effective policy permits them", () =>
   Effect.gen(function* () {
     const service = yield* KnowledgeService.CivilizationKnowledgeService;

@@ -30,6 +30,8 @@ const state = vi.hoisted(() => ({
   attentionSuccess: true,
   attentionRefreshCalls: 0,
   configActionCalls: [] as unknown[],
+  configExportCalls: [] as unknown[],
+  storedConfigJson: "",
   configActionResults: [] as Array<
     | { readonly kind: "resolve"; readonly value: unknown }
     | { readonly kind: "reject"; readonly error: unknown }
@@ -50,6 +52,13 @@ const state = vi.hoisted(() => ({
 
 vi.mock("@effect/atom-react", () => ({
   useAtomSet: () => async (input: unknown) => {
+    if ((input as { type?: string }).type === "export") {
+      state.configExportCalls.push(input);
+      return {
+        json: state.storedConfigJson,
+        effective: state.singleEffective ?? EFFECTIVE,
+      };
+    }
     state.configActionCalls.push(input);
     const result = state.configActionResults.shift();
     if (!result) throw new Error("Unexpected Civilization config action in test.");
@@ -437,6 +446,8 @@ beforeEach(() => {
   state.attentionSuccess = true;
   state.attentionRefreshCalls = 0;
   state.configActionCalls = [];
+  state.configExportCalls = [];
+  state.storedConfigJson = JSON.stringify({ version: CIVILIZATION_CONFIG_VERSION });
   state.configActionResults = [];
   state.refreshCalls = 0;
   state.singleEffective = null;
@@ -1068,8 +1079,43 @@ describe("Civilization settings participation editor", () => {
     expect(state.refreshCalls).toBe(1);
   });
 
-  it("switches one stored personality to rich rendering without changing its assignment", async () => {
+  it("confirms before leaving Configuration with unsaved section edits", async () => {
+    writableTarget();
+    const onNavigate = vi.fn();
+    const confirm = vi.fn(() => false);
+    vi.stubGlobal("confirm", confirm);
+
+    await act(() => {
+      renderer = create(
+        <CivilizationSettingsPanel search={{ view: "configuration" }} onNavigate={onNavigate} />,
+      );
+    });
+
+    const enabled = renderer!.root.findByProps({
+      "aria-label": "Enable Civilization on Writable machine",
+    });
+    await act(() => enabled.props.onCheckedChange(true));
+
+    const selector = renderer!.root
+      .findAllByProps({ "aria-label": "Civilization view" })
+      .find((node) => Array.isArray(node.props.value));
+    expect(selector).toBeDefined();
+    await act(() => selector!.props.onValueChange(["overview"]));
+
+    expect(confirm).toHaveBeenCalledWith("Discard unsaved Civilization changes?");
+    expect(onNavigate).not.toHaveBeenCalled();
+
+    confirm.mockReturnValue(true);
+    await act(() => selector!.props.onValueChange(["overview"]));
+    expect(onNavigate).toHaveBeenLastCalledWith({ view: "overview" });
+  });
+
+  it("switches one stored personality to rich rendering and preserves unrelated sections", async () => {
     const { environmentId, projectId } = writableTarget();
+    state.storedConfigJson = JSON.stringify({
+      version: CIVILIZATION_CONFIG_VERSION,
+      messaging: { enabled: true },
+    });
     const richEffective = {
       ...EFFECTIVE,
       projectRevision: 5,
@@ -1122,7 +1168,7 @@ describe("Civilization settings participation editor", () => {
         type: "validate",
         override: {
           version: CIVILIZATION_CONFIG_VERSION,
-          names: {},
+          messaging: { enabled: true },
           personalities: { rendering: "rich" },
         },
       },
@@ -1134,11 +1180,12 @@ describe("Civilization settings participation editor", () => {
         expectedEnvironmentRevision: 7,
         override: {
           version: CIVILIZATION_CONFIG_VERSION,
-          names: {},
+          messaging: { enabled: true },
           personalities: { rendering: "rich" },
         },
       },
     ]);
+    expect(state.configExportCalls).toHaveLength(1);
     expect(state.refreshCalls).toBe(1);
   });
 

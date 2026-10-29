@@ -561,3 +561,12 @@ it.effect("invalidates the runtime config cache after supported writes", () =>
     assert.equal(reset.config.personalities.rendering, "off");
   }).pipe(Effect.provide(Layer.fresh(layer))),
 );
+
+it.effect("status fails closed for an unknown or deleted project", () =>
+  Effect.gen(function* () {
+    const service = yield* ConfigService.CivilizationConfigService;
+    const error = yield* service.status(ProjectId.make("project:missing")).pipe(Effect.flip);
+    assert.isTrue(isUnavailable(error));
+    if (isUnavailable(error)) assert.equal(error.reason, "project_unavailable");
+  }).pipe(Effect.provide(Layer.fresh(layer))),
+);

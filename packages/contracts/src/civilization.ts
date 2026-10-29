@@ -2043,7 +2043,12 @@ export class CivilizationUnavailableError extends Schema.TaggedError<Civilizatio
   "CivilizationUnavailableError",
   {
     code: Schema.Literal("civilization_unavailable"),
-    reason: Schema.Literals(["storage", "corrupt_state", "unsupported_schema"]),
+    reason: Schema.Literals([
+      "storage",
+      "corrupt_state",
+      "unsupported_schema",
+      "project_unavailable",
+    ]),
     message: Schema.String,
   },
   { httpApiStatus: 503 },

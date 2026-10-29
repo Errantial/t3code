@@ -832,6 +832,11 @@ const make = Effect.gen(function* () {
       deleted += changes;
       remainingBatch -= changes;
     });
+    // Derived hourly aggregates are small and WITHOUT ROWID; clear them up front
+    // so an explicit purge never leaves acceleration rows behind.
+    yield* sql`
+      DELETE FROM civilization_context_analytics_hourly WHERE project_id = ${input.projectId}
+    `;
 
     yield* deleteRows("civilization_context_inspections");
     yield* deleteRows("civilization_context_references");

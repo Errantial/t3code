@@ -1871,3 +1871,66 @@ it.effect("expires zero-TTL mail and later cleans retained message plus expired 
     assert.equal(calls.unexpectedProviderWork, 0);
   }).pipe(Effect.provide(Layer.fresh(makeLayer(calls))));
 });
+
+it.effect("reclaims acknowledged mail after the terminal-retention window", () => {
+  const calls: FakeProviderCalls = { get: 0, unexpectedProviderWork: 0 };
+  return Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    const service = yield* MailService.CivilizationMailService;
+    const projectId = ProjectId.make("project:mail:ack-retention");
+    const sender: ActorSeed = {
+      threadId: ThreadId.make("thread:mail:ack:from"),
+      runId: RunId.make("run:mail:ack:from"),
+    };
+    const recipient: ActorSeed = {
+      threadId: ThreadId.make("thread:mail:ack:to"),
+      runId: RunId.make("run:mail:ack:to"),
+    };
+    yield* seedProject(projectId);
+    yield* enableFeature({ unreadTtlDays: 30, terminalRetentionDays: 30 });
+    yield* seedActor(projectId, sender);
+    yield* seedActor(projectId, recipient);
+    const senderCaller = yield* service.authoritativeCaller(callerInput(projectId, sender));
+    const recipientCaller = yield* service.authoritativeCaller(callerInput(projectId, recipient));
+    const sent = yield* service.send({
+      caller: senderCaller,
+      targetThreadId: recipient.threadId,
+      clientRequestId: "ack-retention:send",
+      body: "retained until acknowledgement retention elapses",
+    });
+    yield* service.receive({
+      caller: recipientCaller,
+      messageId: sent.message.messageId,
+      clientRequestId: "ack-retention:receive",
+    });
+    yield* service.acknowledge({
+      caller: recipientCaller,
+      messageId: sent.message.messageId,
+      clientRequestId: "ack-retention:ack",
+    });
+
+    const withinRetention = yield* service.cleanupProject(projectId);
+    assert.equal(withinRetention.deletedAcknowledged, 0);
+
+    yield* sql`
+      UPDATE civilization_messages
+      SET acknowledged_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-31 days')
+      WHERE project_id = ${projectId}
+    `;
+    const afterRetention = yield* service.cleanupProject(projectId);
+    assert.equal(afterRetention.deletedAcknowledged, 1);
+    assert.deepEqual(
+      (yield* sql<{ readonly count: number }>`
+        SELECT COUNT(*) AS count FROM civilization_messages WHERE project_id = ${projectId}
+      `)[0],
+      { count: 0 },
+    );
+    assert.deepEqual(
+      (yield* sql<{ readonly retained_message_count: number }>`
+        SELECT retained_message_count FROM civilization_project_state WHERE project_id = ${projectId}
+      `)[0],
+      { retained_message_count: 0 },
+    );
+    assert.equal(calls.unexpectedProviderWork, 0);
+  }).pipe(Effect.provide(Layer.fresh(makeLayer(calls))));
+});

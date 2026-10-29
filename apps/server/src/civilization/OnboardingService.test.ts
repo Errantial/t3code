@@ -2,6 +2,7 @@ import { assert, it } from "@effect/vitest";
 import {
   CIVILIZATION_CONFIG_VERSION,
   CivilizationOnboardingPreviewUnavailableError,
+  CivilizationUnavailableError,
   ProjectId,
   ProviderInstanceId,
   RunId,
@@ -236,6 +237,7 @@ const insertProject = Effect.fn("OnboardingService.test.insertProject")(function
 });
 
 const isPreviewUnavailable = Schema.is(CivilizationOnboardingPreviewUnavailableError);
+const isUnavailable = Schema.is(CivilizationUnavailableError);
 
 it.effect(
   "describes transparent presets from the committed project override without mutating revisions",
@@ -325,6 +327,20 @@ it.effect(
     }).pipe(Effect.provide(Layer.fresh(makeLayer(state))));
   },
 );
+
+it.effect("fails closed when onboarding targets an unknown or deleted project", () => {
+  const state = makeState();
+  return Effect.gen(function* () {
+    const onboarding = yield* OnboardingService.CivilizationOnboardingService;
+    const error = yield* onboarding
+      .listPresets(ProjectId.make("project:civilization:onboarding:unknown"))
+      .pipe(Effect.flip);
+    assert.isTrue(isUnavailable(error));
+    if (isUnavailable(error)) {
+      assert.equal(error.reason, "project_unavailable");
+    }
+  }).pipe(Effect.provide(Layer.fresh(makeLayer(state))));
+});
 
 it.effect(
   "keeps configuration-only preview redacted, pre-adoption safe, and identity-reservation free",

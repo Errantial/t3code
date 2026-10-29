@@ -1,6 +1,8 @@
 import { useAtomSet } from "@effect/atom-react";
 import {
   AuthSettingsWriteScope,
+  type CivilizationCensusCursor,
+  type CivilizationCitizenSummary,
   type CivilizationOnboardingContentPreviewResult,
   type CivilizationOnboardingPreviewResult,
   type CivilizationProviderCapability,
@@ -46,6 +48,8 @@ import type {
 } from "./civilizationNavigation";
 
 const FUTURE_CITIZEN = "__future_citizen__";
+const NEXT_CITIZENS = "__next_citizens__";
+const PREVIOUS_CITIZENS = "__previous_citizens__";
 const CENSUS_LIMIT = 50;
 const STAGES: ReadonlyArray<CivilizationOnboardingStage> = [
   "target",
@@ -136,6 +140,11 @@ function CivilizationOnboardingDialogInner({
   );
   const requestedStage = search.onboarding ?? "target";
   const [threadId, setThreadId] = useState<ThreadId | null>(null);
+  const [censusCursor, setCensusCursor] = useState<CivilizationCensusCursor | null>(null);
+  const [censusCursorStack, setCensusCursorStack] = useState<
+    ReadonlyArray<CivilizationCensusCursor | null>
+  >([]);
+  const [selectedCitizen, setSelectedCitizen] = useState<CivilizationCitizenSummary | null>(null);
   const [preview, setPreview] = useState<CivilizationOnboardingPreviewResult | null>(null);
   const [contentPreview, setContentPreview] =
     useState<CivilizationOnboardingContentPreviewResult | null>(null);
@@ -143,6 +152,7 @@ function CivilizationOnboardingDialogInner({
   const [message, setMessage] = useState<string | null>(null);
   const [messageRole, setMessageRole] = useState<"status" | "alert">("status");
   const applyInFlight = useRef(false);
+  const previewRequest = useRef(0);
 
   const clampedStage = clampCivilizationOnboardingStage({
     requested: requestedStage,
@@ -184,7 +194,7 @@ function CivilizationOnboardingDialogInner({
   const census = useCivilizationCensusPage(
     canRead && needsCensus ? environmentId : null,
     canRead && needsCensus ? projectId : null,
-    null,
+    censusCursor,
     CENSUS_LIMIT,
   );
 
@@ -211,7 +221,11 @@ function CivilizationOnboardingDialogInner({
     });
   const pushStage = (stage: CivilizationOnboardingStage) =>
     onNavigate(safeSearch(stage), { hash: CIVILIZATION_ONBOARDING_TARGET_ID });
-  const replaceChoice = (next: Parameters<typeof civilizationOnboardingSafeSearch>[0]) =>
+  const replaceChoice = (next: Parameters<typeof civilizationOnboardingSafeSearch>[0]) => {
+    previewRequest.current += 1;
+    setWorking(false);
+    setPreview(null);
+    setContentPreview(null);
     onNavigate(
       civilizationOnboardingSafeSearch({
         stage: clampedStage,
@@ -221,6 +235,7 @@ function CivilizationOnboardingDialogInner({
       }),
       { replace: true, hash: CIVILIZATION_ONBOARDING_TARGET_ID },
     );
+  };
   const close = () =>
     onNavigate(civilizationOnboardingSafeSearch({}), {
       replace: true,
@@ -229,6 +244,7 @@ function CivilizationOnboardingDialogInner({
 
   const runPreview = () => {
     if (working || candidate === null) return;
+    const requestId = ++previewRequest.current;
     setWorking(true);
     setMessage(null);
     setMessageRole("status");
@@ -238,11 +254,13 @@ function CivilizationOnboardingDialogInner({
       preview: buildCivilizationOnboardingPreviewRequest({ projectId, candidate, threadId }),
     })
       .then((result) => {
+        if (requestId !== previewRequest.current) return;
         setWorking(false);
         setPreview(result as CivilizationOnboardingPreviewResult);
         setContentPreview(null);
       })
       .catch((error: unknown) => {
+        if (requestId !== previewRequest.current) return;
         setWorking(false);
         setPreview(null);
         setContentPreview(null);
@@ -340,10 +358,18 @@ function CivilizationOnboardingDialogInner({
       });
   };
 
-  const liveCitizens =
-    census.data?.citizens.filter(
-      (citizen) => !citizen.observedOnly && !citizen.closed && !citizen.deleted,
-    ) ?? [];
+  const liveCitizens = (census.data?.citizens ?? []).filter(
+    (citizen) => !citizen.observedOnly && !citizen.closed && !citizen.deleted,
+  );
+  const nextCitizenCursor = census.data?.nextCursor ?? null;
+  const canGoPrevious = censusCursorStack.length > 0;
+  const previousCitizenCursor = canGoPrevious ? (censusCursorStack.at(-1) ?? null) : null;
+  const selectedCitizenOnPage =
+    selectedCitizen === null
+      ? null
+      : liveCitizens.some((citizen) => citizen.threadId === selectedCitizen.threadId)
+        ? null
+        : selectedCitizen;
   const stepNumber = STAGES.indexOf(clampedStage) + 1;
 
   return (
@@ -510,8 +536,29 @@ function CivilizationOnboardingDialogInner({
                 <Select
                   value={threadId ?? FUTURE_CITIZEN}
                   onValueChange={(value) => {
-                    setThreadId(
-                      value === FUTURE_CITIZEN || value === null ? null : ThreadId.make(value),
+                    if (value === NEXT_CITIZENS) {
+                      if (nextCitizenCursor !== null) {
+                        setCensusCursorStack((stack) => [...stack, censusCursor]);
+                        setCensusCursor(nextCitizenCursor);
+                      }
+                      return;
+                    }
+                    if (value === PREVIOUS_CITIZENS) {
+                      const stack = censusCursorStack.slice(0, -1);
+                      setCensusCursorStack(stack);
+                      setCensusCursor(previousCitizenCursor);
+                      return;
+                    }
+                    const nextThreadId =
+                      value === FUTURE_CITIZEN || value === null ? null : ThreadId.make(value);
+                    previewRequest.current += 1;
+                    setWorking(false);
+                    setThreadId(nextThreadId);
+                    setSelectedCitizen(
+                      nextThreadId === null
+                        ? null
+                        : (liveCitizens.find((citizen) => citizen.threadId === nextThreadId) ??
+                            selectedCitizen),
                     );
                     setPreview(null);
                     setContentPreview(null);
@@ -527,11 +574,24 @@ function CivilizationOnboardingDialogInner({
                     <SelectItem value={FUTURE_CITIZEN}>
                       Future citizen · configuration only
                     </SelectItem>
+                    {selectedCitizenOnPage === null ? null : (
+                      <SelectItem value={selectedCitizenOnPage.threadId}>
+                        {selectedCitizenOnPage.name} · {selectedCitizenOnPage.profileLabel}
+                      </SelectItem>
+                    )}
                     {liveCitizens.map((citizen) => (
                       <SelectItem key={citizen.threadId} value={citizen.threadId}>
                         {citizen.name} · {citizen.profileLabel}
                       </SelectItem>
                     ))}
+                    {canGoPrevious ? (
+                      <SelectItem value={PREVIOUS_CITIZENS}>Previous citizens…</SelectItem>
+                    ) : null}
+                    {nextCitizenCursor === null ? null : (
+                      <SelectItem value={NEXT_CITIZENS}>
+                        {census.isPending ? "Loading citizens…" : "Next citizens…"}
+                      </SelectItem>
+                    )}
                   </SelectPopup>
                 </Select>
               </label>
@@ -636,7 +696,7 @@ function CivilizationOnboardingDialogInner({
 export function CivilizationOnboardingDialog(props: Props) {
   return (
     <CivilizationOnboardingDialogInner
-      key={props.canWrite ? "settings-write" : "read-only"}
+      key={`${props.environmentId}:${props.projectId}:${props.canWrite ? "settings-write" : "read-only"}`}
       {...props}
     />
   );

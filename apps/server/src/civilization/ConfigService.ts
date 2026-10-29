@@ -600,6 +600,30 @@ const ensureProjectExists = Effect.fn("CivilizationConfig.ensureProjectExists")(
   }
 });
 
+/**
+ * Read paths use a feature-unavailable error rather than a config-validation
+ * error so a deleted or unknown project cannot be rendered as empty/healthy.
+ */
+export const assertOpenCivilizationProject = Effect.fn("CivilizationConfig.assertOpenProject")(
+  function* (projectId: ProjectId) {
+    const sql = yield* SqlClient.SqlClient;
+    const rows = yield* sql<{ readonly project_id: string }>`
+    SELECT project_id FROM projection_projects
+    WHERE project_id = ${projectId} AND deleted_at IS NULL
+    LIMIT 1
+  `;
+    if (rows.length === 0) {
+      return yield* Effect.fail(
+        new CivilizationUnavailableError({
+          code: "civilization_unavailable",
+          reason: "project_unavailable",
+          message: `Project ${projectId} does not exist or is deleted.`,
+        }),
+      );
+    }
+  },
+);
+
 const configurablePaths = [
   "participation.enabled",
   "participation.emergencyOff",
@@ -1183,6 +1207,7 @@ const description = {
 
 const status = Effect.fn("CivilizationConfig.status")(function* (projectId?: ProjectId) {
   const sql = yield* SqlClient.SqlClient;
+  if (projectId !== undefined) yield* assertOpenCivilizationProject(projectId);
   const effective = yield* getEffectiveCivilizationConfig(projectId);
   const counts =
     projectId === undefined

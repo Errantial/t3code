@@ -1763,6 +1763,7 @@ it.effect(
 it.effect("keeps diagnostics-off metadata and explicit previews body/history free", () =>
   Effect.gen(function* () {
     const service = yield* ContextService.CivilizationContextService;
+    const sql = yield* SqlClient.SqlClient;
     yield* setup({ packetBytes: 4096, diagnostics: "off" });
     const built = yield* service.forTurn(turnInput("codex-main"));
     assert.isNotNull(built.packet);
@@ -1776,11 +1777,24 @@ it.effect("keeps diagnostics-off metadata and explicit previews body/history fre
     assert.isNull(detail!.packetText);
     assert.equal(detail!.packetHash, built.packet!.reference.packetHash);
 
+    const referencesBefore =
+      (yield* sql<{ readonly count: number }>`
+      SELECT COUNT(*) AS count FROM civilization_context_references
+      WHERE project_id = ${projectId}
+    `)[0]?.count ?? 0;
     yield* service.forExplicitRead(
       turnInput("codex-main", {
         attemptId: RunAttemptId.make("attempt:inspection:explicit"),
         providerTurnOrdinal: 2,
       }),
+    );
+    assert.equal(
+      (yield* sql<{ readonly count: number }>`
+        SELECT COUNT(*) AS count FROM civilization_context_references
+        WHERE project_id = ${projectId}
+      `)[0]?.count ?? 0,
+      referencesBefore,
+      "explicit read-only context reads do not persist a reference",
     );
     const afterPreview = yield* service.listInspections({ projectId });
     assert.lengthOf(

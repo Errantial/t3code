@@ -266,3 +266,103 @@ describe("Civilization MCP citizen search authority", () => {
     }),
   );
 });
+
+describe("Civilization MCP project read authority", () => {
+  const environmentId = EnvironmentId.make("environment:civilization-read-scope");
+  const callerThreadId = ThreadId.make("thread:civilization-read-scope:caller");
+  const callerProjectId = ProjectId.make("project:mcp-test");
+  const foreignProjectId = ProjectId.make("project:civilization-read-scope:foreign");
+  const providerInstanceId = ProviderInstanceId.make("codex");
+
+  const threadScope: McpInvocationContext.McpInvocationScope = {
+    environmentId,
+    requestNamespace: "provider:civilization-read-scope",
+    thread: {
+      threadId: callerThreadId,
+      providerSessionId: "provider:civilization-read-scope",
+      providerInstanceId,
+    },
+    client: undefined,
+    capabilities: new Set(["orchestration"]),
+    issuedAt: 0,
+  };
+  const clientScope: McpInvocationContext.McpInvocationScope = {
+    environmentId,
+    requestNamespace: "client:civilization-read-scope",
+    thread: undefined,
+    client: { sessionId: "client-read-scope", label: "Read", access: "read-only" },
+    capabilities: new Set(["orchestration"]),
+    issuedAt: 0,
+  };
+
+  const runCensus = (
+    scope: McpInvocationContext.McpInvocationScope,
+    args: { readonly projectId?: ProjectId; readonly limit?: number },
+    inputs: Ref.Ref<ReadonlyArray<CivilizationKnowledge.CivilizationCensusPageInput>>,
+  ) => {
+    const knowledge = Layer.mock(CivilizationKnowledge.CivilizationKnowledgeService)({
+      listCensus: (input) =>
+        Ref.update(inputs, (seen) => [...seen, input]).pipe(
+          Effect.as({
+            projectId: input.projectId,
+            revision: 1,
+            citizens: [],
+            nextCursor: null,
+            partial: false,
+          }),
+        ),
+    });
+    const dependencies = Layer.mergeAll(
+      Layer.succeed(McpInvocationContext.McpInvocationContext, scope),
+      Layer.mock(ThreadManagement.ThreadManagementService)({
+        getThreadShell: (threadId) => Effect.succeed(liveThreadShell(threadId)),
+      }),
+      knowledge,
+      Layer.mock(CivilizationContext.CivilizationContextService)({}),
+      Layer.mock(CivilizationMail.CivilizationMailService)({}),
+    );
+    return CivilizationToolkit.pipe(
+      Effect.provide(
+        McpToolAccess.HandlersLayer.layer(CivilizationHandlers.layer).pipe(
+          Layer.provide(dependencies),
+        ),
+      ),
+      Effect.flatMap((toolkit) =>
+        toolkit
+          .handle("civilization_census", args)
+          .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(dependencies)),
+      ),
+    );
+  };
+
+  it.effect("rejects an explicit cross-project census from a thread credential", () =>
+    Effect.gen(function* () {
+      const inputs = yield* Ref.make<
+        ReadonlyArray<CivilizationKnowledge.CivilizationCensusPageInput>
+      >([]);
+      const result = yield* runCensus(threadScope, { projectId: foreignProjectId }, inputs);
+      expect(result.at(-1)?.result).toMatchObject({ code: "invalid_request" });
+      expect(yield* Ref.get(inputs)).toEqual([]);
+    }),
+  );
+
+  it.effect("defaults a thread credential to its own project", () =>
+    Effect.gen(function* () {
+      const inputs = yield* Ref.make<
+        ReadonlyArray<CivilizationKnowledge.CivilizationCensusPageInput>
+      >([]);
+      yield* runCensus(threadScope, { limit: 5 }, inputs);
+      expect(yield* Ref.get(inputs)).toEqual([{ projectId: callerProjectId, limit: 5 }]);
+    }),
+  );
+
+  it.effect("allows a non-thread read client to request one explicit project's census", () =>
+    Effect.gen(function* () {
+      const inputs = yield* Ref.make<
+        ReadonlyArray<CivilizationKnowledge.CivilizationCensusPageInput>
+      >([]);
+      yield* runCensus(clientScope, { projectId: foreignProjectId, limit: 20 }, inputs);
+      expect(yield* Ref.get(inputs)).toEqual([{ projectId: foreignProjectId, limit: 20 }]);
+    }),
+  );
+});

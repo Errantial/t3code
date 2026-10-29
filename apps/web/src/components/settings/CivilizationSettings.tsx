@@ -206,6 +206,40 @@ type CivilizationConfigActionResult = {
   readonly revision?: number;
 };
 
+/**
+ * Section editors only build the section they own. The server replaces the
+ * stored override as a whole, so merge the edited section into the tier's
+ * current override instead of dropping every other section.
+ */
+export function mergeCivilizationConfigSection(
+  storedJson: string | undefined,
+  sectionOverride: CivilizationConfigOverride,
+): CivilizationConfigOverride {
+  let stored: Record<string, unknown> = {};
+  if (storedJson !== undefined) {
+    try {
+      const parsed: unknown = JSON.parse(storedJson);
+      if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
+        stored = parsed as Record<string, unknown>;
+      }
+    } catch {
+      // The server still validates the merged result; an unreadable export
+      // must not block a save that only edits one section.
+    }
+  }
+  const editedSections = Object.entries(sectionOverride).filter(
+    ([key, value]) =>
+      key !== "version" &&
+      value !== undefined &&
+      (typeof value !== "object" || value === null || Object.keys(value).length > 0),
+  );
+  return {
+    ...stored,
+    ...Object.fromEntries(editedSections),
+    version: CIVILIZATION_CONFIG_VERSION,
+  } as CivilizationConfigOverride;
+}
+
 type CivilizationConfigRunner = (
   input: CivilizationConfigActionInput,
 ) => Promise<CivilizationConfigActionResult>;
@@ -316,10 +350,23 @@ function useCivilizationSectionEditor<T>(input: {
       conflictRefreshPending
     )
       return;
-    const override = input.buildOverride(draft, baseline);
+    const sectionOverride = input.buildOverride(draft, baseline);
     setSaving(true);
     setMessage(null);
     void (async () => {
+      let override: CivilizationConfigOverride;
+      try {
+        const exported = await input.runConfigAction({
+          environmentId: input.target.environmentId,
+          projectId: input.target.projectId,
+          type: "export",
+        });
+        override = mergeCivilizationConfigSection(exported.json, sectionOverride);
+      } catch (error) {
+        setSaving(false);
+        setMessage(configActionErrorMessage(error));
+        return;
+      }
       try {
         await input.runConfigAction({
           environmentId: input.target.environmentId,
@@ -470,8 +517,10 @@ const civilizationTargetKey = (target: {
 
 function CivilizationMultiTargetParticipation({
   targets,
+  onUnsavedChange,
 }: {
   readonly targets: ReadonlyArray<CivilizationTarget>;
+  readonly onUnsavedChange?: ((dirty: boolean) => void) | undefined;
 }) {
   const readable = useEnvironmentsWithScope(targets, AuthOrchestrationReadScope);
   const writable = useEnvironmentsWithScope(targets, AuthSettingsWriteScope);
@@ -487,6 +536,10 @@ function CivilizationMultiTargetParticipation({
     adoption: null,
   });
   const [dirty, setDirty] = useState(false);
+  useEffect(() => {
+    onUnsavedChange?.(dirty);
+  }, [dirty, onUnsavedChange]);
+  useEffect(() => () => onUnsavedChange?.(false), [onUnsavedChange]);
   const [capturedRevisions, setCapturedRevisions] = useState<Record<string, CapturedConfigBinding>>(
     {},
   );
@@ -602,11 +655,17 @@ function CivilizationMultiTargetParticipation({
       { readonly projectId: ProjectId | null } & CapturedConfigBinding,
       unknown
     >(fanoutTargets, async (fanoutTarget) => {
+      const exported = await runConfigAction({
+        environmentId: fanoutTarget.environmentId,
+        projectId: fanoutTarget.value.projectId,
+        type: "export",
+      });
+      const targetOverride = mergeCivilizationConfigSection(exported.json, override);
       await runConfigAction({
         environmentId: fanoutTarget.environmentId,
         projectId: fanoutTarget.value.projectId,
         type: "validate",
-        override,
+        override: targetOverride,
       });
       if (!readEnvironmentScope(fanoutTarget.environmentId, AuthSettingsWriteScope)) {
         throw new Error("settings:write permission changed before save.");
@@ -619,7 +678,7 @@ function CivilizationMultiTargetParticipation({
         ...(fanoutTarget.value.expectedEnvironmentRevision === undefined
           ? {}
           : { expectedEnvironmentRevision: fanoutTarget.value.expectedEnvironmentRevision }),
-        override,
+        override: targetOverride,
       });
     }).then((result) => {
       setSaving(false);
@@ -932,6 +991,7 @@ function CivilizationTargetOverview({
   surface,
   navigation,
   surfaceTargetId,
+  onUnsavedChange,
 }: {
   readonly target: CivilizationTarget;
   readonly allowSensitiveProjectActions: boolean;
@@ -939,6 +999,7 @@ function CivilizationTargetOverview({
   readonly surface: CivilizationTargetSurface;
   readonly navigation: CivilizationTargetSurfaceNavigation;
   readonly surfaceTargetId: string;
+  readonly onUnsavedChange?: ((dirty: boolean) => void) | undefined;
 }) {
   const canRead = useEnvironmentScope(target.environmentId, AuthOrchestrationReadScope);
   const canWrite = useEnvironmentScope(target.environmentId, AuthSettingsWriteScope);
@@ -1194,6 +1255,16 @@ function CivilizationTargetOverview({
       },
     }),
   });
+  const configurationDirty =
+    participationEditor.dirty ||
+    identityEditor.dirty ||
+    contextEditor.dirty ||
+    messagingEditor.dirty ||
+    operationsEditor.dirty;
+  useEffect(() => {
+    onUnsavedChange?.(configurationDirty);
+  }, [configurationDirty, onUnsavedChange]);
+  useEffect(() => () => onUnsavedChange?.(false), [onUnsavedChange]);
   const [resettingTier, setResettingTier] = useState(false);
   const [namePoolOpen, setNamePoolOpen] = useState(false);
   const [profilePoolOpen, setProfilePoolOpen] = useState(false);
@@ -2656,13 +2727,23 @@ export function CivilizationTaskSelector({
   activityMode,
   contextMode,
   navigate,
+  hasUnsavedChanges,
 }: {
   readonly view: CivilizationSettingsView;
   readonly activityMode: CivilizationActivityMode;
   readonly contextMode: CivilizationContextMode;
   readonly navigate: (next: CivilizationNavigationSearch, targetId: string) => void;
+  readonly hasUnsavedChanges: boolean;
 }) {
   const selectView = (nextView: CivilizationSettingsView) => {
+    if (
+      nextView !== view &&
+      hasUnsavedChanges &&
+      typeof globalThis.confirm === "function" &&
+      !globalThis.confirm("Discard unsaved Civilization changes?")
+    ) {
+      return;
+    }
     const option = CIVILIZATION_SETTINGS_VIEW_OPTIONS.find(
       (candidate) => candidate.value === nextView,
     )!;
@@ -2819,6 +2900,7 @@ function CivilizationTaskShell({
   ) => void;
 }) {
   const { targets, scope } = useSettingsScope();
+  const [hasUnsavedDraft, setHasUnsavedDraft] = useState(false);
   const searchTargetId = useSettingsSearchTargetId();
   const searchTarget = searchTargetId === null ? null : civilizationViewForTargetId(searchTargetId);
   const legacyHistoricalContext = search.contextThread !== undefined;
@@ -2907,7 +2989,10 @@ function CivilizationTaskShell({
         return (
           <>
             <CivilizationMultiTargetStatus targets={normalizedTargets} />
-            <CivilizationMultiTargetParticipation targets={normalizedTargets} />
+            <CivilizationMultiTargetParticipation
+              targets={normalizedTargets}
+              onUnsavedChange={setHasUnsavedDraft}
+            />
           </>
         );
       }
@@ -2919,6 +3004,7 @@ function CivilizationTaskShell({
           surface="overview"
           surfaceTargetId="civilization-status"
           navigation={{ search, activityMode, contextMode, navigate, update: onNavigate }}
+          onUnsavedChange={setHasUnsavedDraft}
         />
       );
     }
@@ -2982,6 +3068,7 @@ function CivilizationTaskShell({
         surface={view}
         surfaceTargetId={canonicalTargetId}
         navigation={{ search, activityMode, contextMode, navigate, update: onNavigate }}
+        onUnsavedChange={setHasUnsavedDraft}
       />
     );
   })();
@@ -2998,6 +3085,7 @@ function CivilizationTaskShell({
         activityMode={activityMode}
         contextMode={contextMode}
         navigate={navigate}
+        hasUnsavedChanges={hasUnsavedDraft}
       />
       {content}
     </>
