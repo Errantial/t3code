@@ -35,7 +35,7 @@ export interface DesktopConnectPublicConfig {
 }
 
 export class DesktopConnectPublicConfigError extends Error {
-  readonly name = "DesktopConnectPublicConfigError";
+  override readonly name = "DesktopConnectPublicConfigError";
   readonly reason: "missing" | "invalid-relay-url" | "invalid-clerk-publishable-key";
   readonly keys: ReadonlyArray<(typeof REQUIRED_DESKTOP_CONNECT_PUBLIC_CONFIG)[number]>;
 
@@ -57,9 +57,7 @@ export class DesktopConnectPublicConfigError extends Error {
 
 type Environment = Readonly<Record<string, string | undefined>>;
 
-const REPO_ROOT = NodePath.dirname(
-  NodePath.dirname(NodePath.dirname(NodeURL.fileURLToPath(import.meta.url))),
-);
+const REPO_ROOT = NodePath.resolve(NodeURL.fileURLToPath(import.meta.url), "../../..");
 
 export function loadRepoEnv({
   baseEnv = process.env,
@@ -141,7 +139,7 @@ export function loadRepoEnv({
   };
 }
 
-export function resolvePublicConfig(...sources: readonly Environment[]): T3CodePublicConfig {
+function resolvePublicConfig(...sources: readonly Environment[]): T3CodePublicConfig {
   return {
     clerkPublishableKey: firstNonEmpty(
       sources,
@@ -200,12 +198,11 @@ export function resolveDesktopConnectPublicConfig(env: Environment): DesktopConn
   const clerkPublishableKey = config.clerkPublishableKey;
   const clerkJwtTemplate = config.clerkJwtTemplate;
   const clerkCliOAuthClientId = config.clerkCliOAuthClientId;
-  const missing = [
-    ...(relayUrlValue ? [] : ["T3CODE_RELAY_URL"]),
-    ...(clerkPublishableKey ? [] : ["T3CODE_CLERK_PUBLISHABLE_KEY"]),
-    ...(clerkJwtTemplate ? [] : ["T3CODE_CLERK_JWT_TEMPLATE"]),
-    ...(clerkCliOAuthClientId ? [] : ["T3CODE_CLERK_CLI_OAUTH_CLIENT_ID"]),
-  ] satisfies Array<(typeof REQUIRED_DESKTOP_CONNECT_PUBLIC_CONFIG)[number]>;
+  const missing: Array<(typeof REQUIRED_DESKTOP_CONNECT_PUBLIC_CONFIG)[number]> = [];
+  if (!relayUrlValue) missing.push("T3CODE_RELAY_URL");
+  if (!clerkPublishableKey) missing.push("T3CODE_CLERK_PUBLISHABLE_KEY");
+  if (!clerkJwtTemplate) missing.push("T3CODE_CLERK_JWT_TEMPLATE");
+  if (!clerkCliOAuthClientId) missing.push("T3CODE_CLERK_CLI_OAUTH_CLIENT_ID");
   if (missing.length > 0) {
     throw new DesktopConnectPublicConfigError("missing", missing);
   }

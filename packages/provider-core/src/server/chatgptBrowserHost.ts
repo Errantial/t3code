@@ -364,7 +364,7 @@ const installImmutableAsset = (input: {
       directoryExists(finalDirectory),
     );
     if (finalExists) {
-      return yield* Effect.fail(hostError(`${input.operation}-immutable-version-conflict`));
+      return yield* hostError(`${input.operation}-immutable-version-conflict`);
     }
 
     yield* tryFs(`${input.operation}-preparing-versions-directory`, () =>
@@ -387,8 +387,7 @@ const installImmutableAsset = (input: {
       const requiredExists = yield* tryFs(`${input.operation}-validating-candidate`, () =>
         fileExists(required),
       );
-      if (!requiredExists)
-        return yield* Effect.fail(hostError(`${input.operation}-missing-required-file`));
+      if (!requiredExists) return yield* hostError(`${input.operation}-missing-required-file`);
       yield* tryFs(`${input.operation}-recording-install`, () =>
         NodeFs.writeFile(
           NodePath.join(stage, INSTALL_SENTINEL),
@@ -748,7 +747,7 @@ const requireInstalledRelease = (input: {
       }),
     ]);
     if (!browserValid || !providerValid) {
-      return yield* Effect.fail(hostError("resolving-installed-release"));
+      return yield* hostError("resolving-installed-release");
     }
     return resolved;
   });
@@ -869,10 +868,9 @@ export function makeChatGptBrowserHost(
     sessionOpen ? Effect.fail(hostError(operation)) : Effect.void;
 
   const platformPaths = options.platform.paths.pipe(
-    Effect.flatMap((paths) =>
-      options.release.identity.target === options.platform.target
-        ? Effect.succeed(paths)
-        : Effect.fail(hostError("matching-release-platform-target")),
+    Effect.filterOrFail(
+      () => options.release.identity.target === options.platform.target,
+      () => hostError("matching-release-platform-target"),
     ),
   );
 
@@ -888,8 +886,7 @@ export function makeChatGptBrowserHost(
       yield* requireIdle("preparing-release-while-browser-open");
       const paths = yield* platformPaths;
       const issues = yield* options.platform.checkPrerequisites;
-      if (issues.length > 0)
-        return yield* Effect.fail(hostError("checking-browser-prerequisites", issues));
+      if (issues.length > 0) return yield* hostError("checking-browser-prerequisites", issues);
 
       const candidate = descriptorFromSource(options.release);
       const pointer = yield* readPointer(paths);
@@ -911,7 +908,7 @@ export function makeChatGptBrowserHost(
           options.allowBrowserRevisionChange === undefined
             ? false
             : yield* options.allowBrowserRevisionChange({ active: pointer.active, candidate });
-        if (!allowed) return yield* Effect.fail(hostError("changing-browser-revision"));
+        if (!allowed) return yield* hostError("changing-browser-revision");
       }
 
       const installed = yield* installRelease({ paths, release: options.release });
@@ -943,7 +940,7 @@ export function makeChatGptBrowserHost(
       const pointer = yield* readPointer(paths);
       if (pointer?.previous === undefined) return false;
       if (pointer.previous.identity.browserRevision !== pointer.active.identity.browserRevision) {
-        return yield* Effect.fail(hostError("rolling-back-browser-revision"));
+        return yield* hostError("rolling-back-browser-revision");
       }
       const installed = yield* requireInstalledRelease({ paths, release: pointer.previous });
       yield* materializeStableExtension(
@@ -969,8 +966,7 @@ export function makeChatGptBrowserHost(
         yield* requireIdle("opening-browser-while-browser-open");
         const paths = yield* platformPaths;
         const issues = yield* options.platform.checkPrerequisites;
-        if (issues.length > 0)
-          return yield* Effect.fail(hostError("checking-browser-prerequisites", issues));
+        if (issues.length > 0) return yield* hostError("checking-browser-prerequisites", issues);
 
         let pointer = yield* readPointer(paths);
         if (pointer === null) {
@@ -993,7 +989,7 @@ export function makeChatGptBrowserHost(
         }
 
         if (pointer.active.identity.target !== options.platform.target) {
-          return yield* Effect.fail(hostError("matching-active-platform-target"));
+          return yield* hostError("matching-active-platform-target");
         }
         const installed = yield* requireInstalledRelease({ paths, release: pointer.active });
         yield* materializeStableExtension(

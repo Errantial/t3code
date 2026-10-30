@@ -116,7 +116,6 @@ export const ChatGptBrowserDriver: ProviderDriver<ChatGptBrowserSettings, ChatGp
         ...(displayName ? { displayName } : {}),
         ...(accentColor ? { accentColor } : {}),
         continuation: { groupKey: continuationIdentity.continuationKey },
-        requiresNewThreadForModelChange: true,
         supportsTextGeneration: false,
         enabled: effectiveConfig.enabled,
         installed: input.installed,
@@ -234,31 +233,30 @@ export const ChatGptBrowserDriver: ProviderDriver<ChatGptBrowserSettings, ChatGp
           },
         ]),
         defaultMethodId: "managed-browser",
-        authenticate: (_methodId, context) =>
-          Effect.gen(function* () {
-            yield* context.waiting("Finish signing in in the managed ChatGPT Browser window.");
-            yield* hostPort.authenticate.pipe(
-              Effect.mapError(
-                (cause) =>
-                  new ProviderSetupError({
-                    instanceId,
-                    operation: "start",
-                    detail: "Could not complete ChatGPT sign-in in the managed browser.",
-                    cause,
-                  }),
-              ),
-            );
-            yield* context.verifying;
-            const refreshed = yield* snapshot.refresh;
-            if (refreshed.auth.status !== "authenticated") {
-              return yield* new ProviderSetupError({
-                instanceId,
-                operation: "start",
-                detail:
-                  "ChatGPT sign-in finished, but T3 could not verify the managed browser session.",
-              });
-            }
-          }),
+        authenticate: Effect.fn("authenticate")(function* (_methodId, context) {
+          yield* context.waiting("Finish signing in in the managed ChatGPT Browser window.");
+          yield* hostPort.authenticate.pipe(
+            Effect.mapError(
+              (cause) =>
+                new ProviderSetupError({
+                  instanceId,
+                  operation: "start",
+                  detail: "Could not complete ChatGPT sign-in in the managed browser.",
+                  cause,
+                }),
+            ),
+          );
+          yield* context.verifying;
+          const refreshed = yield* snapshot.refresh;
+          if (refreshed.auth.status !== "authenticated") {
+            return yield* new ProviderSetupError({
+              instanceId,
+              operation: "start",
+              detail:
+                "ChatGPT sign-in finished, but T3 could not verify the managed browser session.",
+            });
+          }
+        }),
         logout: Effect.fail(
           new ProviderSetupError({
             instanceId,

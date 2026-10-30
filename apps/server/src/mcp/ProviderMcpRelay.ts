@@ -238,7 +238,7 @@ const routeHandler = Effect.gen(function* () {
     }),
     // A committed MCP mutation may have succeeded before transport failure. The relay reports the
     // ambiguity to its caller and never retries it on the caller's behalf.
-    Effect.catch(() => Effect.succeed(HttpServerResponse.text("Bad Gateway", { status: 502 }))),
+    Effect.orElseSucceed(() => HttpServerResponse.text("Bad Gateway", { status: 502 })),
   );
 });
 

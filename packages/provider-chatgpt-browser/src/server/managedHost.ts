@@ -178,97 +178,95 @@ export const makeNativeManagedChatGptBrowserHost = Effect.fn(
 
   const platform: ChatGptBrowserPlatformPort = {
     ...basePlatform,
-    launchBrowser: (input) =>
-      Effect.gen(function* () {
-        const expectedExtensionBuildId = chatGptBrowserManagedExtensionBuildId(
-          options.release.identity,
-        );
-        const isBuildMismatch = (cause: unknown) =>
-          cause instanceof Error && cause.message === "provider_v1_extension_build_mismatch";
+    launchBrowser: Effect.fn("launchBrowser")(function* (input) {
+      const expectedExtensionBuildId = chatGptBrowserManagedExtensionBuildId(
+        options.release.identity,
+      );
+      const isBuildMismatch = (cause: unknown) =>
+        cause instanceof Error && cause.message === "provider_v1_extension_build_mismatch";
 
-        // Start the loopback authority before Chromium. MV3 workers may be suspended almost
-        // immediately after startup; if the browser starts first, its initial provider-v1 probe
-        // can miss the listener and the next guaranteed wake is the 30-second alarm. Prebinding
-        // makes cold bootstrap deterministic and also removes that race after browser restart.
-        //
-        // Chromium keeps an unpacked MV3 worker cached even when the stable extension files are
-        // updated in place. The stale worker reports its embedded build, receives a mismatch, and
-        // calls runtime.reload(); command-line --load-extension is then absent until Chromium is
-        // restarted. Relaunch exactly once from the same durable profile/current extension path.
-        // Launch one ordinary ChatGPT page. Its managed content script is loaded only after
-        // Chromium has registered the unpacked extension and therefore provides a deterministic
-        // MV3-worker wake without racing a chrome-extension:// URL against extension startup.
-        const wakeUrl = "https://chatgpt.com/";
-        for (let attempt = 0; attempt < 2; attempt += 1) {
-          let binding!: BrokerBinding;
-          binding = {
-            broker: yield* Effect.tryPromise({
-              try: () =>
-                startNativeChatGptBrowserBroker({
-                  secrets,
-                  ...(options.ports ? { ports: options.ports } : {}),
-                  readyTimeoutMs: 45_000,
-                  expectedExtensionBuildId,
-                  persistObservation: (observation) => {
-                    if (!binding.acceptObservation) {
-                      return Promise.reject(new Error("provider_observation_sink_not_ready"));
-                    }
-                    return binding.acceptObservation(observation);
-                  },
-                }),
-              catch: (cause) => hostError("starting-native-browser-broker", cause),
-            }),
-          };
-          const process = yield* basePlatform
-            .launchBrowser({
-              ...input,
-              args: [...input.args, wakeUrl],
-            })
-            .pipe(
-              Effect.onError(() =>
-                Effect.tryPromise({
-                  try: () => binding.broker.close(),
-                  catch: () => undefined,
-                }).pipe(Effect.ignore),
-              ),
-            );
-          const ready = yield* Effect.result(
-            Effect.tryPromise({
-              try: () => binding.broker.waitForSession(),
-              catch: (cause) => hostError("waiting-for-native-browser-provider", cause),
-            }),
-          );
-          if (Result.isSuccess(ready)) {
-            verifyBrowserIdentity(options.release, ready.success.identity);
-            brokers.set(process.opaqueId, binding);
-            activeBroker = binding.broker;
-            return process;
-          }
-
-          yield* Effect.all([
-            Effect.tryPromise({ try: () => binding.broker.close(), catch: () => undefined }).pipe(
-              Effect.ignore,
+      // Start the loopback authority before Chromium. MV3 workers may be suspended almost
+      // immediately after startup; if the browser starts first, its initial provider-v1 probe
+      // can miss the listener and the next guaranteed wake is the 30-second alarm. Prebinding
+      // makes cold bootstrap deterministic and also removes that race after browser restart.
+      //
+      // Chromium keeps an unpacked MV3 worker cached even when the stable extension files are
+      // updated in place. The stale worker reports its embedded build, receives a mismatch, and
+      // calls runtime.reload(); command-line --load-extension is then absent until Chromium is
+      // restarted. Relaunch exactly once from the same durable profile/current extension path.
+      // Launch one ordinary ChatGPT page. Its managed content script is loaded only after
+      // Chromium has registered the unpacked extension and therefore provides a deterministic
+      // MV3-worker wake without racing a chrome-extension:// URL against extension startup.
+      const wakeUrl = "https://chatgpt.com/";
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        let binding!: BrokerBinding;
+        binding = {
+          broker: yield* Effect.tryPromise({
+            try: () =>
+              startNativeChatGptBrowserBroker({
+                secrets,
+                ...(options.ports ? { ports: options.ports } : {}),
+                readyTimeoutMs: 45_000,
+                expectedExtensionBuildId,
+                persistObservation: (observation) => {
+                  if (!binding.acceptObservation) {
+                    return Promise.reject(new Error("provider_observation_sink_not_ready"));
+                  }
+                  return binding.acceptObservation(observation);
+                },
+              }),
+            catch: (cause) => hostError("starting-native-browser-broker", cause),
+          }),
+        };
+        const process = yield* basePlatform
+          .launchBrowser({
+            ...input,
+            args: [...input.args, wakeUrl],
+          })
+          .pipe(
+            Effect.onError(() =>
+              Effect.tryPromise({
+                try: () => binding.broker.close(),
+                catch: () => undefined,
+              }).pipe(Effect.ignore),
             ),
-            basePlatform.stopBrowser(process).pipe(Effect.ignore),
-          ]);
-          if (attempt === 0 && isBuildMismatch(ready.failure.cause)) continue;
-          return yield* ready.failure;
+          );
+        const ready = yield* Effect.result(
+          Effect.tryPromise({
+            try: () => binding.broker.waitForSession(),
+            catch: (cause) => hostError("waiting-for-native-browser-provider", cause),
+          }),
+        );
+        if (Result.isSuccess(ready)) {
+          verifyBrowserIdentity(options.release, ready.success.identity);
+          brokers.set(process.opaqueId, binding);
+          activeBroker = binding.broker;
+          return process;
         }
-        return yield* Effect.fail(hostError("waiting-for-native-browser-provider"));
-      }),
-    stopBrowser: (handle) =>
-      Effect.gen(function* () {
-        const binding = brokers.get(handle.opaqueId);
-        if (binding) {
-          if (activeBroker === binding.broker) activeBroker = null;
-          yield* Effect.tryPromise({
-            try: () => binding.broker.close(),
-            catch: (cause) => hostError("closing-native-browser-broker", cause),
-          }).pipe(Effect.ignore);
-          brokers.delete(handle.opaqueId);
-        }
-        yield* basePlatform.stopBrowser(handle);
-      }),
+
+        yield* Effect.all([
+          Effect.tryPromise({ try: () => binding.broker.close(), catch: () => undefined }).pipe(
+            Effect.ignore,
+          ),
+          basePlatform.stopBrowser(process).pipe(Effect.ignore),
+        ]);
+        if (attempt === 0 && isBuildMismatch(ready.failure.cause)) continue;
+        return yield* ready.failure;
+      }
+      return yield* hostError("waiting-for-native-browser-provider");
+    }),
+    stopBrowser: Effect.fn("stopBrowser")(function* (handle) {
+      const binding = brokers.get(handle.opaqueId);
+      if (binding) {
+        if (activeBroker === binding.broker) activeBroker = null;
+        yield* Effect.tryPromise({
+          try: () => binding.broker.close(),
+          catch: (cause) => hostError("closing-native-browser-broker", cause),
+        }).pipe(Effect.ignore);
+        brokers.delete(handle.opaqueId);
+      }
+      yield* basePlatform.stopBrowser(handle);
+    }),
   };
 
   const validateCandidate = (input: { readonly process: { readonly opaqueId: string } }) =>
@@ -356,18 +354,17 @@ export const makeNativeManagedChatGptBrowserHost = Effect.fn(
   const reusableAuthentication = makeReusableChatGptBrowserAuthentication({
     open: managed.open,
     openInteractive: managed.openWithBrowserArgs(interactiveArgs, { visible: true }),
-    authenticateSession: (session) =>
-      Effect.gen(function* () {
-        const broker = activeBroker;
-        if (!broker) return yield* hostError("finding-native-browser-broker");
-        if (broker.authenticationStatus() !== "authenticated") {
-          yield* Effect.tryPromise({
-            try: (signal) => broker.waitForAuthentication(signal),
-            catch: (cause) => hostError("waiting-for-chatgpt-sign-in", cause),
-          });
-        }
-        return yield* statusForSession(session);
-      }),
+    authenticateSession: Effect.fn("authenticateSession")(function* (session) {
+      const broker = activeBroker;
+      if (!broker) return yield* hostError("finding-native-browser-broker");
+      if (broker.authenticationStatus() !== "authenticated") {
+        yield* Effect.tryPromise({
+          try: (signal) => broker.waitForAuthentication(signal),
+          catch: (cause) => hostError("waiting-for-chatgpt-sign-in", cause),
+        });
+      }
+      return yield* statusForSession(session);
+    }),
   });
 
   return {

@@ -86,16 +86,14 @@ export const layerMemory = Layer.effect(
         };
         return [record, new Map(records).set(input.attemptId, record)] as const;
       }).pipe(
-        Effect.flatMap((record) =>
-          samePreparedChatGptBrowserOperationIdentity(record, input)
-            ? Effect.succeed(record)
-            : Effect.fail(
-                new ChatGptBrowserOperationStoreError({
-                  operation: "prepare",
-                  attemptId: input.attemptId,
-                  cause: "ChatGPT Browser operation identity conflict",
-                }),
-              ),
+        Effect.filterOrFail(
+          (record) => samePreparedChatGptBrowserOperationIdentity(record, input),
+          () =>
+            new ChatGptBrowserOperationStoreError({
+              operation: "prepare",
+              attemptId: input.attemptId,
+              cause: "ChatGPT Browser operation identity conflict",
+            }),
         ),
       );
     const advanceHighWater: ChatGptBrowserOperationStoreShape["advanceHighWater"] = (input) =>

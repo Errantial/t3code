@@ -111,21 +111,20 @@ export function makeFakeChatGptBrowserProviderV1Transport(
     calls,
     transport: {
       identity: Effect.succeed(identity),
-      send: (request) =>
-        Effect.gen(function* () {
-          calls.callOrder.push("send");
-          calls.sentOperationIds.push(request.providerOperationId);
-          operationId = request.providerOperationId;
-          if (script.sendError !== undefined) return yield* Effect.fail(script.sendError);
-          return {
-            type: "operation.send_receipt" as const,
-            providerOperationId: request.providerOperationId,
-            providerSessionId: request.providerSessionId,
-            state: "running" as const,
-            nativeIdentity: {},
-            highWater,
-          };
-        }),
+      send: Effect.fn("send")(function* (request) {
+        calls.callOrder.push("send");
+        calls.sentOperationIds.push(request.providerOperationId);
+        operationId = request.providerOperationId;
+        if (script.sendError !== undefined) return yield* Effect.fail(script.sendError);
+        return {
+          type: "operation.send_receipt" as const,
+          providerOperationId: request.providerOperationId,
+          providerSessionId: request.providerSessionId,
+          state: "running" as const,
+          nativeIdentity: {},
+          highWater,
+        };
+      }),
       queryOperation: (request) =>
         Effect.sync(() => {
           calls.queriedOperationIds.push(request.providerOperationId);
@@ -140,18 +139,17 @@ export function makeFakeChatGptBrowserProviderV1Transport(
           }
           return snapshot();
         }),
-      replay: (request) =>
-        Effect.gen(function* () {
-          calls.replayAfter.push(request.after);
-          if (script.replayError !== undefined) return yield* Effect.fail(script.replayError);
-          return {
-            providerOperationId: request.providerOperationId,
-            events: script.replayIncludesStale
-              ? script.events
-              : script.events.filter((event) => event.sequence > request.after),
-            highWater,
-          };
-        }),
+      replay: Effect.fn("replay")(function* (request) {
+        calls.replayAfter.push(request.after);
+        if (script.replayError !== undefined) return yield* Effect.fail(script.replayError);
+        return {
+          providerOperationId: request.providerOperationId,
+          events: script.replayIncludesStale
+            ? script.events
+            : script.events.filter((event) => event.sequence > request.after),
+          highWater,
+        };
+      }),
       cancel: (request) =>
         Effect.sync(() => {
           calls.cancelledOperationIds.push(request.providerOperationId);

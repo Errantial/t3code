@@ -655,85 +655,78 @@ function makePlatform(
       target === "linux-x64"
         ? tryPlatform("checking-linux-browser-prerequisites", () => linuxPrerequisites(runtime))
         : Effect.succeed([]),
-    launchBrowser: (input) =>
-      Effect.gen(function* () {
-        const args = yield* Effect.try({
-          try: () => managedBrowserArgs(input),
-          catch: (cause) => hostError("validating-managed-browser-arguments", cause),
-        });
-        const spawned = yield* tryPlatform("launching-managed-browser", () =>
-          runtime.spawnBrowser({
-            executablePath: input.executablePath,
-            args,
-            detached: target === "linux-x64",
-            visible: input.visible === true,
-            environment,
-          }),
-        );
-        if (!Number.isSafeInteger(spawned.pid) || spawned.pid <= 1) {
-          return yield* Effect.fail(hostError("validating-managed-browser-pid"));
-        }
-        const opaqueId = randomUUID();
-        processes.set(opaqueId, spawned);
-        return { opaqueId } satisfies ChatGptBrowserProcessHandle;
-      }),
-    stopBrowser: (handle) =>
-      Effect.gen(function* () {
-        const browserProcess = processes.get(handle.opaqueId);
-        if (browserProcess === undefined) {
-          return yield* Effect.fail(hostError("stopping-unknown-managed-browser"));
-        }
-        yield* tryPlatform("stopping-managed-browser", () =>
-          target === "windows-x64"
-            ? stopWindowsBrowserTree(browserProcess, environment, runtime)
-            : stopLinuxBrowserTree(browserProcess, runtime),
-        );
-        processes.delete(handle.opaqueId);
-      }),
+    launchBrowser: Effect.fn("launchBrowser")(function* (input) {
+      const args = yield* Effect.try({
+        try: () => managedBrowserArgs(input),
+        catch: (cause) => hostError("validating-managed-browser-arguments", cause),
+      });
+      const spawned = yield* tryPlatform("launching-managed-browser", () =>
+        runtime.spawnBrowser({
+          executablePath: input.executablePath,
+          args,
+          detached: target === "linux-x64",
+          visible: input.visible === true,
+          environment,
+        }),
+      );
+      if (!Number.isSafeInteger(spawned.pid) || spawned.pid <= 1) {
+        return yield* hostError("validating-managed-browser-pid");
+      }
+      const opaqueId = randomUUID();
+      processes.set(opaqueId, spawned);
+      return { opaqueId } satisfies ChatGptBrowserProcessHandle;
+    }),
+    stopBrowser: Effect.fn("stopBrowser")(function* (handle) {
+      const browserProcess = processes.get(handle.opaqueId);
+      if (browserProcess === undefined) {
+        return yield* hostError("stopping-unknown-managed-browser");
+      }
+      yield* tryPlatform("stopping-managed-browser", () =>
+        target === "windows-x64"
+          ? stopWindowsBrowserTree(browserProcess, environment, runtime)
+          : stopLinuxBrowserTree(browserProcess, runtime),
+      );
+      processes.delete(handle.opaqueId);
+    }),
     replaceFileAtomically: (input) =>
       tryPlatform("replacing-managed-browser-file", () =>
         replaceFileAtomically({ target, ...input, runtime }),
       ),
-    readSecret: (key) =>
-      Effect.gen(function* () {
-        const secretPath = yield* resolveSecret(key);
-        yield* tryPlatform("securing-browser-secret-directory", ensureSecretDirectory);
-        const exists = yield* tryPlatform("checking-browser-secret", async () => {
-          try {
-            return (await NodeFs.stat(secretPath)).isFile();
-          } catch (cause) {
-            if ((cause as NodeJS.ErrnoException).code === "ENOENT") return false;
-            throw cause;
-          }
-        });
-        if (!exists) return null;
-        yield* tryPlatform("securing-browser-secret-file", () => secureSecretFile(secretPath));
-        return yield* tryPlatform("reading-browser-secret", async () =>
-          Uint8Array.from(await NodeFs.readFile(secretPath)),
-        );
-      }),
-    writeSecret: ({ key, value }) =>
-      Effect.gen(function* () {
-        const secretPath = yield* resolveSecret(key);
-        yield* tryPlatform("securing-browser-secret-directory", ensureSecretDirectory);
-        yield* tryPlatform("writing-browser-secret", () =>
-          replaceFileAtomically({ target, path: secretPath, contents: value, runtime }),
-        );
-        securedSecretFiles.delete(secretPath);
-        yield* tryPlatform("securing-browser-secret-file", () =>
-          secureSecretFile(secretPath, true),
-        );
-      }),
-    deleteSecret: (key) =>
-      Effect.gen(function* () {
-        const secretPath = yield* resolveSecret(key);
-        yield* tryPlatform("securing-browser-secret-directory", ensureSecretDirectory);
-        yield* tryPlatform("deleting-browser-secret", async () => {
-          await NodeFs.rm(secretPath, { force: true });
-          if (target === "linux-x64") await syncDirectory(paths.secretsDirectory);
-        });
-        securedSecretFiles.delete(secretPath);
-      }),
+    readSecret: Effect.fn("readSecret")(function* (key) {
+      const secretPath = yield* resolveSecret(key);
+      yield* tryPlatform("securing-browser-secret-directory", ensureSecretDirectory);
+      const exists = yield* tryPlatform("checking-browser-secret", async () => {
+        try {
+          return (await NodeFs.stat(secretPath)).isFile();
+        } catch (cause) {
+          if ((cause as NodeJS.ErrnoException).code === "ENOENT") return false;
+          throw cause;
+        }
+      });
+      if (!exists) return null;
+      yield* tryPlatform("securing-browser-secret-file", () => secureSecretFile(secretPath));
+      return yield* tryPlatform("reading-browser-secret", async () =>
+        Uint8Array.from(await NodeFs.readFile(secretPath)),
+      );
+    }),
+    writeSecret: Effect.fn("writeSecret")(function* ({ key, value }) {
+      const secretPath = yield* resolveSecret(key);
+      yield* tryPlatform("securing-browser-secret-directory", ensureSecretDirectory);
+      yield* tryPlatform("writing-browser-secret", () =>
+        replaceFileAtomically({ target, path: secretPath, contents: value, runtime }),
+      );
+      securedSecretFiles.delete(secretPath);
+      yield* tryPlatform("securing-browser-secret-file", () => secureSecretFile(secretPath, true));
+    }),
+    deleteSecret: Effect.fn("deleteSecret")(function* (key) {
+      const secretPath = yield* resolveSecret(key);
+      yield* tryPlatform("securing-browser-secret-directory", ensureSecretDirectory);
+      yield* tryPlatform("deleting-browser-secret", async () => {
+        await NodeFs.rm(secretPath, { force: true });
+        if (target === "linux-x64") await syncDirectory(paths.secretsDirectory);
+      });
+      securedSecretFiles.delete(secretPath);
+    }),
   };
 }
 

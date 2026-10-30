@@ -267,22 +267,23 @@ export const makeChatGptBrowserAdapterV2 = Effect.fn("makeChatGptBrowserAdapterV
   return ProviderAdapter.ProviderAdapterV2.of({
     instanceId: options.instanceId,
     driver: CHATGPT_BROWSER_DRIVER_KIND,
-    getCapabilities: () => Effect.succeed(ChatGptBrowserProviderCapabilitiesV2),
-    planSelectionTransition: () => Effect.succeed(turnScopedSelectionTransition()),
+    getCapabilities: Effect.fn("ProviderAdapter.ProviderAdapterV2.getCapabilities")(() =>
+      Effect.succeed(ChatGptBrowserProviderCapabilitiesV2),
+    ),
+    planSelectionTransition: Effect.fn("ProviderAdapter.ProviderAdapterV2.planSelectionTransition")(
+      () => Effect.succeed(turnScopedSelectionTransition()),
+    ),
     openSession: Effect.fn("ChatGptBrowserAdapterV2.openSession")(function* (input) {
       if (input.runtimePolicy.interactionMode === "plan") {
         return yield* protocolError(
           "ChatGPT Browser does not expose dedicated Plan mode in provider-v1",
         );
       }
-      try {
-        resolveChatGptBrowserSelection(input.modelSelection);
-      } catch (cause) {
-        return yield* protocolError(
-          "ChatGPT Browser model or reasoning selection is unsupported",
-          cause,
-        );
-      }
+      yield* Effect.try({
+        try: () => resolveChatGptBrowserSelection(input.modelSelection),
+        catch: (cause) =>
+          protocolError("ChatGPT Browser model or reasoning selection is unsupported", cause),
+      }).pipe(Effect.asVoid);
 
       const scope = yield* Effect.scope;
       const hostSession = yield* options.host.open.pipe(
@@ -1325,7 +1326,7 @@ export const makeChatGptBrowserAdapterV2 = Effect.fn("makeChatGptBrowserAdapterV
             s8FeatureMessage(turn.operationId, { kind: "approval.read" }),
           ).pipe(
             Effect.map((value) => value as ChatGptBrowserS8ApprovalSnapshot),
-            Effect.catch(() => Effect.succeed(undefined)),
+            Effect.orElseSucceed(() => undefined),
           );
           if (snapshot) yield* publishApproval(turn, snapshot);
           yield* Effect.sleep("200 millis");
@@ -1339,15 +1340,11 @@ export const makeChatGptBrowserAdapterV2 = Effect.fn("makeChatGptBrowserAdapterV
         if (active !== undefined) {
           return yield* protocolError("ChatGPT Browser already has an active operation");
         }
-        let selection;
-        try {
-          selection = resolveChatGptBrowserSelection(args.modelSelection);
-        } catch (cause) {
-          return yield* protocolError(
-            "ChatGPT Browser model or reasoning selection is unsupported",
-            cause,
-          );
-        }
+        const selection = yield* Effect.try({
+          try: () => resolveChatGptBrowserSelection(args.modelSelection),
+          catch: (cause) =>
+            protocolError("ChatGPT Browser model or reasoning selection is unsupported", cause),
+        });
 
         const operationId = chatGptBrowserProviderOperationIdForAttempt(args.attemptId);
         const existingRecovery = yield* operationStore.get(args.attemptId);
@@ -1437,7 +1434,7 @@ export const makeChatGptBrowserAdapterV2 = Effect.fn("makeChatGptBrowserAdapterV
                       type: "operation.query",
                       providerOperationId: operationId,
                     })
-                    .pipe(Effect.catch(() => Effect.succeed(undefined)));
+                    .pipe(Effect.orElseSucceed(() => undefined));
                   if (
                     owned === undefined ||
                     owned.state === "unknown" ||
