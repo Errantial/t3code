@@ -16,7 +16,6 @@ import {
   ChatGptBrowserProviderV1Error,
   ChatGptBrowserProviderV1EventSequence,
   chatGptBrowserProviderOperationIdForAttempt,
-  type ChatGptBrowserHostPort,
   type ChatGptBrowserProviderOperationId,
   type ChatGptBrowserProviderV1CoreEvent,
   type ChatGptBrowserProviderV1TerminalStatus,
@@ -38,6 +37,7 @@ import * as Metric from "effect/Metric";
 import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
+import type { ChatGptBrowserHostService } from "./host.ts";
 import * as Stream from "effect/Stream";
 
 import {
@@ -166,7 +166,7 @@ export const ChatGptBrowserProviderCapabilitiesV2 = {
 export interface ChatGptBrowserAdapterV2Options {
   readonly instanceId: ProviderAdapter.ProviderAdapterV2["Service"]["instanceId"];
   readonly defaultCwd: string;
-  readonly host: ChatGptBrowserHostPort;
+  readonly host: ChatGptBrowserHostService;
   readonly resolveAttachmentPath?: (
     attachment: ProviderAdapter.ProviderAdapterV2TurnMessage["attachments"][number],
   ) => string | null;
@@ -1673,6 +1673,22 @@ export const makeChatGptBrowserAdapterV2 = Effect.fn("makeChatGptBrowserAdapterV
             );
           },
         ),
+        // The user asked to see or reload this thread's own tab. Resolution stays inside the
+        // provider: the tab belongs to the conversation the session's live operation owns.
+        controlBrowserTab: Effect.fn("ChatGptBrowserAdapterV2.controlBrowserTab")(function* (args) {
+          return yield* options.host
+            .controlTab({ providerSessionId: input.providerSessionId, action: args.action })
+            .pipe(
+              Effect.mapError(
+                (cause) =>
+                  new ProviderAdapter.ProviderAdapterProtocolError({
+                    driver: CHATGPT_BROWSER_DRIVER_KIND,
+                    detail: "The ChatGPT Browser tab could not be controlled",
+                    cause,
+                  }),
+              ),
+            );
+        }),
         readThreadSnapshot: (args) =>
           Effect.fail(
             new ProviderAdapter.ProviderAdapterReadThreadSnapshotError({

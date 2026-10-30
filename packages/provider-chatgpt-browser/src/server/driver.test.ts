@@ -2,7 +2,6 @@ import { describe, expect, it } from "@effect/vitest";
 import { ProviderInstanceId } from "@t3tools/contracts";
 import {
   CHATGPT_BROWSER_PROVIDER_OPERATION_CONCURRENCY,
-  type ChatGptBrowserHostPort,
 } from "@t3tools/provider-core/server/chatgptBrowserProviderV1";
 import { ChatGptBrowserHostError } from "@t3tools/provider-core/server/chatgptBrowserProviderV1";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
@@ -71,6 +70,7 @@ const layerForStatus = (
       status,
       authenticate,
       open: Effect.die("provider status must not open the durable browser session"),
+      controlTab: () => Effect.die("provider status must not control a browser tab"),
     }),
   );
 

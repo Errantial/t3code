@@ -14,7 +14,6 @@ import {
 } from "@t3tools/provider-core/server/chatgptBrowserPlatform";
 import {
   ChatGptBrowserHostError,
-  type ChatGptBrowserHostPort,
   type ChatGptBrowserHostSession,
   type ChatGptBrowserPlatformPort,
 } from "@t3tools/provider-core/server/chatgptBrowserProviderV1";
@@ -111,6 +110,7 @@ export function shareChatGptBrowserHost(
     readiness: lock.withPermit(host.readiness),
     status: lock.withPermit(host.status),
     authenticate: lock.withPermit(host.authenticate),
+    controlTab: (input) => host.controlTab(input),
     open: lock.withPermit(
       Effect.gen(function* () {
         if (current === null) current = { session: yield* host.open, refs: 0 };
@@ -374,6 +374,14 @@ export const makeNativeManagedChatGptBrowserHost = Effect.fn(
     authenticate: reusableAuthentication.authenticate,
     open: reusableAuthentication.open,
     shutdown: reusableAuthentication.shutdown,
+    controlTab: (input) => {
+      const broker = activeBroker;
+      if (!broker) return Effect.fail(hostError("controlling-tab"));
+      return Effect.tryPromise({
+        try: () => broker.controlTab(input),
+        catch: (cause) => hostError("controlling-tab", cause),
+      });
+    },
   } satisfies ChatGptBrowserManagedHost &
     ChatGptBrowserHostService & { readonly shutdown: Effect.Effect<void> };
 });

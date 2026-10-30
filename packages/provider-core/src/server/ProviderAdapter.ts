@@ -619,6 +619,13 @@ export interface ProviderAdapterV2SessionRuntime {
   readonly respondToRuntimeRequest: (
     input: ProviderAdapterV2RuntimeRequestResponseInput,
   ) => Effect.Effect<void, ProviderAdapterV2Error>;
+  /**
+   * Brings the provider-owned browser tab for this session to the foreground, or force-reloads
+   * it. Absent means the provider has no browser tab the user can act on.
+   */
+  readonly controlBrowserTab?: (input: {
+    readonly action: "reveal" | "reload";
+  }) => Effect.Effect<{ readonly conversationId: string }, ProviderAdapterV2Error>;
   readonly readThreadSnapshot: (
     input: ProviderAdapterV2ReadThreadSnapshotInput,
   ) => Effect.Effect<ProviderAdapterV2ThreadSnapshot, ProviderAdapterV2Error>;

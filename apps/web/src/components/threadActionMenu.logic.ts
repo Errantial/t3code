@@ -19,6 +19,8 @@ export type ThreadActionMenuId =
   | "rename"
   | "regenerate-title"
   | "mark-unread"
+  | "show-chatgpt-tab"
+  | "reload-chatgpt-tab"
   | "share-guest"
   | "copy"
   | "copy-path"
@@ -93,6 +95,8 @@ export interface ThreadActionMenuState {
   readonly canShareWithGuest?: boolean;
   /** A No project thread with its own folder, on a server that can promote it. */
   readonly canTurnIntoProject?: boolean;
+  /** The thread's provider owns a ChatGPT browser tab the user can show or reload. */
+  readonly canControlChatGptTab?: boolean;
 }
 
 /** Local navigation, read markers, and copying remain available to read-only clients. */
@@ -172,6 +176,21 @@ export function buildThreadActionMenuItems(
         ]
       : []),
     { id: "mark-unread", label: "Mark unread", icon: "mail-open" },
+    ...(state.canControlChatGptTab
+      ? [
+          {
+            id: "show-chatgpt-tab" as const,
+            label: "Show ChatGPT tab",
+            icon: "external-link",
+            separatorBefore: true,
+          },
+          {
+            id: "reload-chatgpt-tab" as const,
+            label: "Reload ChatGPT tab",
+            icon: "refresh-cw",
+          },
+        ]
+      : []),
     ...(state.canShareWithGuest
       ? [{ id: "share-guest" as const, label: "Share with guest", icon: "user-plus" }]
       : []),

@@ -48,6 +48,10 @@ export const layer = Layer.effect(
       readiness: managed.pipe(Effect.flatMap((host) => host.readiness)),
       status: managed.pipe(Effect.flatMap((host) => host.status)),
       authenticate: managed.pipe(Effect.flatMap((host) => host.authenticate)),
+      controlTab: Effect.fn("ChatGptBrowserHost.controlTab")(function* (input) {
+        const host = yield* managed;
+        return yield* host.controlTab(input);
+      }),
       open: managed.pipe(Effect.flatMap((host) => host.open)),
     });
   }),

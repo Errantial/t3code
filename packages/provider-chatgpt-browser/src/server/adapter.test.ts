@@ -13,7 +13,6 @@ import {
   ChatGptBrowserProviderV1EventSequence,
   ChatGptBrowserHostError,
   chatGptBrowserProviderOperationIdForAttempt,
-  type ChatGptBrowserHostPort,
   type ChatGptBrowserProviderV1CoreEvent,
   type ChatGptBrowserProviderV1Error,
 } from "@t3tools/provider-core/server/chatgptBrowserProviderV1";
@@ -27,7 +26,7 @@ import * as Logger from "effect/Logger";
 import * as Stream from "effect/Stream";
 
 import { makeFakeChatGptBrowserProviderV1Transport } from "../testing.ts";
-import { makeChatGptBrowserAdapterV2 } from "./adapter.ts";
+import { makeChatGptBrowserAdapterV2, type ChatGptBrowserAdapterV2Options } from "./adapter.ts";
 import {
   ChatGptBrowserOperationStore,
   checkpointChatGptBrowserProviderEvent,
@@ -41,24 +40,35 @@ const threadId = ThreadId.make("thread-chatgpt-browser-test");
 
 const host = (
   transport: ReturnType<typeof makeFakeChatGptBrowserProviderV1Transport>["transport"],
-): ChatGptBrowserHostPort => ({
-  readiness: Effect.succeed({
-    target: "windows-x64",
+): ChatGptBrowserAdapterV2Options["host"] => {
+  const identity = {
+    target: "windows-x64" as const,
     browserRevision: "browser-test",
     providerReleaseVersion: "provider-test",
     extensionVersion: "extension-test",
-  }),
-  open: Effect.succeed({
-    identity: {
-      target: "linux-x64",
-      browserRevision: "test-browser",
-      providerReleaseVersion: "test-provider",
-      extensionVersion: "test-extension",
-    },
-    transport,
-    close: Effect.void,
-  }),
-});
+  };
+  return {
+    readiness: Effect.succeed(identity),
+    status: Effect.succeed({ identity, authentication: "authenticated", availability: "ready" }),
+    authenticate: Effect.succeed({
+      identity,
+      authentication: "authenticated",
+      availability: "ready",
+    }),
+    controlTab: ({ providerSessionId: sessionId }) =>
+      Effect.succeed({ conversationId: `conversation-${String(sessionId)}` }),
+    open: Effect.succeed({
+      identity: {
+        target: "linux-x64",
+        browserRevision: "test-browser",
+        providerReleaseVersion: "test-provider",
+        extensionVersion: "test-extension",
+      },
+      transport,
+      close: Effect.void,
+    }),
+  };
+};
 
 const seq = ChatGptBrowserProviderV1EventSequence.make;
 
@@ -128,7 +138,7 @@ function memoryOperationStore() {
 }
 
 function openRuntime(input: {
-  readonly host: ChatGptBrowserHostPort;
+  readonly host: ChatGptBrowserAdapterV2Options["host"];
   readonly operationStore?: ChatGptBrowserOperationStoreShape;
 }) {
   return Effect.gen(function* () {
@@ -1460,6 +1470,10 @@ describe("ChatGPT Browser ProviderAdapterV2", () => {
           defaultCwd: "/workspace",
           host: {
             readiness: Effect.fail(new ChatGptBrowserHostError({ operation: "readiness" })),
+            status: Effect.fail(new ChatGptBrowserHostError({ operation: "status" })),
+            authenticate: Effect.fail(new ChatGptBrowserHostError({ operation: "authenticate" })),
+            controlTab: () =>
+              Effect.fail(new ChatGptBrowserHostError({ operation: "controlling-tab" })),
             open: Effect.fail(new ChatGptBrowserHostError({ operation: "open" })),
           },
         }).pipe(Effect.provide(Layer.merge(IdAllocator.layer, layerMemoryOperationStore)));

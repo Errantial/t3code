@@ -74,4 +74,15 @@ describe("buildThreadActionMenuItems", () => {
     expect(items.find((item) => item.id === "archive")?.disabled).toBe(true);
     expect(items.find((item) => item.id === "turn-into-project")?.disabled).toBe(true);
   });
+
+  it("offers the ChatGPT tab controls only for a provider that owns one", () => {
+    expect(
+      buildThreadActionMenuItems(baseState).filter((item) => item.id.includes("chatgpt-tab")),
+    ).toEqual([]);
+    const items = buildThreadActionMenuItems({ ...baseState, canControlChatGptTab: true });
+    expect(items.find((item) => item.id === "show-chatgpt-tab")?.label).toBe("Show ChatGPT tab");
+    expect(items.find((item) => item.id === "reload-chatgpt-tab")?.label).toBe(
+      "Reload ChatGPT tab",
+    );
+  });
 });

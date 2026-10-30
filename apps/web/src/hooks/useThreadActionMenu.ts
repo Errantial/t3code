@@ -26,6 +26,8 @@ import { copyThreadReference } from "../lib/copyThreadReference";
 import { threadChipCopyTarget } from "@t3tools/client-runtime/thread-reference";
 import { threadEnvironment } from "../state/threads";
 import { useOrchestrationCommand } from "../state/use-orchestration-command";
+import { orchestrationEnvironment } from "../state/orchestration";
+import { useAtomCommand } from "../state/use-atom-command";
 import { readEnvironmentScope } from "../state/session";
 import {
   readEnvironmentServerConfigLoaded,
@@ -33,7 +35,7 @@ import {
   readThreadShell,
   useProjects,
 } from "../state/entities";
-import { usePrimaryEnvironmentId } from "../state/environments";
+import { usePrimaryEnvironmentId, useEnvironmentProviders } from "../state/environments";
 import { readLocalApi } from "../localApi";
 import {
   deriveLogicalProjectKeyFromSettings,
@@ -92,6 +94,8 @@ export function useThreadActionMenu(input: {
   const handleNewThread = useNewThreadHandler();
   const confirmThreadDelete = useClientSettings((s) => s.confirmThreadDelete);
   const confirmThreadArchive = useClientSettings((s) => s.confirmThreadArchive);
+  const providersByEnvironment = useEnvironmentProviders();
+  const controlBrowserTab = useAtomCommand(orchestrationEnvironment.controlBrowserTab);
   const timestampFormat = useClientSettings((s) => s.timestampFormat);
   const { copyToClipboard: copyPathToClipboard } = useCopyToClipboard<{ path: string }>({
     onCopy: ({ path }) => {
@@ -131,6 +135,11 @@ export function useThreadActionMenu(input: {
       };
       const isRegeneratingTitle = thread.titleRegeneration != null;
       const snoozePresets = resolveSnoozePresets(now, timestampFormat, threadRef.environmentId);
+      // Only the ChatGPT Browser provider owns a tab T3 can show or reload for a thread.
+      const canControlChatGptTab = (providersByEnvironment.get(threadRef.environmentId) ?? []).some(
+        (provider) =>
+          provider.instanceId === thread.providerInstanceId && provider.driver === "chatgptBrowser",
+      );
       const items = buildThreadActionMenuItems({
         canOperate: readEnvironmentScope(threadRef.environmentId, AuthOrchestrationOperateScope),
         branch: thread.branch ?? null,
@@ -146,6 +155,7 @@ export function useThreadActionMenu(input: {
         snoozePresets,
         canShareWithGuest,
         canTurnIntoProject: canTurnThreadIntoProject(threadRef),
+        canControlChatGptTab,
       });
       const clicked = await settlePromise(() => api.contextMenu.show(items, position));
       if (clicked._tag === "Failure" || clicked.value === null) return;
@@ -252,6 +262,22 @@ export function useThreadActionMenu(input: {
           return;
         case "mark-unread":
           markThreadUnread(threadRef);
+          return;
+        case "show-chatgpt-tab":
+          await reportFailure("Could not show the ChatGPT tab", () =>
+            controlBrowserTab({
+              environmentId: threadRef.environmentId,
+              input: { threadId: threadRef.threadId, action: "reveal" },
+            }),
+          );
+          return;
+        case "reload-chatgpt-tab":
+          await reportFailure("Could not reload the ChatGPT tab", () =>
+            controlBrowserTab({
+              environmentId: threadRef.environmentId,
+              input: { threadId: threadRef.threadId, action: "reload" },
+            }),
+          );
           return;
         case "share-guest":
           openGuestShareDialog(threadRef);

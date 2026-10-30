@@ -117,6 +117,87 @@ describe("native ChatGPT browser broker", () => {
     }
   });
 
+  it("delivers a manual reveal once and refuses a session with no tab", async () => {
+    const { broker, headers, session } = await startReadyBroker();
+    try {
+      const providerOperationId = chatGptBrowserProviderOperationIdForAttempt(
+        RunAttemptId.make("attempt-native-tab-control"),
+      );
+      const providerSessionId = ProviderSessionId.make("provider-session-tab-control");
+      const controller = new AbortController();
+      await session.sendExact(
+        {
+          type: "operation.send",
+          providerOperationId,
+          providerSessionId,
+          text: "show me",
+        },
+        controller.signal,
+      );
+      const pending = await requestJson<{ inputs: Array<{ id: string }> }>({
+        port: broker.port,
+        path: "/provider-v1/browser/status",
+        headers,
+        body: { operations: [], after: 0, wait: false },
+      });
+      const id = pending.body.inputs[0]!.id;
+      const conversationId = "55555555-5555-4555-8555-555555555555";
+      const owner = "1:tab-control:0";
+      await requestJson({
+        port: broker.port,
+        path: "/provider-v1/browser/input",
+        headers,
+        body: { providerOperationId, id, owner, conversationId },
+      });
+      await requestJson({
+        port: broker.port,
+        path: "/provider-v1/browser/input",
+        headers,
+        body: { providerOperationId, id, owner, conversationId, authorize: true },
+      });
+      await requestJson({
+        port: broker.port,
+        path: "/provider-v1/browser/input",
+        headers,
+        body: {
+          providerOperationId,
+          id,
+          owner,
+          conversationId,
+          messageId: "user-tab-control",
+          ack: true,
+        },
+      });
+
+      await expect(broker.controlTab({ providerSessionId, action: "reveal" })).resolves.toEqual({
+        conversationId,
+      });
+      const status = await requestJson<{ reveals: string[]; reloads: string[] }>({
+        port: broker.port,
+        path: "/provider-v1/browser/status",
+        headers,
+        body: { operations: [], after: 0, wait: false },
+      });
+      expect(status.body.reveals).toEqual([conversationId]);
+      expect(status.body.reloads).toEqual([]);
+
+      // A control is delivered once: the extension already did it, so a later poll is empty.
+      const again = await requestJson<{ reveals: string[] }>({
+        port: broker.port,
+        path: "/provider-v1/browser/status",
+        headers,
+        body: { operations: [], after: 0, wait: false },
+      });
+      expect(again.body.reveals).toEqual([]);
+
+      await expect(
+        broker.controlTab({ providerSessionId: "provider-session-no-tab", action: "reload" }),
+      ).rejects.toThrow("provider_tab_not_open");
+    } finally {
+      await broker.close();
+    }
+  });
+
   it("tracks the managed ChatGPT sign-in and wakes authentication waiters", async () => {
     const { broker, headers } = await startReadyBroker();
     try {

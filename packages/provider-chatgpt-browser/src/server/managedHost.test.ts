@@ -30,6 +30,7 @@ describe("shared managed ChatGPT browser host", () => {
         };
         const physical: ChatGptBrowserHostService = {
           readiness: Effect.succeed(identity),
+        controlTab: () => Effect.succeed({ conversationId: "test-conversation" }),
           status: Effect.succeed({
             identity,
             authentication: "authenticated",
@@ -88,6 +89,7 @@ describe("shared managed ChatGPT browser host", () => {
       let opens = 0;
       const physical: ChatGptBrowserHostService = {
         readiness: Effect.succeed(identity),
+        controlTab: () => Effect.succeed({ conversationId: "test-conversation" }),
         status: Effect.gen(function* () {
           probeOpen = true;
           yield* Deferred.succeed(statusEntered, undefined);
@@ -179,6 +181,7 @@ describe("shared managed ChatGPT browser host", () => {
       });
       const physical: ChatGptBrowserHostService = {
         readiness: Effect.succeed(identity),
+        controlTab: () => Effect.succeed({ conversationId: "test-conversation" }),
         status: Effect.succeed({
           identity,
           authentication: "authenticated",

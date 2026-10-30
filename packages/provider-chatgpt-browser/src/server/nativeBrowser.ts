@@ -136,6 +136,14 @@ export interface NativeChatGptBrowserBroker {
     signal?: AbortSignal,
   ) => Promise<NativeChatGptBrowserAuthenticationStatus>;
   readonly waitForAuthentication: (signal?: AbortSignal) => Promise<void>;
+  /**
+   * Queues a manual tab control for the extension's next status poll. Resolves with the exact
+   * conversation whose tab will be shown or reloaded.
+   */
+  readonly controlTab: (input: {
+    readonly providerSessionId: string;
+    readonly action: "reveal" | "reload";
+  }) => Promise<{ readonly conversationId: string }>;
   readonly close: () => Promise<void>;
 }
 
@@ -816,6 +824,46 @@ export async function startNativeChatGptBrowserBroker(
     },
   });
 
+  /** A provider session owns the ChatGPT conversation of its newest live operation. */
+  function conversationForProviderSession(providerSessionId: string): string | null {
+    for (const record of operations.values()) {
+      if (record.providerSessionId === providerSessionId && record.nativeIdentity.conversationId) {
+        return record.nativeIdentity.conversationId;
+      }
+    }
+    return null;
+  }
+
+  interface TabControlRequest {
+    readonly conversationId: string;
+    readonly action: "reveal" | "reload";
+    readonly requestedAt: number;
+  }
+  const TAB_CONTROL_TTL_MS = 30_000;
+  const tabControls: TabControlRequest[] = [];
+
+  function queueTabControl(conversationId: string, action: "reveal" | "reload"): void {
+    tabControls.push({ conversationId, action, requestedAt: Date.now() });
+    if (tabControls.length > 20) tabControls.splice(0, tabControls.length - 20);
+    // The extension long-polls /status; wake it so a manual control is not waiting behind the 25 s
+    // idle bound.
+    wake();
+  }
+
+  /** Takes each queued control once, for the next status reply. Unclaimed controls expire. */
+  function takeTabControls(action: "reveal" | "reload"): string[] {
+    const now = Date.now();
+    for (let index = tabControls.length - 1; index >= 0; index -= 1) {
+      if (now - tabControls[index]!.requestedAt > TAB_CONTROL_TTL_MS) tabControls.splice(index, 1);
+    }
+    const taken = tabControls.filter((request) => request.action === action);
+    for (const request of taken) {
+      const index = tabControls.indexOf(request);
+      if (index >= 0) tabControls.splice(index, 1);
+    }
+    return [...new Set(taken.map((request) => request.conversationId))];
+  }
+
   const handleStatus = async (body: Record<string, unknown>, onReconciled?: () => void) => {
     const after =
       Number.isSafeInteger(body.after) && Number(body.after) >= 0 ? Number(body.after) : -1;
@@ -884,6 +932,10 @@ export async function startNativeChatGptBrowserBroker(
       generation: brokerGeneration,
       inputs,
       stopTurns,
+      // Manual thread-tab controls. The extension already reveals a chat on this key; `reloads`
+      // is the force-reload half. Both are consumed on delivery and expire unclaimed.
+      reveals: takeTabControls("reveal"),
+      reloads: takeTabControls("reload"),
       operations: [...operations.values()].map(extensionSummary),
     };
   };
@@ -1549,6 +1601,12 @@ export async function startNativeChatGptBrowserBroker(
     sessionAvailability,
     waitForAuthenticationStatus,
     waitForAuthentication,
+    controlTab: async ({ providerSessionId, action }) => {
+      const conversationId = conversationForProviderSession(providerSessionId);
+      if (!conversationId) throw new Error("provider_tab_not_open");
+      queueTabControl(conversationId, action);
+      return { conversationId };
+    },
     close: closeServer,
   };
 }

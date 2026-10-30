@@ -3512,6 +3512,7 @@ export const ORCHESTRATION_V2_WS_METHODS = {
   getWorkflowScript: "orchestration.getWorkflowScript",
   stopWorkflow: "orchestration.stopWorkflow",
   getTurnItem: "orchestration.getTurnItem",
+  controlBrowserTab: "orchestration.controlBrowserTab",
   launchThread: "orchestration.launchThread",
   subscribeShell: "orchestration.subscribeShell",
   subscribeThread: "orchestration.subscribeThread",
@@ -3898,6 +3899,44 @@ export class OrchestrationV2StopWorkflowError extends Schema.TaggedError<Orchest
   }
 }
 
+/** The manual browser-tab controls a provider thread can offer. */
+export const OrchestrationV2BrowserTabAction = Schema.Literals(["reveal", "reload"]);
+export type OrchestrationV2BrowserTabAction = typeof OrchestrationV2BrowserTabAction.Type;
+
+export const OrchestrationV2ControlBrowserTabInput = Schema.Struct({
+  threadId: ThreadId,
+  action: OrchestrationV2BrowserTabAction,
+});
+export type OrchestrationV2ControlBrowserTabInput =
+  typeof OrchestrationV2ControlBrowserTabInput.Type;
+
+export const OrchestrationV2ControlBrowserTabResult = Schema.Struct({
+  /** The exact ChatGPT conversation whose tab was shown or reloaded. */
+  conversationId: TrimmedNonEmptyString,
+});
+export type OrchestrationV2ControlBrowserTabResult =
+  typeof OrchestrationV2ControlBrowserTabResult.Type;
+
+export class OrchestrationV2ControlBrowserTabError extends Schema.TaggedError<OrchestrationV2ControlBrowserTabError>()(
+  "OrchestrationV2ControlBrowserTabError",
+  {
+    threadId: ThreadId,
+    reason: Schema.Literals(["unsupported", "unavailable", "failed"]),
+    cause: Schema.optional(Schema.Defect()),
+  },
+) {
+  override get message(): string {
+    switch (this.reason) {
+      case "unsupported":
+        return "This provider does not own a browser tab for the thread.";
+      case "unavailable":
+        return "The thread's browser tab is not open.";
+      case "failed":
+        return "The browser tab could not be controlled.";
+    }
+  }
+}
+
 export const OrchestrationV2GetWorkflowScriptInput = Schema.Struct({
   threadId: ThreadId,
   scriptPath: TrimmedNonEmptyString,
@@ -4091,6 +4130,10 @@ export const OrchestrationV2RpcSchemas = {
   getTurnItem: {
     input: OrchestrationV2GetTurnItemInput,
     output: OrchestrationV2GetTurnItemResult,
+  },
+  controlBrowserTab: {
+    input: OrchestrationV2ControlBrowserTabInput,
+    output: OrchestrationV2ControlBrowserTabResult,
   },
   launchThread: {
     input: OrchestrationV2ThreadLaunchInput,

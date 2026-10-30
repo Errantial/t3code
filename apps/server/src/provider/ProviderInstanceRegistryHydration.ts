@@ -169,8 +169,4 @@ export const layer: Layer.Layer<
 
     return layerSettingsWatcher(settingsChanges).pipe(Layer.provideMerge(layerMutable));
   }),
-) as Layer.Layer<
-  ProviderInstanceRegistry.ProviderInstanceRegistry,
-  never,
-  ProviderInstanceRegistryHydrationEnv
->;
+);

@@ -4887,6 +4887,29 @@ async function revealChats(ids) {
 }
 
 /**
+ * Force-reloads the exact tab of each conversation the host named. This is the manual recovery
+ * path for a page that stopped answering: it bypasses the cache and never opens a tab that does
+ * not exist, so a stuck page is replaced without inventing a second one for the same chat.
+ */
+async function reloadChats(ids) {
+  if (!Array.isArray(ids)) return;
+  for (const raw of ids.slice(0, 5)) {
+    const conversationId = cleanConversationId(raw);
+    if (!conversationId) continue;
+    const tabs = await chrome.tabs.query({ url: CHATGPT_TAB_URLS });
+    const [tab] = tabs
+      .filter((candidate) => conversationForTab(candidate) === conversationId)
+      .sort((a, b) => a.id - b.id);
+    if (!tab || !Number.isInteger(tab.id)) continue;
+    try {
+      await chrome.tabs.reload(tab.id, { bypassCache: true });
+    } catch {
+      // A tab the user closed in the meantime is already the state the caller wanted.
+    }
+  }
+}
+
+/**
  * The chat selected in the app becomes the selected tab of the app's Background chats window
  * (#1249). Selecting a tab never focuses its window, and nothing is opened or moved: a chat
  * without a tab there, or a tab in the user's own windows, is left as it is.
@@ -5078,6 +5101,7 @@ async function maintainOnce() {
   );
   void followApp(reply.data).catch(() => undefined);
   void revealChats(reply.data.reveals).catch(() => undefined);
+  void reloadChats(reply.data.reloads).catch(() => undefined);
   void followChat(reply.data.follow).catch(() => undefined);
   void runImageExports(reply.data.imageExports).catch(() => undefined);
   const renderingWanted = (tab) => {

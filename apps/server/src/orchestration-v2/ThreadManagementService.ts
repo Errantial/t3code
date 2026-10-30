@@ -14,6 +14,9 @@ import {
   MessageId,
   OrchestrationV2StopWorkflowError,
   type OrchestrationV2StopWorkflowInput,
+  OrchestrationV2ControlBrowserTabError,
+  type OrchestrationV2ControlBrowserTabInput,
+  type OrchestrationV2ControlBrowserTabResult,
   type ModelSelection,
   type OrchestrationV2Actor,
   type OrchestrationV2Command,
@@ -372,6 +375,9 @@ export interface ThreadManagementServiceShape {
     readonly threadId: ThreadId;
     readonly itemId: TurnItemId;
   }) => Effect.Effect<OrchestrationV2GetTurnItemResult, Orchestrator.OrchestratorV2Error>;
+  readonly controlBrowserTab: (
+    input: OrchestrationV2ControlBrowserTabInput,
+  ) => Effect.Effect<OrchestrationV2ControlBrowserTabResult, OrchestrationV2ControlBrowserTabError>;
   readonly getThreadRecords: Orchestrator.OrchestratorV2["Service"]["getThreadRecords"];
   readonly getThreadProjection: (
     threadId: ThreadId,
@@ -635,6 +641,71 @@ const make = Effect.gen(function* () {
     ensureProjectionTranscript(threadId).pipe(
       Effect.andThen(orchestrator.getThreadProjection(threadId)),
     );
+
+  /**
+   * Manual control of the ChatGPT tab that belongs to a thread. Only the provider that owns a
+   * browser exposes it; the live operation of the newest provider session resolves the tab.
+   */
+  const controlBrowserTab: ThreadManagementServiceShape["controlBrowserTab"] = Effect.fn(
+    "ThreadManagementService.controlBrowserTab",
+  )(function* (input) {
+    const projection = yield* getThreadProjection(input.threadId).pipe(
+      Effect.mapError(
+        (cause) =>
+          new OrchestrationV2ControlBrowserTabError({
+            threadId: input.threadId,
+            reason: "unavailable",
+            cause,
+          }),
+      ),
+    );
+    // The thread's active provider thread names its session exactly; an older session left
+    // behind by a provider switch cannot answer for the tab the user is looking at.
+    const activeThreadId = projection.thread.activeProviderThreadId;
+    const activeThread =
+      activeThreadId === null
+        ? undefined
+        : projection.providerThreads.find((candidate) => candidate.id === activeThreadId);
+    const session =
+      (activeThread === undefined
+        ? undefined
+        : projection.providerSessions.find(
+            (candidate) => candidate.id === activeThread.providerSessionId,
+          )) ??
+      projection.providerSessions
+        .filter((candidate) => candidate.driver === "chatgptBrowser")
+        .at(-1);
+    if (!session || session.driver !== "chatgptBrowser") {
+      return yield* new OrchestrationV2ControlBrowserTabError({
+        threadId: input.threadId,
+        reason: "unsupported",
+      });
+    }
+    const runtime = Option.flatten(yield* sessions.get(session.id).pipe(Effect.option));
+    if (Option.isNone(runtime)) {
+      return yield* new OrchestrationV2ControlBrowserTabError({
+        threadId: input.threadId,
+        reason: "unavailable",
+      });
+    }
+    const control = runtime.value.controlBrowserTab;
+    if (!control) {
+      return yield* new OrchestrationV2ControlBrowserTabError({
+        threadId: input.threadId,
+        reason: "unsupported",
+      });
+    }
+    return yield* control({ action: input.action }).pipe(
+      Effect.mapError(
+        (cause) =>
+          new OrchestrationV2ControlBrowserTabError({
+            threadId: input.threadId,
+            reason: "failed",
+            cause,
+          }),
+      ),
+    );
+  });
 
   const getCheckpointContext: ThreadManagementServiceShape["getCheckpointContext"] = (threadId) =>
     ensureProjectionTranscript(threadId).pipe(
@@ -1326,6 +1397,7 @@ const make = Effect.gen(function* () {
       },
     ),
     getThreadProjection,
+    controlBrowserTab,
     getCheckpointContext,
     getThreadSnapshot,
     getThreadTranscript,

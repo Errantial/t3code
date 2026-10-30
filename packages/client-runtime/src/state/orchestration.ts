@@ -107,6 +107,10 @@ export function createOrchestrationEnvironmentAtoms<R, E>(
       label: "environment-data:orchestration:stop-workflow",
       tag: ORCHESTRATION_V2_WS_METHODS.stopWorkflow,
     }),
+    controlBrowserTab: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:orchestration:control-browser-tab",
+      tag: ORCHESTRATION_V2_WS_METHODS.controlBrowserTab,
+    }),
     turnItem: createEnvironmentRpcQueryAtomFamily(runtime, {
       label: "environment-data:orchestration:turn-item",
       tag: ORCHESTRATION_V2_WS_METHODS.getTurnItem,
