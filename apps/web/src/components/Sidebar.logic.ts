@@ -170,10 +170,12 @@ export function resolveSidebarThreadSection(input: {
   readonly snoozed: boolean;
   readonly settled: boolean;
   readonly pinned: boolean;
+  /** Off: a pinned thread stays in the activity list; pinning only prevents auto-settling. */
+  readonly pinnedThreadsOnTop?: boolean;
 }): SidebarSection {
   if (input.snoozed) return "snoozed";
   if (input.settled) return "settled";
-  if (input.pinned) return "pinned";
+  if (input.pinned && input.pinnedThreadsOnTop !== false) return "pinned";
   return "active";
 }
 

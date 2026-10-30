@@ -434,6 +434,12 @@ export const SETTINGS_SEARCH_ITEMS = [
     searchTerms: ["hide fold running monitoring threads inbox sidebar shelf"],
   },
   {
+    id: "pinned-threads-on-top",
+    title: "Pinned threads on top",
+    to: "/settings/general",
+    searchTerms: ["pin pinned sort order activity recent settle sidebar"],
+  },
+  {
     id: "boring-sidebar",
     title: "Boring sidebar (group by project)",
     to: "/settings/labs",

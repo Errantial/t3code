@@ -465,6 +465,9 @@ export function useSettingsRestore(onRestored?: () => void) {
     ...(settings.sidebarWorkingShelfEnabled !== DEFAULT_UNIFIED_SETTINGS.sidebarWorkingShelfEnabled
       ? ["Working section"]
       : []),
+    ...(settings.sidebarPinnedThreadsOnTop !== DEFAULT_UNIFIED_SETTINGS.sidebarPinnedThreadsOnTop
+      ? ["Pinned threads on top"]
+      : []),
     ...(settings.sidebarAutoSettleAfterDays !== DEFAULT_UNIFIED_SETTINGS.sidebarAutoSettleAfterDays
       ? ["Auto-settle inactive threads"]
       : []),
@@ -883,6 +886,32 @@ export function GeneralSettingsPanel() {
                 updateSettings({ sidebarWorkingShelfEnabled: Boolean(checked) })
               }
               aria-label="Working section"
+            />
+          }
+        />
+        <SettingsRow
+          {...searchableSetting("pinned-threads-on-top")}
+          description="Keep pinned threads above the rest of the list. Turn this off to sort pinned threads with everything else by activity; pinning then only keeps a thread from settling automatically."
+          resetAction={
+            settings.sidebarPinnedThreadsOnTop !==
+            DEFAULT_UNIFIED_SETTINGS.sidebarPinnedThreadsOnTop ? (
+              <SettingResetButton
+                label="pinned threads on top"
+                onClick={() =>
+                  updateSettings({
+                    sidebarPinnedThreadsOnTop: DEFAULT_UNIFIED_SETTINGS.sidebarPinnedThreadsOnTop,
+                  })
+                }
+              />
+            ) : null
+          }
+          control={
+            <Switch
+              checked={settings.sidebarPinnedThreadsOnTop}
+              onCheckedChange={(checked) =>
+                updateSettings({ sidebarPinnedThreadsOnTop: Boolean(checked) })
+              }
+              aria-label="Pinned threads on top"
             />
           }
         />

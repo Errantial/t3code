@@ -15,6 +15,7 @@ import {
   pinOrderKeyBetween,
   resolveProjectStatusIndicator,
   resolveSidebarSweepKeys,
+  resolveSidebarThreadSection,
   resolveSidebarThreadStatus,
   resolveThreadStatusPill,
   resolveWorkingStartedAt,
@@ -54,6 +55,42 @@ import {
 } from "./sidebar/routeReveal";
 
 const localEnvironmentId = EnvironmentId.make("environment-local");
+
+describe("resolveSidebarThreadSection", () => {
+  it("keeps pinned threads on top by default", () => {
+    expect(resolveSidebarThreadSection({ snoozed: false, settled: false, pinned: true })).toBe(
+      "pinned",
+    );
+  });
+
+  it("sorts pinned threads with active ones when pinned threads are not forced on top", () => {
+    expect(
+      resolveSidebarThreadSection({
+        snoozed: false,
+        settled: false,
+        pinned: true,
+        pinnedThreadsOnTop: false,
+      }),
+    ).toBe("active");
+    // Snoozed and settled still win: pinning only changes auto-settlement and the top section.
+    expect(
+      resolveSidebarThreadSection({
+        snoozed: true,
+        settled: false,
+        pinned: true,
+        pinnedThreadsOnTop: false,
+      }),
+    ).toBe("snoozed");
+    expect(
+      resolveSidebarThreadSection({
+        snoozed: false,
+        settled: true,
+        pinned: true,
+        pinnedThreadsOnTop: false,
+      }),
+    ).toBe("settled");
+  });
+});
 
 describe("deleteSelectedThreadEntries", () => {
   const entries = [{ threadKey: "one" }, { threadKey: "two" }, { threadKey: "three" }] as const;
