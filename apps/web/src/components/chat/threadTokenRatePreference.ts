@@ -1,42 +1,47 @@
 import { scopedThreadKey } from "@t3tools/client-runtime/environment";
 import type { ScopedThreadRef } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
-import { useCallback, useMemo } from "react";
 
 import { useLocalStorage } from "../../hooks/useLocalStorage";
 
-const STORAGE_KEY = "t3code:thread-token-rate:v1";
-// Off by default, so only enabled threads are stored. The cap keeps the entry
-// bounded for users who toggle it across many threads over time.
-const MAX_ENABLED_THREADS = 500;
+// On by default, so the stored list is the threads that turned the readout off.
+// v2 is deliberate: the v1 key held the opposite set, and reading it under the new
+// meaning would hide the readout for exactly the people who had enabled it.
+const STORAGE_KEY = "t3code:thread-token-rate:v2";
+const MAX_DISABLED_THREADS = 500;
 
-const EnabledThreadsSchema = Schema.Array(Schema.String);
+const DisabledThreadsSchema = Schema.Array(Schema.String);
 const NO_THREADS: ReadonlyArray<string> = [];
 
 export function toggleThreadInList(
-  enabledThreads: ReadonlyArray<string>,
+  threads: ReadonlyArray<string>,
   threadKey: string,
-  enabled: boolean,
+  listed: boolean,
 ): ReadonlyArray<string> {
-  const rest = enabledThreads.filter((key) => key !== threadKey);
-  return enabled ? [...rest, threadKey].slice(-MAX_ENABLED_THREADS) : rest;
+  const rest = threads.filter((key) => key !== threadKey);
+  return listed ? [...rest, threadKey].slice(-MAX_DISABLED_THREADS) : rest;
 }
 
-/** Per-thread opt-in for the tokens/sec readout, persisted on this client. */
+/** The readout is on unless this thread is in the stored off-list. */
+export function isThreadTokenRateEnabled(
+  disabledThreads: ReadonlyArray<string>,
+  threadKey: string | null,
+): boolean {
+  return threadKey !== null && !disabledThreads.includes(threadKey);
+}
+
+/** Per-thread opt-out for the tokens/sec readout, persisted on this client. */
 export function useThreadTokenRatePreference(threadRef: ScopedThreadRef | null) {
-  const [enabledThreads, setEnabledThreads] = useLocalStorage(
+  const [disabledThreads, setDisabledThreads] = useLocalStorage(
     STORAGE_KEY,
     NO_THREADS,
-    EnabledThreadsSchema,
+    DisabledThreadsSchema,
   );
-  const threadKey = useMemo(() => (threadRef ? scopedThreadKey(threadRef) : null), [threadRef]);
-  const enabled = threadKey !== null && enabledThreads.includes(threadKey);
-  const setEnabled = useCallback(
-    (next: boolean) => {
-      if (threadKey === null) return;
-      setEnabledThreads((current) => toggleThreadInList(current, threadKey, next));
-    },
-    [setEnabledThreads, threadKey],
-  );
+  const threadKey = threadRef ? scopedThreadKey(threadRef) : null;
+  const enabled = isThreadTokenRateEnabled(disabledThreads, threadKey);
+  const setEnabled = (next: boolean) => {
+    if (threadKey === null) return;
+    setDisabledThreads((current) => toggleThreadInList(current, threadKey, !next));
+  };
   return { enabled, setEnabled };
 }
