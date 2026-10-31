@@ -146,7 +146,7 @@ it.effect(
         head,
       );
       assert.strictEqual(
-        yield* fs.readFileString(path.join(cwd, "feature.txt")),
+        (yield* fs.readFileString(path.join(cwd, "feature.txt"))).replaceAll("\r\n", "\n"),
         "pull request change\n",
       );
       for (const args of [
@@ -190,11 +190,11 @@ it.effect(
         head,
       );
       assert.strictEqual(
-        yield* fs.readFileString(path.join(cwd, "base.txt")),
+        (yield* fs.readFileString(path.join(cwd, "base.txt"))).replaceAll("\r\n", "\n"),
         "uncommitted work\n",
       );
       assert.strictEqual(
-        yield* fs.readFileString(path.join(cwd, "feature.txt")),
+        (yield* fs.readFileString(path.join(cwd, "feature.txt"))).replaceAll("\r\n", "\n"),
         "pull request change\n",
       );
       assert.deepStrictEqual(fetched, [source, source, "git@forgejo.test:reviewer/project.git"]);
