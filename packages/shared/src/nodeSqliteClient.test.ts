@@ -322,20 +322,24 @@ const withFileClient = <A, E>(
     }).pipe(Effect.provide(SqliteClient.layer({ filename, readerWorker: true })));
   }).pipe(Effect.scoped, Effect.provide(NodeServices.layer));
 
-it.effect("uses the writer when the reader cannot open the database", () =>
-  withFileClient((sql, filename) =>
-    Effect.gen(function* () {
-      yield* sql`PRAGMA journal_mode = WAL`;
-      yield* sql`CREATE TABLE entries(name TEXT NOT NULL)`;
-      yield* sql`INSERT INTO entries VALUES ('kept')`;
-      yield* (yield* FileSystem.FileSystem).remove(filename);
-      const startedBefore = startedWorkers.length;
+// quarantine: https://github.com/Errantial/t3onsteroids/issues/1 unlinking an open SQLite file is EBUSY on Windows
+/* oxlint-disable t3code/no-global-process-runtime -- test collection selects the host platform */
+it.effect.skipIf(process.platform === "win32")(
+  "uses the writer when the reader cannot open the database",
+  () =>
+    withFileClient((sql, filename) =>
+      Effect.gen(function* () {
+        yield* sql`PRAGMA journal_mode = WAL`;
+        yield* sql`CREATE TABLE entries(name TEXT NOT NULL)`;
+        yield* sql`INSERT INTO entries VALUES ('kept')`;
+        yield* (yield* FileSystem.FileSystem).remove(filename);
+        const startedBefore = startedWorkers.length;
 
-      assert.equal(yield* sql.withTransaction(countEntries(sql)).pipe(SqliteClient.readOnly), 1);
-      assert.equal(yield* sql.withTransaction(countEntries(sql)).pipe(SqliteClient.readOnly), 1);
-      assert.equal(startedWorkers.length, startedBefore + 1);
-    }),
-  ),
+        assert.equal(yield* sql.withTransaction(countEntries(sql)).pipe(SqliteClient.readOnly), 1);
+        assert.equal(yield* sql.withTransaction(countEntries(sql)).pipe(SqliteClient.readOnly), 1);
+        assert.equal(startedWorkers.length, startedBefore + 1);
+      }),
+    ),
 );
 
 it.effect("finishes masked database cleanup after its caller is interrupted", () =>
