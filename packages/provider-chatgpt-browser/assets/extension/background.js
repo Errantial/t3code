@@ -4877,12 +4877,26 @@ async function revealChats(ids) {
       : await createUserWindowTab(`https://chatgpt.com/c/${conversationId}`, true);
     const windowId = shown?.windowId ?? tab?.windowId;
     if (!Number.isInteger(windowId)) continue;
-    // A worker tab can sit in the app's minimized background window; the user asked to see it.
-    const window = await chrome.windows.get(windowId).catch(() => null);
-    await chrome.windows.update(
-      windowId,
-      window?.state === "minimized" ? { state: "normal", focused: true } : { focused: true },
-    );
+    // A worker tab can sit in the app's off-screen background window; the user asked to see it.
+    const parked = await chrome.windows.get(windowId).catch(() => null);
+    if (!parked) continue;
+    if (parked.state === "minimized") {
+      await chrome.windows.update(windowId, { state: "normal", focused: true });
+    }
+    const window = (await chrome.windows.get(windowId).catch(() => null)) ?? parked;
+    // The managed worker window is parked far off-screen to stay out of the user's way. A reveal
+    // is the user explicitly asking for it, so move it back onto the primary display; focusing an
+    // invisible window would report success while showing nothing.
+    const offscreen =
+      window.state === "normal" &&
+      (typeof window.left !== "number" ||
+        typeof window.top !== "number" ||
+        window.left <= -8000 ||
+        window.top <= -8000);
+    await chrome.windows.update(windowId, {
+      focused: true,
+      ...(offscreen ? { left: 80, top: 80 } : {}),
+    });
   }
 }
 
