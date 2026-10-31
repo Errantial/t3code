@@ -5,6 +5,10 @@ const { tmpdir } = require("node:os");
 const { join } = require("node:path");
 const { test } = require("node:test");
 
+// The workflow step is bash and the fixture stubs an npx shim; both are POSIX-only.
+// oxlint-disable-next-line t3code/no-global-process-runtime -- selecting a POSIX-only workflow fixture
+const skip = process.platform === "win32" ? "POSIX workflow fixture" : false;
+
 const workflow = readFileSync(join(__dirname, "../workflows/release.yml"), "utf8");
 const step = workflow.match(
   /- name: Read production relay tracing config\n[\s\S]*?        run: \|\n((?:          .*\n|\n)+)/,
@@ -49,17 +53,21 @@ for (const prefix of [
   "",
   "• Refreshing Cloudflare State Store credentials\n✓ Refreshing Cloudflare State Store credentials\n",
 ]) {
-  test(`extracts tracing config ${prefix ? "after progress output" : "from plain JSON"}`, () => {
-    const result = runStep(prefix + json);
-    assert.equal(result.status, 0, result.stderr);
-    assert.equal(result.stdout, "::add-mask::fixture-token\n");
-    assert.equal(
-      result.envFile,
-      "T3CODE_RELAY_CLIENT_OTLP_TRACES_URL=https://example.invalid/traces\n" +
-        "T3CODE_RELAY_CLIENT_OTLP_TRACES_DATASET=fixture-dataset\n" +
-        "T3CODE_RELAY_CLIENT_OTLP_TRACES_TOKEN=fixture-token\n",
-    );
-  });
+  test(
+    `extracts tracing config ${prefix ? "after progress output" : "from plain JSON"}`,
+    { skip },
+    () => {
+      const result = runStep(prefix + json);
+      assert.equal(result.status, 0, result.stderr);
+      assert.equal(result.stdout, "::add-mask::fixture-token\n");
+      assert.equal(
+        result.envFile,
+        "T3CODE_RELAY_CLIENT_OTLP_TRACES_URL=https://example.invalid/traces\n" +
+          "T3CODE_RELAY_CLIENT_OTLP_TRACES_DATASET=fixture-dataset\n" +
+          "T3CODE_RELAY_CLIENT_OTLP_TRACES_TOKEN=fixture-token\n",
+      );
+    },
+  );
 }
 
 for (const [name, stdout, exitCode] of [
@@ -68,7 +76,7 @@ for (const [name, stdout, exitCode] of [
   ["malformed JSON", "{not JSON", 0],
   ["missing token", JSON.stringify({ ...config, clientTracingToken: null }, null, 2), 0],
 ]) {
-  test(`rejects ${name} without writing config`, () => {
+  test(`rejects ${name} without writing config`, { skip }, () => {
     const result = runStep(stdout, exitCode);
     assert.notEqual(result.status, 0);
     assert.equal(result.envFile, undefined);
