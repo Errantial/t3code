@@ -1,0 +1,7 @@
+{
+  "entry": ["entry.ts"],
+  "project": ["*.ts"],
+  "includeEntryExports": true,
+  "include": ["exports", "nsExports", "types", "nsTypes", "duplicates", "files", "dependencies"],
+  "rules": { "types": "off", "nsTypes": "off" }
+}
