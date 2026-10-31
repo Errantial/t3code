@@ -244,12 +244,14 @@ const layerDesktopRuntime = layerDesktopClerk.pipe(
 
 // One-way repair for the support task older fork builds created on Windows. The task
 // itself keeps running; only its launcher changes, so a console window never appears.
+// oxlint-disable-next-line t3code/no-global-process-runtime -- Electron main runs before any Effect runtime.
 if (process.platform === "win32" && Electron.app.isPackaged) {
   void Electron.app
     .whenReady()
     .then(() => RemoteRuntimeSyncMigration.migrateRemoteRuntimeSyncTask())
     .then((result) => {
       if (result.status === "migrated") {
+        // @effect-diagnostics-next-line globalConsole:off -- Electron main logs a one-line migration notice before any Effect runtime.
         console.info(
           `[remote-runtime-sync] scheduled task now runs hidden via ${result.launcherPath ?? "wscript"}`,
         );

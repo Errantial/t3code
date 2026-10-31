@@ -1,8 +1,8 @@
 // @effect-diagnostics nodeBuiltinImport:off - Platform tests use real temp files while process and
 // Linux host probes stay deterministic behind the platform runtime seam.
 import * as NodeChildProcess from "node:child_process";
-import { promises as NodeFs } from "node:fs";
-import * as NodeOs from "node:os";
+import * as NodeFS from "node:fs";
+import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 
 import { describe, expect, it } from "@effect/vitest";
@@ -123,9 +123,11 @@ const makeRuntime = (input?: {
 
 const withTempRoot = <A, E>(use: (root: string) => Effect.Effect<A, E>) =>
   Effect.acquireUseRelease(
-    Effect.tryPromise(() => NodeFs.mkdtemp(NodePath.join(NodeOs.tmpdir(), "t3-browser-platform-"))),
+    Effect.tryPromise(() =>
+      NodeFS.promises.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-browser-platform-")),
+    ),
     use,
-    (root) => Effect.promise(() => NodeFs.rm(root, { recursive: true, force: true })),
+    (root) => Effect.promise(() => NodeFS.promises.rm(root, { recursive: true, force: true })),
   );
 
 describe("ChatGPT browser managed target", () => {
@@ -217,6 +219,7 @@ describe("Windows ChatGPT browser platform", () => {
     ),
   );
 
+  // oxlint-disable-next-line t3code/no-global-process-runtime -- test collection selects Windows-only cases
   it.effect.skipIf(process.platform !== "win32")(
     "applies a non-inherited current-principal-only ACL to secret files",
     () =>
@@ -274,6 +277,7 @@ $result | ConvertTo-Json -Depth 4 -Compress
       ),
   );
 
+  // oxlint-disable-next-line t3code/no-global-process-runtime -- test collection selects Windows-only cases
   it.effect.skipIf(process.platform !== "win32")(
     "reopens already-secured secret storage from a fresh platform instance",
     () =>

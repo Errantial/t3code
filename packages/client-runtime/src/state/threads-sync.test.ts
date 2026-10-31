@@ -130,6 +130,7 @@ const makeHarness = Effect.fn("TestEnvironmentThreads.makeHarness")(function* (o
   const latest = yield* Ref.make<EnvironmentThreadState>(EMPTY_ENVIRONMENT_THREAD_STATE);
   const retryCount = yield* Ref.make(0);
   const subscriptionCount = yield* SubscriptionRef.make(0);
+  const secondSubscription = yield* Deferred.make<void>();
   const loaderCalls = yield* Ref.make(0);
   const lastSubscribeAfterSequence = yield* Ref.make<number | undefined>(undefined);
   const lastRequestCompletionMarker = yield* Ref.make(false);
@@ -167,6 +168,13 @@ const makeHarness = Effect.fn("TestEnvironmentThreads.makeHarness")(function* (o
           Effect.andThen(Ref.set(lastAcceptBoundedSnapshot, input.acceptBoundedSnapshot)),
           Effect.andThen(Ref.set(lastAcceptCompactTurnItems, input.acceptCompactTurnItems)),
           Effect.andThen(SubscriptionRef.update(subscriptionCount, (count) => count + 1)),
+          Effect.andThen(
+            SubscriptionRef.get(subscriptionCount).pipe(
+              Effect.flatMap((count) =>
+                count >= 2 ? Deferred.succeed(secondSubscription, undefined) : Effect.void,
+              ),
+            ),
+          ),
           Effect.as(
             options?.completionMarker === true
               ? streamFrom(inputs)
@@ -287,6 +295,7 @@ const makeHarness = Effect.fn("TestEnvironmentThreads.makeHarness")(function* (o
     latest,
     retryCount,
     subscriptionCount,
+    secondSubscription,
     loaderCalls,
     lastSubscribeAfterSequence,
     lastRequestCompletionMarker,
@@ -2156,10 +2165,7 @@ describe("EnvironmentThreads", () => {
         lastFailure: null,
         retryAt: null,
       });
-      for (let attempt = 0; attempt < 100; attempt += 1) {
-        if ((yield* SubscriptionRef.get(harness.subscriptionCount)) >= 2) break;
-        yield* Effect.yieldNow;
-      }
+      yield* Deferred.await(harness.secondSubscription);
       expect(yield* SubscriptionRef.get(harness.subscriptionCount)).toBe(2);
       expect(yield* Ref.get(harness.lastSubscribeAfterSequence)).toBe(8);
 

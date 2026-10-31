@@ -1,6 +1,5 @@
 import { ProviderSessionId, ProviderThreadId, RunAttemptId } from "@t3tools/contracts";
 import {
-  ChatGptBrowserProviderOperationId,
   ChatGptBrowserProviderV1EventSequence,
   type ChatGptBrowserProviderOperationId as ChatGptBrowserProviderOperationIdType,
   type ChatGptBrowserProviderV1EventSequence as ChatGptBrowserProviderV1EventSequenceType,

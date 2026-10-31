@@ -1,5 +1,5 @@
 // @effect-diagnostics nodeBuiltinImport:off globalTimers:off globalDate:off -- The native loopback broker runs at the browser/process boundary outside an Effect runtime.
-import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
+import * as NodeCrypto from "node:crypto";
 // @effect-diagnostics-next-line nodeBuiltinImport:off -- The embedded provider owns one private loopback HTTP listener for its managed extension.
 import * as NodeHttp from "node:http";
 
@@ -32,6 +32,8 @@ export const CHATGPT_BROWSER_NATIVE_PROVIDER_PORTS = [
   8765, 8766, 8767, 8768, 8769, 18_765, 18_766, 18_767, 18_768, 18_769, 38_765, 38_766, 38_767,
   38_768, 38_769,
 ] as const;
+
+const decodeProtocolIdentity = Schema.decodeSync(ChatGptBrowserProviderV1ProtocolIdentity);
 
 const MAX_BODY_BYTES = 5 * 1024 * 1024;
 const MAX_LIVE_REVISION_ITEMS = 256;
@@ -155,7 +157,8 @@ const stateRank: Record<BrowserState, number> = {
   drained: 4,
 };
 
-const sha256 = (value: string): Buffer => createHash("sha256").update(value, "utf8").digest();
+const sha256 = (value: string): Buffer =>
+  NodeCrypto.createHash("sha256").update(value, "utf8").digest();
 
 function deterministicUuid(namespace: string, value: string): string {
   const bytes = Uint8Array.from(sha256(`${namespace}\0${value}`).subarray(0, 16));
@@ -324,7 +327,7 @@ export async function startNativeChatGptBrowserBroker(
   const providerInstanceBytes = await options.secrets.read(INSTANCE_SECRET);
   let providerInstanceId = providerInstanceBytes ? textDecoder.decode(providerInstanceBytes) : "";
   if (!providerInstanceId || providerInstanceId.length > 200) {
-    providerInstanceId = `t3-native-${randomUUID()}`;
+    providerInstanceId = `t3-native-${NodeCrypto.randomUUID()}`;
     await options.secrets.write(INSTANCE_SECRET, textEncoder.encode(providerInstanceId));
   }
   let credentialBytes = await options.secrets.read(TOKEN_SECRET);
@@ -340,7 +343,6 @@ export async function startNativeChatGptBrowserBroker(
   const operationWaiters = new Map<string, Set<() => void>>();
   const globalWaiters = new Set<() => void>();
   let brokerGeneration = 0;
-  let peer: BrowserPeer | null = null;
   let chatGptSignedIn: boolean | null = null;
   let lastAuthenticatedRequestAt: number | null = null;
   let closed = false;
@@ -594,7 +596,7 @@ export async function startNativeChatGptBrowserBroker(
     }
     const bytes = Buffer.from(attachment.bytesBase64, "base64");
     if (bytes.byteLength !== attachment.size) throw new Error("provider_attachment_size_invalid");
-    if (createHash("sha256").update(bytes).digest("hex") !== attachment.sha256) {
+    if (NodeCrypto.createHash("sha256").update(bytes).digest("hex") !== attachment.sha256) {
       throw new Error("provider_attachment_hash_invalid");
     }
     return {
@@ -629,12 +631,10 @@ export async function startNativeChatGptBrowserBroker(
       }
     }
 
-    // Validate exact identity before mutating any broker state. A cold extension can restore a
-    // terminal exact operation while this broker still remembers an older drained projection.
-    // If that drained row says completed but the broker never received the final body, it is not
-    // durably complete. Let the extension's same-operation terminal summary reactivate the view
-    // so its observer can replay the missing final. This is a state-only recovery transition: it
-    // never creates send authority and never changes providerOperationId/command ownership.
+    // Validate identity before mutating broker state. A cold extension can restore a terminal
+    // operation while this broker remembers an older drained row; when the broker never received
+    // the final body, regress to running so the observer can replay it. State only: no send
+    // authority and no ownership change.
     let nextState = record.state;
     if (summary.state && stateRank[summary.state] > stateRank[record.state]) {
       nextState = summary.state;
@@ -695,7 +695,7 @@ export async function startNativeChatGptBrowserBroker(
     });
 
   const identity = (browserPeer: BrowserPeer) =>
-    Schema.decodeSync(ChatGptBrowserProviderV1ProtocolIdentity)({
+    decodeProtocolIdentity({
       protocol: CHATGPT_BROWSER_PROVIDER_V1_PROTOCOL,
       version: CHATGPT_BROWSER_PROVIDER_V1_VERSION,
       browserInstanceId: browserPeer.browserInstanceId,
@@ -734,11 +734,9 @@ export async function startNativeChatGptBrowserBroker(
           conversationId: context.conversationId,
         };
       }
-      // Older/in-flight extension state could report a completed operation as drained before the
-      // broker had received its final assistant body. That state is not durable-provider complete:
-      // regress this exact resumed operation to running so the status response reactivates the
-      // browser observer under the existing sent/running recovery rule and lets it replay the
-      // missing final before a new terminal/drain is accepted. Valid terminal rows stay closed.
+      // A completed row is not durable-provider complete until the broker receives the final body.
+      // Regress this exact resumed operation to running so the observer replays it under the
+      // existing sent/running rule; valid terminal rows stay closed.
       if (
         record.state === "drained" &&
         record.terminalStatus === "completed" &&
@@ -877,11 +875,9 @@ export async function startNativeChatGptBrowserBroker(
       if (!summary) continue;
       reconcileSummary(summary as unknown as ExtensionOperationSummary);
     }
-    // A browser restart rehydrates exact operation ownership through the first status body. Host
-    // readiness must not race ahead of that reconciliation: a dispatched durable WAL queried in
-    // the gap would correctly fail closed as ambiguous even though the extension still owns it.
-    // Signal readiness here, before the optional long-poll wait, so a cold browser with no pending
-    // operations also becomes usable immediately rather than inheriting the 25-second poll bound.
+    // A browser restart rehydrates exact ownership through the first status body. Signal readiness
+    // only after that reconciliation: a durable WAL queried in the gap must fail closed, and a cold
+    // browser with no pending work becomes usable immediately instead of waiting 25 seconds.
     onReconciled?.();
     if (body.wait === true && after >= brokerGeneration && !closed) {
       await waitForGlobalChange(25_000);
@@ -1101,14 +1097,10 @@ export async function startNativeChatGptBrowserBroker(
                 candidate.nativeIdentity.userMessageId === messageId,
             ) ?? null;
       }
-      // Conversation identity alone is not enough to mutate an operation. An observer page can
-      // republish settled history when it first mounts; those assistant finals belong to earlier
-      // turns in the same conversation and may carry either no local turn id or the old turn's id.
-      // Before this operation has an exact provider turn, only `turn_start` may establish that id.
-      // Letting an arbitrary historical event use the sole unbound operation as its fallback owner
-      // freezes stale final text into a new send, then the real turn_start binds a different id and
-      // the runtime correctly trips provider_final_changed. Exact user-message receipts remain the
-      // other admissible pre-turn identity above.
+      // Conversation identity alone cannot mutate an operation: a mounting observer republishes
+      // settled history whose finals belong to earlier turns. Before an exact provider turn exists,
+      // only `turn_start` may establish the id (exact user-message receipts are the other
+      // admissible pre-turn identity); otherwise stale text freezes into a new send.
       record ??= kind === "turn_start" && turnId ? matchingOperation(conversationId, turnId) : null;
       if (!record) continue;
       if (kind === "turn_start" && turnId) {
@@ -1302,7 +1294,7 @@ export async function startNativeChatGptBrowserBroker(
         body: { ok: false, error: "provider_final_not_observed", retryable: true },
       };
     }
-    const drainToken = createHash("sha256")
+    const drainToken = NodeCrypto.createHash("sha256")
       .update(`drain\0${record.providerOperationId}\0${turnId}`)
       .digest("hex")
       .slice(0, 32);
@@ -1385,7 +1377,7 @@ export async function startNativeChatGptBrowserBroker(
     if (!/^[a-f0-9]{64}$/i.test(candidate)) return false;
     const expected = Buffer.from(credential, "ascii");
     const actual = Buffer.from(candidate, "ascii");
-    return expected.length === actual.length && timingSafeEqual(expected, actual);
+    return expected.length === actual.length && NodeCrypto.timingSafeEqual(expected, actual);
   };
 
   const closeServer = async (): Promise<void> => {
@@ -1453,11 +1445,9 @@ export async function startNativeChatGptBrowserBroker(
           },
           origin,
         );
-        // The stale MV3 worker must receive this response and execute its guarded runtime.reload().
-        // Keep readiness pending during one bounded convergence window: a freshly reloaded worker
-        // can re-hello/status with the expected build without the host killing Chromium mid-reload.
-        // If that never happens, reject readiness and let the managed host perform its one existing
-        // durable-profile relaunch. Stale build identity is never accepted as ready or authenticated.
+        // The stale MV3 worker must receive this response and run its guarded reload. Keep readiness
+        // pending for one bounded window so a reloaded worker can re-hello; otherwise reject and let
+        // the managed host relaunch the durable profile. A stale build is never ready.
         if (!buildMismatchTimer && readyReject) {
           buildMismatchTimer = setTimeout(() => {
             buildMismatchTimer = null;
@@ -1473,7 +1463,6 @@ export async function startNativeChatGptBrowserBroker(
         clearTimeout(buildMismatchTimer);
         buildMismatchTimer = null;
       }
-      peer = browserPeer;
       const url = new URL(request.url ?? "/", "http://127.0.0.1");
       if (url.pathname === "/provider-v1/hello" && request.method === "GET") {
         readinessDiagnostics.hello += 1;
@@ -1485,7 +1474,7 @@ export async function startNativeChatGptBrowserBroker(
         if (!body || (body.reuse !== undefined && typeof body.reuse !== "boolean"))
           return json(response, 400, { error: "bad_request" }, origin);
         if (!credential || body.reuse === false) {
-          credential = randomBytes(32).toString("hex");
+          credential = NodeCrypto.randomBytes(32).toString("hex");
           await options.secrets.write(TOKEN_SECRET, textEncoder.encode(credential));
         }
         return json(response, 200, { token: credential, identity: identity(browserPeer) }, origin);

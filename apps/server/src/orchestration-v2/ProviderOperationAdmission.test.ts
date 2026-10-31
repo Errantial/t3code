@@ -25,8 +25,9 @@ const acquireAndRecord = (input: {
     yield* Deferred.await(input.gate).pipe(Effect.ensuring(lease.release));
   });
 
-for (const limit of [1, 2, 4] as const) {
-  it.effect(`admits exactly ${limit} provider operations before queueing`, () =>
+it.effect.each([1, 2, 4] as const)(
+  "admits exactly %i provider operations before queueing",
+  (limit) =>
     Effect.gen(function* () {
       const admission = yield* ProviderOperationAdmission.make;
       const gates = yield* Effect.forEach(Array.from({ length: limit + 2 }), () =>
@@ -58,8 +59,7 @@ for (const limit of [1, 2, 4] as const) {
       yield* Effect.forEach(gates, (gate) => Deferred.succeed(gate, undefined), { discard: true });
       yield* Effect.forEach(fibers, Fiber.join, { discard: true });
     }),
-  );
-}
+);
 
 it.effect("removes an interrupted queued operation without blocking the next waiter", () =>
   Effect.gen(function* () {
@@ -97,7 +97,6 @@ it.effect("removes an interrupted queued operation without blocking the next wai
 it.effect("keeps admission keys independent", () =>
   Effect.gen(function* () {
     const admission = yield* ProviderOperationAdmission.make;
-    const sameOwnerAcquired = yield* Deferred.make<void>();
     const first = yield* admission.acquire({
       key: "driver:first",
       supportedConcurrency: 1,

@@ -1,25 +1,25 @@
 // @effect-diagnostics nodeBuiltinImport:off - Reads extension sources from disk as fixture input.
-import { promises as fs } from "node:fs";
-import path from "node:path";
-import { fileURLToPath } from "node:url";
+import * as NodeFS from "node:fs";
+import * as NodePath from "node:path";
+import * as NodeURL from "node:url";
 
 import { describe, expect, it } from "@effect/vitest";
 
-const here = path.dirname(fileURLToPath(import.meta.url));
-const contentSourcePath = path.resolve(here, "../../assets/extension/content.js");
-const backgroundSourcePath = path.resolve(here, "../../assets/extension/background.js");
-const fiberSourcePath = path.resolve(here, "../../assets/extension/fiber.js");
+const here = NodePath.dirname(NodeURL.fileURLToPath(import.meta.url));
+const contentSourcePath = NodePath.resolve(here, "../../assets/extension/content.js");
+const backgroundSourcePath = NodePath.resolve(here, "../../assets/extension/background.js");
+const fiberSourcePath = NodePath.resolve(here, "../../assets/extension/fiber.js");
 
 async function contentSource() {
-  return fs.readFile(contentSourcePath, "utf8");
+  return NodeFS.promises.readFile(contentSourcePath, "utf8");
 }
 
 async function backgroundSource() {
-  return fs.readFile(backgroundSourcePath, "utf8");
+  return NodeFS.promises.readFile(backgroundSourcePath, "utf8");
 }
 
 async function fiberSource() {
-  return fs.readFile(fiberSourcePath, "utf8");
+  return NodeFS.promises.readFile(fiberSourcePath, "utf8");
 }
 
 function sourceBetween(source: string, start: string, end: string) {

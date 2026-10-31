@@ -22,13 +22,10 @@ function toEpochMs(value: ThroughputTurn["startedAt"]): number | null {
 }
 
 /**
- * Average output tokens per second over the thread's most recent finished
- * provider turn. Returns null whenever the provider did not report a complete
- * main-agent total, so the UI shows nothing instead of an estimate.
- *
- * Elapsed time is the whole turn (tools and waiting included), not pure
- * generation time. Turns with subagents are skipped because their wall time
- * overlaps work the main-agent token count does not cover.
+ * Average output tokens/sec for the latest finished turn, or null without a complete
+ * main-agent total. Elapsed time is the whole turn (tools and waiting included), not pure
+ * generation. Turns with subagents are skipped because their wall time overlaps work the
+ * token count does not cover.
  */
 export function deriveTokenThroughput(
   turns: ReadonlyArray<ThroughputTurn>,

@@ -185,18 +185,10 @@ export const makeNativeManagedChatGptBrowserHost = Effect.fn(
       const isBuildMismatch = (cause: unknown) =>
         cause instanceof Error && cause.message === "provider_v1_extension_build_mismatch";
 
-      // Start the loopback authority before Chromium. MV3 workers may be suspended almost
-      // immediately after startup; if the browser starts first, its initial provider-v1 probe
-      // can miss the listener and the next guaranteed wake is the 30-second alarm. Prebinding
-      // makes cold bootstrap deterministic and also removes that race after browser restart.
-      //
-      // Chromium keeps an unpacked MV3 worker cached even when the stable extension files are
-      // updated in place. The stale worker reports its embedded build, receives a mismatch, and
-      // calls runtime.reload(); command-line --load-extension is then absent until Chromium is
-      // restarted. Relaunch exactly once from the same durable profile/current extension path.
-      // Launch one ordinary ChatGPT page. Its managed content script is loaded only after
-      // Chromium has registered the unpacked extension and therefore provides a deterministic
-      // MV3-worker wake without racing a chrome-extension:// URL against extension startup.
+      // Start the loopback authority before Chromium: a suspended MV3 worker can miss its first
+      // probe, and prebinding makes cold bootstrap deterministic after restart. Chromium caches an
+      // unpacked worker across in-place updates, so a stale build gets one relaunch from the same
+      // durable profile before one ordinary ChatGPT page primes the worker.
       const wakeUrl = "https://chatgpt.com/";
       for (let attempt = 0; attempt < 2; attempt += 1) {
         let binding!: BrokerBinding;

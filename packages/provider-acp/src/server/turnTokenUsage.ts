@@ -2,11 +2,9 @@ import type { TurnTokenUsage } from "@t3tools/contracts";
 import type * as EffectAcpSchema from "effect-acp/compat";
 
 /**
- * Maps the usage an ACP agent reports for a finished prompt into T3's
- * normalized per-turn usage. ACP marks this field unstable and does not say
- * whether `outputTokens` already includes `thoughtTokens`, so a report that
- * carries thought tokens is only `partial`: the count is valid but may leave
- * the reasoning share out, and consumers such as the tokens/sec readout skip
+ * Maps ACP's finished-prompt usage into T3's per-turn usage. ACP marks the field unstable and
+ * does not say whether `outputTokens` includes `thoughtTokens`, so a report carrying thought
+ * tokens is only `partial`: valid but possibly missing the reasoning share, and consumers skip
  * partial totals rather than understate a rate.
  */
 export function acpTurnTokenUsage(

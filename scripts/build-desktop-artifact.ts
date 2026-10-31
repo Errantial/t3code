@@ -3333,6 +3333,7 @@ export const stageChatGptBrowserResources = Effect.fn("stageChatGptBrowserResour
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
     const environment = input.environment ?? process.env;
+    // oxlint-disable-next-line t3code/no-global-process-runtime -- build tooling resolves its host before the Effect layer
     const platform = input.platform ?? process.platform;
     const providerSource = path.join(input.repoRoot, "packages/provider-chatgpt-browser/assets");
     const providerManifest = path.join(providerSource, "extension/manifest.json");

@@ -1,7 +1,7 @@
 // @effect-diagnostics-next-line nodeBuiltinImport:off -- S8 reads bounded T3-owned attachment bytes before handing them to the private provider feature channel.
-import { createHash } from "node:crypto";
+import * as NodeCrypto from "node:crypto";
 // @effect-diagnostics-next-line nodeBuiltinImport:off -- Attachment bytes are read from the T3-owned resolved path before the private provider transfer.
-import { promises as NodeFs } from "node:fs";
+import * as NodeFS from "node:fs";
 
 import type { ChatAttachment, ModelSelection } from "@t3tools/contracts";
 import type {
@@ -156,7 +156,7 @@ export async function prepareChatGptBrowserAttachments(input: {
     }
     const path = input.resolvePath(attachment);
     if (path === null) throw new Error(`chatgpt_browser_attachment_missing:${attachment.id}`);
-    const bytes = await NodeFs.readFile(path);
+    const bytes = await NodeFS.promises.readFile(path);
     if (bytes.byteLength !== attachment.sizeBytes) {
       throw new Error(`chatgpt_browser_attachment_size_changed:${attachment.id}`);
     }
@@ -165,7 +165,7 @@ export async function prepareChatGptBrowserAttachments(input: {
       name: attachment.name,
       mimeType: attachment.mimeType,
       size: attachment.sizeBytes,
-      sha256: createHash("sha256").update(bytes).digest("hex"),
+      sha256: NodeCrypto.createHash("sha256").update(bytes).digest("hex"),
       bytesBase64: bytes.toString("base64"),
     });
   }

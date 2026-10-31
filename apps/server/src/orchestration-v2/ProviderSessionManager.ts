@@ -191,6 +191,10 @@ export interface ProviderSessionManagerV2Shape {
   }) => Effect.Effect<void, ProviderSessionManagerV2Error>;
 }
 
+const isProviderAdapterEventStreamError = Schema.is(
+  ProviderAdapter.ProviderAdapterEventStreamError,
+);
+
 export class ProviderSessionManagerV2 extends Context.Service<
   ProviderSessionManagerV2,
   ProviderSessionManagerV2Shape
@@ -2106,7 +2110,7 @@ export const layerWithOptions = (
               const streamFailure = Cause.findErrorOption(cause);
               const recoverableStreamLoss =
                 Option.isSome(streamFailure) &&
-                Schema.is(ProviderAdapter.ProviderAdapterEventStreamError)(streamFailure.value) &&
+                isProviderAdapterEventStreamError(streamFailure.value) &&
                 streamFailure.value.recovery === "exact_operation_replay";
               if (recoverableStreamLoss) {
                 // Remove and close the dead runtime before waking consumers. A recovery

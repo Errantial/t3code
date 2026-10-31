@@ -1,8 +1,8 @@
 // @effect-diagnostics nodeBuiltinImport:off - Managed Chromium staging needs native recursive copy,
 // lstat and an incremental digest while stable extension publication preserves the directory inode.
 // OS-specific launch, secret and durable pointer semantics remain behind ChatGptBrowserPlatformPort.
-import { createHash, randomUUID } from "node:crypto";
-import { promises as NodeFs } from "node:fs";
+import * as NodeCrypto from "node:crypto";
+import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
 
 import * as Effect from "effect/Effect";
@@ -33,7 +33,7 @@ const EXTENSION_PUBLISH_LAST = new Set([
 export function chatGptBrowserManagedExtensionBuildId(
   identity: ChatGptBrowserHostIdentity,
 ): string {
-  return createHash("sha256")
+  return NodeCrypto.createHash("sha256")
     .update("t3-chatgpt-browser-extension\0", "utf8")
     .update(identity.providerReleaseVersion, "utf8")
     .digest("hex")
@@ -233,7 +233,7 @@ const readJson = (
 ): Effect.Effect<unknown | null, ChatGptBrowserHostError> =>
   tryFs(operation, async () => {
     try {
-      return JSON.parse(await NodeFs.readFile(file, "utf8")) as unknown;
+      return JSON.parse(await NodeFS.promises.readFile(file, "utf8")) as unknown;
     } catch (cause) {
       if ((cause as NodeJS.ErrnoException).code === "ENOENT") return null;
       throw cause;
@@ -280,7 +280,7 @@ const assertRelativePath = (
 };
 
 const fileExists = (file: string): Promise<boolean> =>
-  NodeFs.stat(file).then(
+  NodeFS.promises.stat(file).then(
     (stat) => stat.isFile(),
     (cause: unknown) => {
       if ((cause as NodeJS.ErrnoException).code === "ENOENT") return false;
@@ -290,7 +290,7 @@ const fileExists = (file: string): Promise<boolean> =>
 
 async function directoryExists(directory: string): Promise<boolean> {
   try {
-    return (await NodeFs.stat(directory)).isDirectory();
+    return (await NodeFS.promises.stat(directory)).isDirectory();
   } catch (cause) {
     if ((cause as NodeJS.ErrnoException).code === "ENOENT") return false;
     throw cause;
@@ -329,28 +329,27 @@ const verifyInstalledAsset = (input: {
 }): Effect.Effect<boolean, ChatGptBrowserHostError> =>
   tryFs(input.operation, async () => {
     if (!(await directoryExists(input.directory))) return false;
-    const raw = await NodeFs.readFile(
-      NodePath.join(input.directory, INSTALL_SENTINEL),
-      "utf8",
-    ).catch((cause: unknown) => {
-      if ((cause as NodeJS.ErrnoException).code === "ENOENT") return null;
-      throw cause;
-    });
+    const raw = await NodeFS.promises
+      .readFile(NodePath.join(input.directory, INSTALL_SENTINEL), "utf8")
+      .catch((cause: unknown) => {
+        if ((cause as NodeJS.ErrnoException).code === "ENOENT") return null;
+        throw cause;
+      });
     if (raw === null) return false;
     const value = JSON.parse(raw) as unknown;
     if (!isSentinel(value) || !sentinelEqual(value, input.sentinel)) return false;
     return fileExists(NodePath.join(input.directory, input.requiredRelativePath));
   });
 
-const installImmutableAsset = (input: {
-  readonly sourceDirectory: string;
-  readonly versionsDirectory: string;
-  readonly versionSegment: string;
-  readonly sentinel: InstalledAssetSentinel;
-  readonly requiredRelativePath: string;
-  readonly operation: string;
-}): Effect.Effect<string, ChatGptBrowserHostError> =>
-  Effect.gen(function* () {
+const installImmutableAsset = Effect.fn("chatgptBrowserHost.installImmutableAsset")(
+  function* (input: {
+    readonly sourceDirectory: string;
+    readonly versionsDirectory: string;
+    readonly versionSegment: string;
+    readonly sentinel: InstalledAssetSentinel;
+    readonly requiredRelativePath: string;
+    readonly operation: string;
+  }) {
     const finalDirectory = NodePath.join(input.versionsDirectory, input.versionSegment);
     const valid = yield* verifyInstalledAsset({
       directory: finalDirectory,
@@ -368,15 +367,15 @@ const installImmutableAsset = (input: {
     }
 
     yield* tryFs(`${input.operation}-preparing-versions-directory`, () =>
-      NodeFs.mkdir(input.versionsDirectory, { recursive: true }),
+      NodeFS.promises.mkdir(input.versionsDirectory, { recursive: true }),
     );
     const stage = NodePath.join(
       input.versionsDirectory,
-      `.staging-${input.versionSegment}-${randomUUID()}`,
+      `.staging-${input.versionSegment}-${NodeCrypto.randomUUID()}`,
     );
     return yield* Effect.gen(function* () {
       yield* tryFs(`${input.operation}-copying-candidate`, () =>
-        NodeFs.cp(input.sourceDirectory, stage, {
+        NodeFS.promises.cp(input.sourceDirectory, stage, {
           recursive: true,
           force: false,
           errorOnExist: true,
@@ -389,30 +388,31 @@ const installImmutableAsset = (input: {
       );
       if (!requiredExists) return yield* hostError(`${input.operation}-missing-required-file`);
       yield* tryFs(`${input.operation}-recording-install`, () =>
-        NodeFs.writeFile(
+        NodeFS.promises.writeFile(
           NodePath.join(stage, INSTALL_SENTINEL),
           `${JSON.stringify(input.sentinel, null, 2)}\n`,
           { mode: 0o600 },
         ),
       );
       yield* tryFs(`${input.operation}-publishing-install`, () =>
-        NodeFs.rename(stage, finalDirectory),
+        NodeFS.promises.rename(stage, finalDirectory),
       );
       return finalDirectory;
     }).pipe(
       Effect.ensuring(
         tryFs(`${input.operation}-cleaning-staging`, () =>
-          NodeFs.rm(stage, { recursive: true, force: true }),
+          NodeFS.promises.rm(stage, { recursive: true, force: true }),
         ).pipe(Effect.ignore),
       ),
     );
-  });
+  },
+);
 
 async function fingerprintExtensionDirectory(root: string): Promise<string> {
-  const hash = createHash("sha256");
+  const hash = NodeCrypto.createHash("sha256");
   const visit = async (directory: string, relativeDirectory = ""): Promise<void> => {
-    const entries = (await NodeFs.readdir(directory, { withFileTypes: true })).sort((left, right) =>
-      left.name.localeCompare(right.name),
+    const entries = (await NodeFS.promises.readdir(directory, { withFileTypes: true })).sort(
+      (left, right) => left.name.localeCompare(right.name),
     );
     for (const entry of entries) {
       const relative = relativeDirectory
@@ -430,7 +430,7 @@ async function fingerprintExtensionDirectory(root: string): Promise<string> {
         await visit(absolute, relative);
       } else if (entry.isFile()) {
         hash.update(`f\0${relative}\0`);
-        hash.update(await NodeFs.readFile(absolute));
+        hash.update(await NodeFS.promises.readFile(absolute));
         hash.update("\0");
       } else {
         throw new Error(`Unsupported extension entry: ${relative}`);
@@ -446,7 +446,7 @@ const fingerprintExtension = (root: string): Effect.Effect<string, ChatGptBrowse
 
 async function entryKind(target: string): Promise<"directory" | "file" | "other" | "missing"> {
   try {
-    const stat = await NodeFs.lstat(target);
+    const stat = await NodeFS.promises.lstat(target);
     if (stat.isDirectory()) return "directory";
     if (stat.isFile()) return "file";
     return "other";
@@ -459,8 +459,8 @@ async function entryKind(target: string): Promise<"directory" | "file" | "other"
 async function ensureDirectory(target: string): Promise<void> {
   const kind = await entryKind(target);
   if (kind === "directory") return;
-  if (kind !== "missing") await NodeFs.rm(target, { recursive: true, force: true });
-  await NodeFs.mkdir(target, { recursive: true });
+  if (kind !== "missing") await NodeFS.promises.rm(target, { recursive: true, force: true });
+  await NodeFS.promises.mkdir(target, { recursive: true });
 }
 
 async function validExtension(directory: string): Promise<boolean> {
@@ -470,8 +470,9 @@ async function validExtension(directory: string): Promise<boolean> {
 async function materializedFingerprint(directory: string): Promise<string | null> {
   try {
     return (
-      (await NodeFs.readFile(NodePath.join(directory, EXTENSION_FINGERPRINT), "utf8")).trim() ||
-      null
+      (
+        await NodeFS.promises.readFile(NodePath.join(directory, EXTENSION_FINGERPRINT), "utf8")
+      ).trim() || null
     );
   } catch (cause) {
     if ((cause as NodeJS.ErrnoException).code === "ENOENT") return null;
@@ -483,14 +484,14 @@ async function replaceExtensionFile(source: string, target: string): Promise<voi
   await ensureDirectory(NodePath.dirname(target));
   const temporary = NodePath.join(
     NodePath.dirname(target),
-    `.${NodePath.basename(target)}.t3-next-${process.pid}-${randomUUID()}`,
+    `.${NodePath.basename(target)}.t3-next-${process.pid}-${NodeCrypto.randomUUID()}`,
   );
-  await NodeFs.rm(temporary, { recursive: true, force: true });
-  await NodeFs.copyFile(source, temporary);
-  await NodeFs.chmod(temporary, (await NodeFs.stat(source)).mode);
+  await NodeFS.promises.rm(temporary, { recursive: true, force: true });
+  await NodeFS.promises.copyFile(source, temporary);
+  await NodeFS.promises.chmod(temporary, (await NodeFS.promises.stat(source)).mode);
   if ((await entryKind(target)) !== "missing")
-    await NodeFs.rm(target, { recursive: true, force: true });
-  await NodeFs.rename(temporary, target);
+    await NodeFS.promises.rm(target, { recursive: true, force: true });
+  await NodeFS.promises.rename(temporary, target);
 }
 
 async function writeExtensionBuildStamp(directory: string, buildId: string): Promise<void> {
@@ -498,10 +499,10 @@ async function writeExtensionBuildStamp(directory: string, buildId: string): Pro
   const target = NodePath.join(directory, EXTENSION_BUILD_STAMP);
   const temporary = NodePath.join(
     directory,
-    `.${EXTENSION_BUILD_STAMP}.t3-next-${process.pid}-${randomUUID()}`,
+    `.${EXTENSION_BUILD_STAMP}.t3-next-${process.pid}-${NodeCrypto.randomUUID()}`,
   );
-  await NodeFs.writeFile(temporary, `${buildId}\n`, { mode: 0o600 });
-  await NodeFs.rename(temporary, target);
+  await NodeFS.promises.writeFile(temporary, `${buildId}\n`, { mode: 0o600 });
+  await NodeFS.promises.rename(temporary, target);
 }
 
 async function writeExtensionBuildModule(directory: string, buildId: string): Promise<void> {
@@ -509,21 +510,21 @@ async function writeExtensionBuildModule(directory: string, buildId: string): Pr
   const target = NodePath.join(directory, EXTENSION_BUILD_MODULE);
   const temporary = NodePath.join(
     directory,
-    `.${EXTENSION_BUILD_MODULE}.t3-next-${process.pid}-${randomUUID()}`,
+    `.${EXTENSION_BUILD_MODULE}.t3-next-${process.pid}-${NodeCrypto.randomUUID()}`,
   );
-  await NodeFs.writeFile(
+  await NodeFS.promises.writeFile(
     temporary,
     `export const T3_MANAGED_EXTENSION_BUILD_ID = ${JSON.stringify(buildId)};\n`,
     { mode: 0o600 },
   );
-  await NodeFs.rename(temporary, target);
+  await NodeFS.promises.rename(temporary, target);
 }
 
 async function materializedBuildMatches(directory: string, buildId: string): Promise<boolean> {
   try {
     const [stamp, module] = await Promise.all([
-      NodeFs.readFile(NodePath.join(directory, EXTENSION_BUILD_STAMP), "utf8"),
-      NodeFs.readFile(NodePath.join(directory, EXTENSION_BUILD_MODULE), "utf8"),
+      NodeFS.promises.readFile(NodePath.join(directory, EXTENSION_BUILD_STAMP), "utf8"),
+      NodeFS.promises.readFile(NodePath.join(directory, EXTENSION_BUILD_MODULE), "utf8"),
     ]);
     return (
       stamp.trim() === buildId &&
@@ -541,7 +542,7 @@ async function syncExtensionTreeInPlace(
   root = true,
 ): Promise<void> {
   await ensureDirectory(target);
-  const sourceEntries = (await NodeFs.readdir(source, { withFileTypes: true })).sort(
+  const sourceEntries = (await NodeFS.promises.readdir(source, { withFileTypes: true })).sort(
     (left, right) => left.name.localeCompare(right.name),
   );
   const sourceNames = new Set(sourceEntries.map((entry) => entry.name));
@@ -567,9 +568,9 @@ async function syncExtensionTreeInPlace(
   };
 
   for (const entry of ordinary) await publish(entry);
-  for (const entry of await NodeFs.readdir(target, { withFileTypes: true })) {
+  for (const entry of await NodeFS.promises.readdir(target, { withFileTypes: true })) {
     if (sourceNames.has(entry.name)) continue;
-    await NodeFs.rm(NodePath.join(target, entry.name), { recursive: true, force: true });
+    await NodeFS.promises.rm(NodePath.join(target, entry.name), { recursive: true, force: true });
   }
   for (const entry of publishLast) await publish(entry);
 }
@@ -582,12 +583,12 @@ async function recoverInterruptedExtensionMaterialization(
   if (await validExtension(backup)) {
     if ((await entryKind(stable)) === "directory") await syncExtensionTreeInPlace(backup, stable);
     else {
-      await NodeFs.rm(stable, { recursive: true, force: true });
-      await NodeFs.cp(backup, stable, { recursive: true, force: true });
+      await NodeFS.promises.rm(stable, { recursive: true, force: true });
+      await NodeFS.promises.cp(backup, stable, { recursive: true, force: true });
     }
     if (await validExtension(stable)) {
-      await NodeFs.rm(backup, { recursive: true, force: true });
-      await NodeFs.rm(stage, { recursive: true, force: true });
+      await NodeFS.promises.rm(backup, { recursive: true, force: true });
+      await NodeFS.promises.rm(stage, { recursive: true, force: true });
     }
     return;
   }
@@ -595,31 +596,28 @@ async function recoverInterruptedExtensionMaterialization(
   if ((await validExtension(stage)) && (await materializedFingerprint(stage)) !== null) {
     if ((await entryKind(stable)) === "directory") {
       await syncExtensionTreeInPlace(stage, stable);
-      if (await validExtension(stable)) await NodeFs.rm(stage, { recursive: true, force: true });
+      if (await validExtension(stable))
+        await NodeFS.promises.rm(stage, { recursive: true, force: true });
     } else {
-      await NodeFs.rm(stable, { recursive: true, force: true });
-      await NodeFs.rename(stage, stable);
+      await NodeFS.promises.rm(stable, { recursive: true, force: true });
+      await NodeFS.promises.rename(stage, stable);
     }
     return;
   }
 
   if (await validExtension(stable)) {
-    await NodeFs.rm(stage, { recursive: true, force: true });
-    await NodeFs.rm(backup, { recursive: true, force: true });
+    await NodeFS.promises.rm(stage, { recursive: true, force: true });
+    await NodeFS.promises.rm(backup, { recursive: true, force: true });
   }
 }
 
-const materializeStableExtension = (
-  source: string,
-  stable: string,
-  buildId: string,
-): Effect.Effect<void, ChatGptBrowserHostError> =>
-  Effect.gen(function* () {
+const materializeStableExtension = Effect.fn("chatgptBrowserHost.materializeStableExtension")(
+  function* (source: string, stable: string, buildId: string) {
     const fingerprint = yield* fingerprintExtension(source);
     yield* tryFs("materializing-extension", async () => {
       const stage = `${stable}.new`;
       const backup = `${stable}.old`;
-      await NodeFs.mkdir(NodePath.dirname(stable), { recursive: true });
+      await NodeFS.promises.mkdir(NodePath.dirname(stable), { recursive: true });
       await recoverInterruptedExtensionMaterialization(stable, stage, backup);
       if (!(await validExtension(source)))
         throw new Error("Provider extension is missing manifest.json");
@@ -634,23 +632,27 @@ const materializeStableExtension = (
           return;
       }
 
-      await NodeFs.rm(stage, { recursive: true, force: true });
+      await NodeFS.promises.rm(stage, { recursive: true, force: true });
       try {
-        await NodeFs.cp(source, stage, { recursive: true, force: true });
+        await NodeFS.promises.cp(source, stage, { recursive: true, force: true });
         if (!(await validExtension(stage)))
           throw new Error("Staged extension is missing manifest.json");
         await writeExtensionBuildModule(stage, buildId);
         await writeExtensionBuildStamp(stage, buildId);
-        await NodeFs.writeFile(NodePath.join(stage, EXTENSION_FINGERPRINT), `${fingerprint}\n`, {
-          mode: 0o600,
-        });
+        await NodeFS.promises.writeFile(
+          NodePath.join(stage, EXTENSION_FINGERPRINT),
+          `${fingerprint}\n`,
+          {
+            mode: 0o600,
+          },
+        );
 
-        await NodeFs.rm(backup, { recursive: true, force: true });
+        await NodeFS.promises.rm(backup, { recursive: true, force: true });
         const stableKind = await entryKind(stable);
         const hadPublishedDirectory = stableKind === "directory";
         const hadValidPublishedCopy = await validExtension(stable);
         if (hadValidPublishedCopy)
-          await NodeFs.cp(stable, backup, { recursive: true, force: true });
+          await NodeFS.promises.cp(stable, backup, { recursive: true, force: true });
 
         if (hadPublishedDirectory) {
           await syncExtensionTreeInPlace(stage, stable);
@@ -660,69 +662,63 @@ const materializeStableExtension = (
           ) {
             throw new Error("Published extension did not match staged source");
           }
-          await NodeFs.rm(stage, { recursive: true, force: true });
+          await NodeFS.promises.rm(stage, { recursive: true, force: true });
         } else {
-          await NodeFs.rm(stable, { recursive: true, force: true });
-          await NodeFs.rename(stage, stable);
+          await NodeFS.promises.rm(stable, { recursive: true, force: true });
+          await NodeFS.promises.rename(stage, stable);
         }
-        await NodeFs.rm(backup, { recursive: true, force: true });
+        await NodeFS.promises.rm(backup, { recursive: true, force: true });
       } catch (cause) {
         if (await validExtension(backup)) {
           if ((await entryKind(stable)) === "directory")
             await syncExtensionTreeInPlace(backup, stable);
           else {
-            await NodeFs.rm(stable, { recursive: true, force: true });
-            await NodeFs.cp(backup, stable, { recursive: true, force: true });
+            await NodeFS.promises.rm(stable, { recursive: true, force: true });
+            await NodeFS.promises.cp(backup, stable, { recursive: true, force: true });
           }
         }
         if (await validExtension(stable)) {
-          await NodeFs.rm(stage, { recursive: true, force: true });
-          await NodeFs.rm(backup, { recursive: true, force: true });
+          await NodeFS.promises.rm(stage, { recursive: true, force: true });
+          await NodeFS.promises.rm(backup, { recursive: true, force: true });
         }
         throw cause;
       }
     });
-  });
+  },
+);
 
-const installedReleasePaths = (
+const installedReleasePaths = Effect.fn("chatgptBrowserHost.installedReleasePaths")(function* (
   paths: ChatGptBrowserPlatformPaths,
   release: ChatGptBrowserManagedReleaseDescriptor,
-): Effect.Effect<InstalledReleasePaths, ChatGptBrowserHostError> =>
-  Effect.gen(function* () {
-    const browserRevision = yield* cleanSegment(
-      release.identity.browserRevision,
-      "browser-revision",
-    );
-    const providerReleaseVersion = yield* cleanSegment(
-      release.identity.providerReleaseVersion,
-      "provider-release-version",
-    );
-    const browserExecutableRelativePath = yield* assertRelativePath(
-      release.browserExecutableRelativePath,
-      "browser-executable-path",
-    );
-    const extensionRelativePath = yield* assertRelativePath(
-      release.extensionRelativePath,
-      "extension-path",
-    );
-    const browserDirectory = NodePath.join(paths.browserVersionsDirectory, browserRevision);
-    const providerDirectory = NodePath.join(
-      paths.providerVersionsDirectory,
-      providerReleaseVersion,
-    );
-    return {
-      browserDirectory,
-      providerDirectory,
-      browserExecutablePath: NodePath.join(browserDirectory, browserExecutableRelativePath),
-      extensionDirectory: NodePath.join(providerDirectory, extensionRelativePath),
-    };
-  });
+) {
+  const browserRevision = yield* cleanSegment(release.identity.browserRevision, "browser-revision");
+  const providerReleaseVersion = yield* cleanSegment(
+    release.identity.providerReleaseVersion,
+    "provider-release-version",
+  );
+  const browserExecutableRelativePath = yield* assertRelativePath(
+    release.browserExecutableRelativePath,
+    "browser-executable-path",
+  );
+  const extensionRelativePath = yield* assertRelativePath(
+    release.extensionRelativePath,
+    "extension-path",
+  );
+  const browserDirectory = NodePath.join(paths.browserVersionsDirectory, browserRevision);
+  const providerDirectory = NodePath.join(paths.providerVersionsDirectory, providerReleaseVersion);
+  return {
+    browserDirectory,
+    providerDirectory,
+    browserExecutablePath: NodePath.join(browserDirectory, browserExecutableRelativePath),
+    extensionDirectory: NodePath.join(providerDirectory, extensionRelativePath),
+  };
+});
 
-const requireInstalledRelease = (input: {
-  readonly paths: ChatGptBrowserPlatformPaths;
-  readonly release: ChatGptBrowserManagedReleaseDescriptor;
-}): Effect.Effect<InstalledReleasePaths, ChatGptBrowserHostError> =>
-  Effect.gen(function* () {
+const requireInstalledRelease = Effect.fn("chatgptBrowserHost.requireInstalledRelease")(
+  function* (input: {
+    readonly paths: ChatGptBrowserPlatformPaths;
+    readonly release: ChatGptBrowserManagedReleaseDescriptor;
+  }) {
     const resolved = yield* installedReleasePaths(input.paths, input.release);
     const browserExecutableRelativePath = yield* assertRelativePath(
       input.release.browserExecutableRelativePath,
@@ -750,76 +746,76 @@ const requireInstalledRelease = (input: {
       return yield* hostError("resolving-installed-release");
     }
     return resolved;
-  });
+  },
+);
 
-const installRelease = (input: {
+const installRelease = Effect.fn("chatgptBrowserHost.installRelease")(function* (input: {
   readonly paths: ChatGptBrowserPlatformPaths;
   readonly release: ChatGptBrowserManagedReleaseSource;
-}): Effect.Effect<InstalledReleasePaths, ChatGptBrowserHostError> =>
-  Effect.gen(function* () {
-    const descriptor = descriptorFromSource(input.release);
-    const browserRevision = yield* cleanSegment(
-      descriptor.identity.browserRevision,
-      "browser-revision",
-    );
-    const providerReleaseVersion = yield* cleanSegment(
-      descriptor.identity.providerReleaseVersion,
-      "provider-release-version",
-    );
-    const browserExecutableRelativePath = yield* assertRelativePath(
-      descriptor.browserExecutableRelativePath,
-      "browser-executable-path",
-    );
-    const extensionRelativePath = yield* assertRelativePath(
-      descriptor.extensionRelativePath,
-      "extension-path",
-    );
-    yield* Effect.all([
-      installImmutableAsset({
-        sourceDirectory: input.release.browserSourceDirectory,
-        versionsDirectory: input.paths.browserVersionsDirectory,
-        versionSegment: browserRevision,
-        sentinel: expectedSentinel("browser", descriptor.identity),
-        requiredRelativePath: browserExecutableRelativePath,
-        operation: "installing-browser",
-      }),
-      installImmutableAsset({
-        sourceDirectory: input.release.providerSourceDirectory,
-        versionsDirectory: input.paths.providerVersionsDirectory,
-        versionSegment: providerReleaseVersion,
-        sentinel: expectedSentinel("provider", descriptor.identity),
-        requiredRelativePath: NodePath.join(extensionRelativePath, "manifest.json"),
-        operation: "installing-provider",
-      }),
-    ]);
-    return yield* requireInstalledRelease({ paths: input.paths, release: descriptor });
-  });
+}) {
+  const descriptor = descriptorFromSource(input.release);
+  const browserRevision = yield* cleanSegment(
+    descriptor.identity.browserRevision,
+    "browser-revision",
+  );
+  const providerReleaseVersion = yield* cleanSegment(
+    descriptor.identity.providerReleaseVersion,
+    "provider-release-version",
+  );
+  const browserExecutableRelativePath = yield* assertRelativePath(
+    descriptor.browserExecutableRelativePath,
+    "browser-executable-path",
+  );
+  const extensionRelativePath = yield* assertRelativePath(
+    descriptor.extensionRelativePath,
+    "extension-path",
+  );
+  yield* Effect.all([
+    installImmutableAsset({
+      sourceDirectory: input.release.browserSourceDirectory,
+      versionsDirectory: input.paths.browserVersionsDirectory,
+      versionSegment: browserRevision,
+      sentinel: expectedSentinel("browser", descriptor.identity),
+      requiredRelativePath: browserExecutableRelativePath,
+      operation: "installing-browser",
+    }),
+    installImmutableAsset({
+      sourceDirectory: input.release.providerSourceDirectory,
+      versionsDirectory: input.paths.providerVersionsDirectory,
+      versionSegment: providerReleaseVersion,
+      sentinel: expectedSentinel("provider", descriptor.identity),
+      requiredRelativePath: NodePath.join(extensionRelativePath, "manifest.json"),
+      operation: "installing-provider",
+    }),
+  ]);
+  return yield* requireInstalledRelease({ paths: input.paths, release: descriptor });
+});
 
-const makeDisposableValidation = (input: {
-  readonly platform: ChatGptBrowserPlatformPort;
-  readonly paths: ChatGptBrowserPlatformPaths;
-  readonly release: ChatGptBrowserManagedReleaseSource;
-  readonly installed: InstalledReleasePaths;
-  readonly validateCandidate: ChatGptBrowserManagedHostOptions["validateCandidate"];
-}): Effect.Effect<void, ChatGptBrowserHostError> =>
-  Effect.gen(function* () {
+const makeDisposableValidation = Effect.fn("chatgptBrowserHost.makeDisposableValidation")(
+  function* (input: {
+    readonly platform: ChatGptBrowserPlatformPort;
+    readonly paths: ChatGptBrowserPlatformPaths;
+    readonly release: ChatGptBrowserManagedReleaseSource;
+    readonly installed: InstalledReleasePaths;
+    readonly validateCandidate: ChatGptBrowserManagedHostOptions["validateCandidate"];
+  }) {
     yield* tryFs("preparing-disposable-browser-validation", () =>
-      NodeFs.mkdir(NodePath.dirname(input.paths.profileDirectory), { recursive: true }),
+      NodeFS.promises.mkdir(NodePath.dirname(input.paths.profileDirectory), { recursive: true }),
     );
     const disposableRoot = yield* tryFs("preparing-disposable-browser-validation", () =>
-      NodeFs.mkdtemp(
+      NodeFS.promises.mkdtemp(
         NodePath.join(NodePath.dirname(input.paths.profileDirectory), ".chatgpt-browser-validate-"),
       ),
     );
     const disposableProfile = NodePath.join(disposableRoot, "profile");
     const disposableExtension = NodePath.join(disposableRoot, "extension");
     const cleanup = tryFs("cleaning-disposable-browser-validation", () =>
-      NodeFs.rm(disposableRoot, { recursive: true, force: true }),
+      NodeFS.promises.rm(disposableRoot, { recursive: true, force: true }),
     );
     yield* Effect.gen(function* () {
       yield* tryFs("preparing-disposable-browser-validation", async () => {
-        await NodeFs.mkdir(disposableProfile, { recursive: true });
-        await NodeFs.cp(input.installed.extensionDirectory, disposableExtension, {
+        await NodeFS.promises.mkdir(disposableProfile, { recursive: true });
+        await NodeFS.promises.cp(input.installed.extensionDirectory, disposableExtension, {
           recursive: true,
           force: true,
         });
@@ -845,7 +841,8 @@ const makeDisposableValidation = (input: {
       yield* input.platform.stopBrowser(process);
     }).pipe(Effect.onError(() => cleanup.pipe(Effect.ignore)));
     yield* cleanup;
-  });
+  },
+);
 
 function pointerForActivation(
   active: ChatGptBrowserManagedReleaseDescriptor,
@@ -998,7 +995,7 @@ export function makeChatGptBrowserHost(
           chatGptBrowserManagedExtensionBuildId(pointer.active.identity),
         );
         yield* tryFs("preparing-browser-profile", () =>
-          NodeFs.mkdir(paths.profileDirectory, { recursive: true }),
+          NodeFS.promises.mkdir(paths.profileDirectory, { recursive: true }),
         );
         const process = yield* options.platform.launchBrowser({
           executablePath: installed.browserExecutablePath,

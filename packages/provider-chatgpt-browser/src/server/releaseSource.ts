@@ -1,8 +1,8 @@
 // @effect-diagnostics nodeBuiltinImport:off -- Release-source resolution is the native packaging boundary for immutable browser/provider assets.
-import { createHash } from "node:crypto";
-import { promises as NodeFs } from "node:fs";
+import * as NodeCrypto from "node:crypto";
+import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
-import * as NodeUrl from "node:url";
+import * as NodeURL from "node:url";
 
 import type { ChatGptBrowserManagedReleaseSource } from "@t3tools/provider-core/server/chatgptBrowserHost";
 import { chatGptBrowserManagedTargetForHost } from "@t3tools/provider-core/server/chatgptBrowserPlatform";
@@ -36,7 +36,7 @@ interface ExtensionManifest {
 
 async function exists(path: string): Promise<boolean> {
   try {
-    return (await NodeFs.stat(path)).isFile();
+    return (await NodeFS.promises.stat(path)).isFile();
   } catch (cause) {
     if ((cause as NodeJS.ErrnoException).code === "ENOENT") return false;
     throw cause;
@@ -45,7 +45,7 @@ async function exists(path: string): Promise<boolean> {
 
 async function directoryExists(path: string): Promise<boolean> {
   try {
-    return (await NodeFs.stat(path)).isDirectory();
+    return (await NodeFS.promises.stat(path)).isDirectory();
   } catch (cause) {
     if ((cause as NodeJS.ErrnoException).code === "ENOENT") return false;
     throw cause;
@@ -53,10 +53,10 @@ async function directoryExists(path: string): Promise<boolean> {
 }
 
 async function directoryHash(root: string): Promise<string> {
-  const hash = createHash("sha256");
+  const hash = NodeCrypto.createHash("sha256");
   const visit = async (directory: string, relative: string): Promise<void> => {
-    const entries = (await NodeFs.readdir(directory, { withFileTypes: true })).sort((left, right) =>
-      left.name.localeCompare(right.name),
+    const entries = (await NodeFS.promises.readdir(directory, { withFileTypes: true })).sort(
+      (left, right) => left.name.localeCompare(right.name),
     );
     for (const entry of entries) {
       const childRelative = relative ? `${relative}/${entry.name}` : entry.name;
@@ -66,7 +66,7 @@ async function directoryHash(root: string): Promise<string> {
         await visit(absolute, childRelative);
       } else if (entry.isFile()) {
         hash.update(`f\0${childRelative}\0`);
-        hash.update(await NodeFs.readFile(absolute));
+        hash.update(await NodeFS.promises.readFile(absolute));
         hash.update("\0");
       } else {
         throw new Error(`Unsupported provider asset entry: ${childRelative}`);
@@ -78,7 +78,7 @@ async function directoryHash(root: string): Promise<string> {
 }
 
 function defaultProviderAssetsDirectory(): string {
-  return NodeUrl.fileURLToPath(new URL("../../assets/", import.meta.url));
+  return NodeURL.fileURLToPath(new URL("../../assets/", import.meta.url));
 }
 
 function playwrightRoot(
@@ -148,7 +148,9 @@ export async function resolveNativeChatGptBrowserReleaseSource(
   options: NativeChatGptBrowserReleaseSourceOptions = {},
 ): Promise<ChatGptBrowserManagedReleaseSource> {
   const environment = options.environment ?? process.env;
+  // oxlint-disable-next-line t3code/no-global-process-runtime -- resolves the packaged host outside Effect
   const platform = options.platform ?? process.platform;
+  // oxlint-disable-next-line t3code/no-global-process-runtime -- resolves the packaged host outside Effect
   const architecture = options.architecture ?? process.arch;
   const target = chatGptBrowserManagedTargetForHost(platform, architecture);
   if (!target)
@@ -174,7 +176,9 @@ export async function resolveNativeChatGptBrowserReleaseSource(
   const manifestPath = NodePath.join(extensionDirectory, "manifest.json");
   let manifest: ExtensionManifest;
   try {
-    manifest = JSON.parse(await NodeFs.readFile(manifestPath, "utf8")) as ExtensionManifest;
+    manifest = JSON.parse(
+      await NodeFS.promises.readFile(manifestPath, "utf8"),
+    ) as ExtensionManifest;
   } catch (cause) {
     throw new Error("Managed ChatGPT provider extension manifest is unavailable", { cause });
   }
@@ -213,13 +217,9 @@ export async function resolveNativeChatGptBrowserReleaseSource(
     providerSourceDirectory: providerAssetsDirectory,
     browserExecutableRelativePath: chromium.executable,
     extensionRelativePath: "extension",
-    // Starting Chromium minimized can leave an unpacked MV3 worker asleep until foreground
-    // activation. A crashed prior profile can also restore without committing the command-line
-    // wake URL. Force a fresh ordinary window, keep it off-screen, and suppress the crash bubble;
-    // the document_start wake script then deterministically primes provider-v1 in the background.
-    // Preserve the qualified CoS browser's Windows anti-throttling policy as well: an off-screen
-    // renderer must keep observing/recording the turn after Send rather than requiring a later
-    // restart to recover a response that ChatGPT already completed.
+    // A minimized start can leave the MV3 worker asleep and a crashed profile can restore without
+    // the wake URL, so force a fresh off-screen window and suppress the crash bubble. Keep the
+    // Windows anti-throttling policy: the off-screen renderer must keep observing the turn.
     ...(target === "windows-x64"
       ? {
           browserArgs: [

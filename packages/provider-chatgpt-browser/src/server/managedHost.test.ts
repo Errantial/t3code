@@ -30,7 +30,7 @@ describe("shared managed ChatGPT browser host", () => {
         };
         const physical: ChatGptBrowserHostService = {
           readiness: Effect.succeed(identity),
-        controlTab: () => Effect.succeed({ conversationId: "test-conversation" }),
+          controlTab: () => Effect.succeed({ conversationId: "test-conversation" }),
           status: Effect.succeed({
             identity,
             authentication: "authenticated",

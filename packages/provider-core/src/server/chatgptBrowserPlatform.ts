@@ -1,10 +1,10 @@
 // @effect-diagnostics nodeBuiltinImport:off - The managed-browser platform boundary intentionally
 // owns native filesystem durability, process launch/containment and host prerequisite probes.
 import * as NodeChildProcess from "node:child_process";
-import { randomUUID } from "node:crypto";
-import { promises as NodeFs } from "node:fs";
+import * as NodeCrypto from "node:crypto";
+import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
-import { setTimeout as sleep } from "node:timers/promises";
+import * as NodeTimersPromises from "node:timers/promises";
 
 import * as Effect from "effect/Effect";
 
@@ -233,7 +233,7 @@ const nativeRuntime = (environment: NodeJS.ProcessEnv): ChatGptBrowserPlatformRu
   runCommand: (command, args) => commandResult(command, args, environment),
   readTextFile: async (path) => {
     try {
-      return await NodeFs.readFile(path, "utf8");
+      return await NodeFS.promises.readFile(path, "utf8");
     } catch (cause) {
       if ((cause as NodeJS.ErrnoException).code === "ENOENT") return null;
       throw cause;
@@ -249,7 +249,7 @@ const nativeRuntime = (environment: NodeJS.ProcessEnv): ChatGptBrowserPlatformRu
       throw cause;
     }
   },
-  sleep: (milliseconds) => sleep(milliseconds),
+  sleep: (milliseconds) => NodeTimersPromises.setTimeout(milliseconds),
 });
 
 export function chatGptBrowserManagedTargetForHost(
@@ -285,7 +285,7 @@ function validateSecretKey(key: string): Effect.Effect<string, ChatGptBrowserHos
 }
 
 async function syncDirectory(directory: string): Promise<void> {
-  const handle = await NodeFs.open(directory, "r");
+  const handle = await NodeFS.promises.open(directory, "r");
   try {
     await handle.sync();
   } finally {
@@ -302,7 +302,7 @@ async function renameWithWindowsSharingRetries(
   for (const delay of WINDOWS_RENAME_RETRY_DELAYS_MS) {
     if (delay > 0) await runtime.sleep(delay);
     try {
-      await NodeFs.rename(source, destination);
+      await NodeFS.promises.rename(source, destination);
       return;
     } catch (cause) {
       lastCause = cause;
@@ -320,35 +320,38 @@ async function replaceFileAtomically(input: {
 }): Promise<void> {
   const path = input.target === "windows-x64" ? NodePath.win32 : NodePath.posix;
   const directory = path.dirname(input.path);
-  const temporary = path.join(directory, `.${path.basename(input.path)}.next-${randomUUID()}`);
+  const temporary = path.join(
+    directory,
+    `.${path.basename(input.path)}.next-${NodeCrypto.randomUUID()}`,
+  );
   let directoryExisted = true;
   try {
-    directoryExisted = (await NodeFs.stat(directory)).isDirectory();
+    directoryExisted = (await NodeFS.promises.stat(directory)).isDirectory();
   } catch (cause) {
     if ((cause as NodeJS.ErrnoException).code !== "ENOENT") throw cause;
     directoryExisted = false;
   }
-  await NodeFs.mkdir(directory, { recursive: true });
+  await NodeFS.promises.mkdir(directory, { recursive: true });
   if (input.target === "linux-x64" && !directoryExisted) {
     await syncDirectory(path.dirname(directory));
   }
   try {
-    const file = await NodeFs.open(temporary, "wx", 0o600);
+    const file = await NodeFS.promises.open(temporary, "wx", 0o600);
     try {
       await file.writeFile(input.contents);
       await file.sync();
     } finally {
       await file.close();
     }
-    await NodeFs.chmod(temporary, 0o600);
+    await NodeFS.promises.chmod(temporary, 0o600);
     if (input.target === "windows-x64") {
       await renameWithWindowsSharingRetries(temporary, input.path, input.runtime);
     } else {
-      await NodeFs.rename(temporary, input.path);
+      await NodeFS.promises.rename(temporary, input.path);
       await syncDirectory(directory);
     }
   } finally {
-    await NodeFs.rm(temporary, { force: true }).catch(() => undefined);
+    await NodeFS.promises.rm(temporary, { force: true }).catch(() => undefined);
   }
 }
 
@@ -619,11 +622,11 @@ function makePlatform(
   const ensureSecretDirectory = (): Promise<void> => {
     if (secretDirectoryReady !== undefined) return secretDirectoryReady;
     secretDirectoryReady = (async () => {
-      await NodeFs.mkdir(paths.secretsDirectory, { recursive: true, mode: 0o700 });
+      await NodeFS.promises.mkdir(paths.secretsDirectory, { recursive: true, mode: 0o700 });
       if (target === "windows-x64") {
         await secureWindowsPath(paths.secretsDirectory, "directory", environment, runtime);
       } else {
-        await NodeFs.chmod(paths.secretsDirectory, 0o700);
+        await NodeFS.promises.chmod(paths.secretsDirectory, 0o700);
         await syncDirectory(path.dirname(paths.secretsDirectory));
       }
     })().catch((cause) => {
@@ -643,7 +646,7 @@ function makePlatform(
     if (target === "windows-x64") {
       await secureWindowsPath(secretPath, "file", environment, runtime);
     } else {
-      await NodeFs.chmod(secretPath, 0o600);
+      await NodeFS.promises.chmod(secretPath, 0o600);
     }
     securedSecretFiles.add(secretPath);
   };
@@ -672,7 +675,7 @@ function makePlatform(
       if (!Number.isSafeInteger(spawned.pid) || spawned.pid <= 1) {
         return yield* hostError("validating-managed-browser-pid");
       }
-      const opaqueId = randomUUID();
+      const opaqueId = NodeCrypto.randomUUID();
       processes.set(opaqueId, spawned);
       return { opaqueId } satisfies ChatGptBrowserProcessHandle;
     }),
@@ -697,7 +700,7 @@ function makePlatform(
       yield* tryPlatform("securing-browser-secret-directory", ensureSecretDirectory);
       const exists = yield* tryPlatform("checking-browser-secret", async () => {
         try {
-          return (await NodeFs.stat(secretPath)).isFile();
+          return (await NodeFS.promises.stat(secretPath)).isFile();
         } catch (cause) {
           if ((cause as NodeJS.ErrnoException).code === "ENOENT") return false;
           throw cause;
@@ -706,7 +709,7 @@ function makePlatform(
       if (!exists) return null;
       yield* tryPlatform("securing-browser-secret-file", () => secureSecretFile(secretPath));
       return yield* tryPlatform("reading-browser-secret", async () =>
-        Uint8Array.from(await NodeFs.readFile(secretPath)),
+        Uint8Array.from(await NodeFS.promises.readFile(secretPath)),
       );
     }),
     writeSecret: Effect.fn("writeSecret")(function* ({ key, value }) {
@@ -722,7 +725,7 @@ function makePlatform(
       const secretPath = yield* resolveSecret(key);
       yield* tryPlatform("securing-browser-secret-directory", ensureSecretDirectory);
       yield* tryPlatform("deleting-browser-secret", async () => {
-        await NodeFs.rm(secretPath, { force: true });
+        await NodeFS.promises.rm(secretPath, { force: true });
         if (target === "linux-x64") await syncDirectory(paths.secretsDirectory);
       });
       securedSecretFiles.delete(secretPath);
@@ -745,7 +748,9 @@ export function makeLinuxChatGptBrowserPlatform(
 export function makeChatGptBrowserPlatformForHost(
   options: ChatGptBrowserHostPlatformOptions,
 ): Effect.Effect<ChatGptBrowserPlatformPort, ChatGptBrowserHostError> {
+  // oxlint-disable-next-line t3code/no-global-process-runtime -- resolves the host target outside the Effect graph
   const platform = options.platform ?? process.platform;
+  // oxlint-disable-next-line t3code/no-global-process-runtime -- resolves the host target outside the Effect graph
   const architecture = options.architecture ?? process.arch;
   const target = chatGptBrowserManagedTargetForHost(platform, architecture);
   if (target === null) {

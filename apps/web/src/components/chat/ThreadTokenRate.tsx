@@ -1,5 +1,4 @@
 import type { ScopedThreadRef } from "@t3tools/contracts";
-import { useMemo } from "react";
 
 import { deriveTokenThroughput, formatTokensPerSecond } from "~/lib/tokenThroughput";
 import { useThreadProjection } from "../../state/entities";
@@ -16,10 +15,7 @@ export function useThreadTokenRate(threadRef: ScopedThreadRef | null | undefined
   const { enabled, setEnabled } = useThreadTokenRatePreference(threadRef ?? null);
   const providerTurns = useThreadProjection(enabled ? (threadRef ?? null) : null)?.projection
     .providerTurns;
-  const throughput = useMemo(
-    () => (enabled && providerTurns ? deriveTokenThroughput(providerTurns) : null),
-    [enabled, providerTurns],
-  );
+  const throughput = enabled && providerTurns ? deriveTokenThroughput(providerTurns) : null;
   return { enabled, setEnabled, throughput };
 }
 

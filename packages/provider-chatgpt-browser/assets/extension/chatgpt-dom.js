@@ -4202,7 +4202,12 @@ var CLF_DOM = (() => {
     if (!closed) failure("picker_close_failed");
     return restored && closed && stillCurrent() && result.size ? [...result.values()] : null;
   }
-  async function selectModelSettings(model, effort, stillCurrent = () => true, exactEffort = false) {
+  async function selectModelSettings(
+    model,
+    effort,
+    stillCurrent = () => true,
+    exactEffort = false,
+  ) {
     if (!model && !effort) return true;
     const ui = modelPickerAccess(stillCurrent),
       original = await ui.open();

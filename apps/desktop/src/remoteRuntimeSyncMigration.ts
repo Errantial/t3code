@@ -1,3 +1,4 @@
+// @effect-diagnostics nodeBuiltinImport:off -- Electron main migration has no Effect runtime.
 import * as NodeChildProcess from "node:child_process";
 import * as NodeFSP from "node:fs/promises";
 import * as NodePath from "node:path";

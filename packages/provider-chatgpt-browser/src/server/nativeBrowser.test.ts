@@ -25,6 +25,13 @@ function requestJson<T>(input: {
   readonly body?: unknown;
 }): Promise<{ readonly status: number; readonly body: T }> {
   const encoded = input.body === undefined ? undefined : JSON.stringify(input.body);
+  const headers: Record<string, string> = { ...peerHeaders };
+  if (input.headers !== undefined) {
+    Object.assign(headers, input.headers);
+  }
+  if (encoded !== undefined) {
+    headers["content-length"] = String(Buffer.byteLength(encoded));
+  }
   return new Promise((resolve, reject) => {
     const request = NodeHttp.request(
       {
@@ -32,13 +39,7 @@ function requestJson<T>(input: {
         port: input.port,
         path: input.path,
         method: encoded === undefined ? "GET" : "POST",
-        headers: {
-          ...peerHeaders,
-          ...(input.headers ?? {}),
-          ...(encoded === undefined
-            ? {}
-            : { "content-length": String(Buffer.byteLength(encoded)) }),
-        },
+        headers,
       },
       (response) => {
         const chunks: Buffer[] = [];
@@ -717,14 +718,18 @@ describe("native ChatGPT browser broker", () => {
       headers,
       body: { operations: [], after: initial.body.generation, wait: true },
     }).catch(() => null);
+    /* oxlint-disable t3code/no-real-time-wait-in-tests -- real Node HTTP long-poll needs to reach the server before close */
     // @effect-diagnostics-next-line globalTimers:off -- The real Node HTTP long-poll needs time to enter the server before close.
     await new Promise((resolve) => setTimeout(resolve, 25));
+    /* oxlint-enable t3code/no-real-time-wait-in-tests */
 
+    /* oxlint-disable t3code/no-wall-clock-in-tests -- bounds native teardown against the long-poll timeout */
     // @effect-diagnostics-next-line globalDate:off -- Wall-clock bound verifies native server teardown does not wait for the long-poll timeout.
     const startedAt = Date.now();
     await broker.close();
     // @effect-diagnostics-next-line globalDate:off -- Same bounded teardown assertion as above.
     expect(Date.now() - startedAt).toBeLessThan(1_000);
+    /* oxlint-enable t3code/no-wall-clock-in-tests */
     await waiting;
   });
 

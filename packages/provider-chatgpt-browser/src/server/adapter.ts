@@ -371,91 +371,90 @@ export const makeChatGptBrowserAdapterV2 = Effect.fn("makeChatGptBrowserAdapterV
         });
       });
 
-      const recoverExactTransport = <A>(
+      const recoverExactTransport = Effect.fn("chatgptBrowser.recoverExactTransport")(function* <A>(
         turn: ActiveTurn,
         operation: string,
         attempt: () => Effect.Effect<A, ChatGptBrowserProviderV1Error>,
-      ): Effect.Effect<A, ChatGptBrowserProviderV1Error> =>
-        Effect.gen(function* () {
-          let recovering = false;
-          let recoveryAttempt = 0;
-          let recoveryStartedAt: bigint | undefined;
-          let lastError: ChatGptBrowserProviderV1Error | undefined;
-          for (;;) {
-            if ((turn.finished || active !== turn) && lastError !== undefined) {
-              return yield* Effect.fail(lastError);
-            }
-            const result = yield* attempt().pipe(
-              Effect.match({
-                onFailure: (error) => ({ ok: false as const, error }),
-                onSuccess: (value) => ({ ok: true as const, value }),
-              }),
-            );
-            if (result.ok) {
-              if (recovering && recoveryStartedAt !== undefined) {
-                const recoveryDuration = Duration.nanos(
-                  (yield* Clock.monotonicTimeNanos) - recoveryStartedAt,
-                );
-                yield* Metric.update(
-                  Metric.withAttributes(chatGptBrowserTransportRecoveriesTotal, [
-                    ["stage", "recovered"],
-                    ["operation", operation],
-                  ]),
-                  1,
-                );
-                yield* Metric.update(chatGptBrowserTransportRecoveryDuration, recoveryDuration);
-                yield* Effect.logInfo("ChatGPT Browser transport recovered exact operation", {
-                  operation,
-                  providerOperationId: turn.operationId,
-                  providerSessionId: input.providerSessionId,
-                  providerInstanceId: options.instanceId,
-                  runId: turn.input.runId,
-                  runAttemptId: turn.input.attemptId,
-                  recoveryAttempts: recoveryAttempt,
-                  recoveryDurationMs: Duration.toMillis(recoveryDuration),
-                });
-              }
-              if (recovering && !turn.finished && active === turn) {
-                yield* updateSession("running", null);
-              }
-              return result.value;
-            }
-            if (!isRetryableTransportInterruption(result.error)) {
-              return yield* Effect.fail(result.error);
-            }
-            lastError = result.error;
-            recoveryAttempt += 1;
-            const delayMs = Math.min(5_000, 100 * 2 ** Math.min(6, recoveryAttempt - 1));
-            recoveryStartedAt ??= yield* Clock.monotonicTimeNanos;
-            yield* Metric.update(
-              Metric.withAttributes(chatGptBrowserTransportRecoveriesTotal, [
-                ["stage", "interrupted"],
-                ["operation", operation],
-                ["code", result.error.code],
-              ]),
-              1,
-            );
-            if (!recovering && !turn.finished && active === turn) {
-              recovering = true;
-              yield* updateSession("starting", null);
-            }
-            yield* Effect.logWarning(
-              "ChatGPT Browser transport interrupted; retrying exact operation",
-              {
+      ) {
+        let recovering = false;
+        let recoveryAttempt = 0;
+        let recoveryStartedAt: bigint | undefined;
+        let lastError: ChatGptBrowserProviderV1Error | undefined;
+        for (;;) {
+          if ((turn.finished || active !== turn) && lastError !== undefined) {
+            return yield* Effect.fail(lastError);
+          }
+          const result = yield* attempt().pipe(
+            Effect.match({
+              onFailure: (error) => ({ ok: false as const, error }),
+              onSuccess: (value) => ({ ok: true as const, value }),
+            }),
+          );
+          if (result.ok) {
+            if (recovering && recoveryStartedAt !== undefined) {
+              const recoveryDuration = Duration.nanos(
+                (yield* Clock.monotonicTimeNanos) - recoveryStartedAt,
+              );
+              yield* Metric.update(
+                Metric.withAttributes(chatGptBrowserTransportRecoveriesTotal, [
+                  ["stage", "recovered"],
+                  ["operation", operation],
+                ]),
+                1,
+              );
+              yield* Metric.update(chatGptBrowserTransportRecoveryDuration, recoveryDuration);
+              yield* Effect.logInfo("ChatGPT Browser transport recovered exact operation", {
                 operation,
                 providerOperationId: turn.operationId,
                 providerSessionId: input.providerSessionId,
                 providerInstanceId: options.instanceId,
                 runId: turn.input.runId,
                 runAttemptId: turn.input.attemptId,
-                code: result.error.code,
-                recoveryAttempt,
-                delayMs,
-              },
-            );
-            yield* Effect.sleep(`${delayMs} millis`);
+                recoveryAttempts: recoveryAttempt,
+                recoveryDurationMs: Duration.toMillis(recoveryDuration),
+              });
+            }
+            if (recovering && !turn.finished && active === turn) {
+              yield* updateSession("running", null);
+            }
+            return result.value;
           }
-        });
+          if (!isRetryableTransportInterruption(result.error)) {
+            return yield* Effect.fail(result.error);
+          }
+          lastError = result.error;
+          recoveryAttempt += 1;
+          const delayMs = Math.min(5_000, 100 * 2 ** Math.min(6, recoveryAttempt - 1));
+          recoveryStartedAt ??= yield* Clock.monotonicTimeNanos;
+          yield* Metric.update(
+            Metric.withAttributes(chatGptBrowserTransportRecoveriesTotal, [
+              ["stage", "interrupted"],
+              ["operation", operation],
+              ["code", result.error.code],
+            ]),
+            1,
+          );
+          if (!recovering && !turn.finished && active === turn) {
+            recovering = true;
+            yield* updateSession("starting", null);
+          }
+          yield* Effect.logWarning(
+            "ChatGPT Browser transport interrupted; retrying exact operation",
+            {
+              operation,
+              providerOperationId: turn.operationId,
+              providerSessionId: input.providerSessionId,
+              providerInstanceId: options.instanceId,
+              runId: turn.input.runId,
+              runAttemptId: turn.input.attemptId,
+              code: result.error.code,
+              recoveryAttempt,
+              delayMs,
+            },
+          );
+          yield* Effect.sleep(`${delayMs} millis`);
+        }
+      });
       const updateThread = Effect.fnUntraced(function* (
         patch: Partial<OrchestrationV2ProviderThread>,
       ) {
@@ -1534,11 +1533,9 @@ export const makeChatGptBrowserAdapterV2 = Effect.fn("makeChatGptBrowserAdapterV
           }
         }
         yield* watchApprovals(turn).pipe(Effect.forkIn(scope));
-        // Provider WAL replay is also the adapter's bounded current-state hydration after a
-        // process restart. Superseded live revisions are compacted in the provider WAL, so replay
-        // from zero reconstitutes each stable assistant/tool item without replaying an unbounded
-        // draft history. The persisted consumer high-water remains the durable commit watermark:
-        // checkpointing an already-consumed sequence is monotonic/idempotent in the T3 store.
+        // WAL replay hydrates current state after a restart; superseded revisions are
+        // compacted, so replay from zero is bounded. The persisted consumer high-water is the
+        // durable commit watermark: checkpointing an already-consumed sequence is idempotent.
         yield* consumeOperation(turn, ChatGptBrowserProviderV1EventSequence.make(0)).pipe(
           Effect.catch((cause) => failBackground(turn, cause)),
           Effect.forkIn(scope),

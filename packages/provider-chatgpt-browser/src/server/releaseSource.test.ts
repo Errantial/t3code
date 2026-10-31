@@ -1,7 +1,7 @@
 // @effect-diagnostics nodeBuiltinImport:off -- Release-source tests use isolated real filesystem fixtures.
-import { promises as fs } from "node:fs";
-import { tmpdir } from "node:os";
-import path from "node:path";
+import * as NodeFS from "node:fs";
+import * as NodeOS from "node:os";
+import * as NodePath from "node:path";
 
 import { describe, expect, it } from "@effect/vitest";
 
@@ -11,23 +11,31 @@ import {
 } from "./releaseSource.ts";
 
 async function fixtureRoot() {
-  const root = await fs.mkdtemp(path.join(tmpdir(), "t3-chatgpt-browser-release-"));
-  const chromium = path.join(root, `chromium-${CHATGPT_BROWSER_CHROMIUM_REVISION}`);
-  const provider = path.join(root, "provider");
-  await fs.mkdir(path.join(chromium, "chrome-win64"), { recursive: true });
-  await fs.writeFile(path.join(chromium, "chrome-win64", "chrome.exe"), "browser");
-  await fs.mkdir(path.join(chromium, "chrome-linux64"), { recursive: true });
-  await fs.writeFile(path.join(chromium, "chrome-linux64", "chrome"), "browser-linux");
-  await fs.mkdir(path.join(provider, "extension"), { recursive: true });
-  await fs.writeFile(
-    path.join(provider, "extension", "manifest.json"),
+  const root = await NodeFS.promises.mkdtemp(
+    NodePath.join(NodeOS.tmpdir(), "t3-chatgpt-browser-release-"),
+  );
+  const chromium = NodePath.join(root, `chromium-${CHATGPT_BROWSER_CHROMIUM_REVISION}`);
+  const provider = NodePath.join(root, "provider");
+  await NodeFS.promises.mkdir(NodePath.join(chromium, "chrome-win64"), { recursive: true });
+  await NodeFS.promises.writeFile(NodePath.join(chromium, "chrome-win64", "chrome.exe"), "browser");
+  await NodeFS.promises.mkdir(NodePath.join(chromium, "chrome-linux64"), { recursive: true });
+  await NodeFS.promises.writeFile(
+    NodePath.join(chromium, "chrome-linux64", "chrome"),
+    "browser-linux",
+  );
+  await NodeFS.promises.mkdir(NodePath.join(provider, "extension"), { recursive: true });
+  await NodeFS.promises.writeFile(
+    NodePath.join(provider, "extension", "manifest.json"),
     JSON.stringify({
       manifest_version: 3,
       version: "2.1.39",
       background: { service_worker: "background.js", type: "module" },
     }),
   );
-  await fs.writeFile(path.join(provider, "extension", "background.js"), "export {};\n");
+  await NodeFS.promises.writeFile(
+    NodePath.join(provider, "extension", "background.js"),
+    "export {};\n",
+  );
   return { root, chromium, provider };
 }
 
@@ -68,7 +76,7 @@ describe("native ChatGPT browser release source", () => {
         }),
       ).rejects.toThrow("pinned chromium-1223");
     } finally {
-      await fs.rm(fixture.root, { recursive: true, force: true });
+      await NodeFS.promises.rm(fixture.root, { recursive: true, force: true });
     }
   });
 
@@ -87,18 +95,18 @@ describe("native ChatGPT browser release source", () => {
       expect(release.browserExecutableRelativePath).toBe("chrome-linux64/chrome");
       expect(release.browserArgs).toBeUndefined();
     } finally {
-      await fs.rm(fixture.root, { recursive: true, force: true });
+      await NodeFS.promises.rm(fixture.root, { recursive: true, force: true });
     }
   });
 
   it("uses packaged Linux resources ahead of any Playwright cache", async () => {
     const fixture = await fixtureRoot();
-    const packaged = path.join(fixture.root, "packaged");
-    const packagedProvider = path.join(packaged, "provider");
-    const packagedChromium = path.join(packaged, "chromium", "chromium-1223");
+    const packaged = NodePath.join(fixture.root, "packaged");
+    const packagedProvider = NodePath.join(packaged, "provider");
+    const packagedChromium = NodePath.join(packaged, "chromium", "chromium-1223");
     try {
-      await fs.cp(fixture.provider, packagedProvider, { recursive: true });
-      await fs.cp(fixture.chromium, packagedChromium, { recursive: true });
+      await NodeFS.promises.cp(fixture.provider, packagedProvider, { recursive: true });
+      await NodeFS.promises.cp(fixture.chromium, packagedChromium, { recursive: true });
       const release = await resolveNativeChatGptBrowserReleaseSource({
         platform: "linux",
         architecture: "x64",
@@ -111,15 +119,17 @@ describe("native ChatGPT browser release source", () => {
       expect(release.providerSourceDirectory).toBe(packagedProvider);
       expect(release.browserExecutableRelativePath).toBe("chrome-linux64/chrome");
     } finally {
-      await fs.rm(fixture.root, { recursive: true, force: true });
+      await NodeFS.promises.rm(fixture.root, { recursive: true, force: true });
     }
   });
 
   it("does not fall back to Playwright when packaged Linux resources are incomplete", async () => {
     const fixture = await fixtureRoot();
-    const packaged = path.join(fixture.root, "packaged-incomplete");
+    const packaged = NodePath.join(fixture.root, "packaged-incomplete");
     try {
-      await fs.cp(fixture.provider, path.join(packaged, "provider"), { recursive: true });
+      await NodeFS.promises.cp(fixture.provider, NodePath.join(packaged, "provider"), {
+        recursive: true,
+      });
       await expect(
         resolveNativeChatGptBrowserReleaseSource({
           platform: "linux",
@@ -131,16 +141,19 @@ describe("native ChatGPT browser release source", () => {
         }),
       ).rejects.toThrow("Configured managed Chromium directory does not exist");
     } finally {
-      await fs.rm(fixture.root, { recursive: true, force: true });
+      await NodeFS.promises.rm(fixture.root, { recursive: true, force: true });
     }
   });
 
   it("rejects headless-shell even when explicitly configured", async () => {
     const fixture = await fixtureRoot();
     try {
-      const headless = path.join(fixture.root, "chromium_headless_shell-1223");
-      await fs.mkdir(path.join(headless, "chrome-win64"), { recursive: true });
-      await fs.writeFile(path.join(headless, "chrome-win64", "chrome.exe"), "headless");
+      const headless = NodePath.join(fixture.root, "chromium_headless_shell-1223");
+      await NodeFS.promises.mkdir(NodePath.join(headless, "chrome-win64"), { recursive: true });
+      await NodeFS.promises.writeFile(
+        NodePath.join(headless, "chrome-win64", "chrome.exe"),
+        "headless",
+      );
       await expect(
         resolveNativeChatGptBrowserReleaseSource({
           platform: "win32",
@@ -151,7 +164,7 @@ describe("native ChatGPT browser release source", () => {
         }),
       ).rejects.toThrow("chrome-headless-shell");
     } finally {
-      await fs.rm(fixture.root, { recursive: true, force: true });
+      await NodeFS.promises.rm(fixture.root, { recursive: true, force: true });
     }
   });
 });

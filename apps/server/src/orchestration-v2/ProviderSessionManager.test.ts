@@ -57,6 +57,10 @@ import * as CommandOutputHub from "./CommandOutputHub.ts";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import type { ProviderOperationConcurrencyPolicy } from "@t3tools/provider-core/server/driver";
 
+const isProviderAdapterEventStreamError = Schema.is(
+  ProviderAdapter.ProviderAdapterEventStreamError,
+);
+
 const layerTestDatabase = SqlitePersistence.layerMemory;
 const layerTestStores = Layer.merge(EventStore.layer, ProjectionStore.layer).pipe(
   Layer.provide(layerTestDatabase),
@@ -2049,8 +2053,8 @@ it.effect.each(["failure", "clean-close"] as const)(
           const error = Cause.findErrorOption(exit.cause);
           assert.isTrue(Option.isSome(error));
           if (Option.isSome(error)) {
-            assert.isTrue(Schema.is(ProviderAdapter.ProviderAdapterEventStreamError)(error.value));
-            if (Schema.is(ProviderAdapter.ProviderAdapterEventStreamError)(error.value)) {
+            assert.isTrue(isProviderAdapterEventStreamError(error.value));
+            if (isProviderAdapterEventStreamError(error.value)) {
               assert.equal(error.value.recovery, "exact_operation_replay");
             }
           }

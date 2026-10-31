@@ -1,11 +1,11 @@
 // @effect-diagnostics-next-line nodeBuiltinImport:off -- The provider WAL needs Node's stable SHA-256 and collision-resistant temp-file nonce.
-import { createHash, randomUUID } from "node:crypto";
+import * as NodeCrypto from "node:crypto";
 // @effect-diagnostics-next-line nodeBuiltinImport:off -- This scoped host is the concrete Node durable-state owner behind the abstract S0 host port.
-import { promises as fs } from "node:fs";
+import * as NodeFS from "node:fs";
 // @effect-diagnostics-next-line nodeBuiltinImport:off -- WAL paths are resolved entirely inside the injected provider state directory.
-import path from "node:path";
+import * as NodePath from "node:path";
 // @effect-diagnostics-next-line nodeBuiltinImport:off -- Windows atomic replacement retries use bounded promise-based delay without global timers.
-import { setTimeout as delay } from "node:timers/promises";
+import * as NodeTimersPromises from "node:timers/promises";
 
 import {
   ChatGptBrowserHostError,
@@ -188,7 +188,10 @@ const isProviderFailure = (value: unknown): value is ChatGptBrowserProviderV1Err
 const hostFailure = (operation: string, cause?: unknown) =>
   new ChatGptBrowserHostError({ operation, ...(cause === undefined ? {} : { cause }) });
 
-const sha256 = (value: string): string => createHash("sha256").update(value, "utf8").digest("hex");
+const decodeCoreEvents = Schema.decodeSync(Schema.Array(ChatGptBrowserProviderV1CoreEvent));
+
+const sha256 = (value: string): string =>
+  NodeCrypto.createHash("sha256").update(value, "utf8").digest("hex");
 const fileName = (operationId: string): string => `${sha256(operationId)}.json`;
 
 function liveRevisionBudget(
@@ -237,7 +240,7 @@ function parseOperation(value: unknown): DurableOperation | null {
   }
   let events: ReadonlyArray<ChatGptBrowserProviderV1CoreEvent>;
   try {
-    events = Schema.decodeSync(Schema.Array(ChatGptBrowserProviderV1CoreEvent))(row.events);
+    events = decodeCoreEvents(row.events);
   } catch {
     return null;
   }
@@ -312,25 +315,26 @@ class ProviderWal {
   readonly directory: string;
 
   constructor(stateDirectory: string) {
-    this.directory = path.join(stateDirectory, "chatgpt-browser-provider-v1");
+    this.directory = NodePath.join(stateDirectory, "chatgpt-browser-provider-v1");
   }
 
   async init(): Promise<void> {
-    await fs.mkdir(this.directory, { recursive: true, mode: 0o700 });
+    await NodeFS.promises.mkdir(this.directory, { recursive: true, mode: 0o700 });
+    // oxlint-disable-next-line t3code/no-global-process-runtime -- durable WAL host owns its own OS check outside Effect
     if (process.platform !== "win32") {
-      await fs.chmod(this.directory, 0o700);
-      await syncDirectory(path.dirname(this.directory));
+      await NodeFS.promises.chmod(this.directory, 0o700);
+      await syncDirectory(NodePath.dirname(this.directory));
     }
   }
 
   private file(operationId: string): string {
-    return path.join(this.directory, fileName(operationId));
+    return NodePath.join(this.directory, fileName(operationId));
   }
 
   async read(operationId: string): Promise<DurableOperation | null> {
     let bytes: string;
     try {
-      bytes = await fs.readFile(this.file(operationId), "utf8");
+      bytes = await NodeFS.promises.readFile(this.file(operationId), "utf8");
     } catch (cause) {
       if ((cause as NodeJS.ErrnoException).code === "ENOENT") return null;
       throw cause;
@@ -355,11 +359,13 @@ class ProviderWal {
   async all(): Promise<ReadonlyArray<DurableOperation>> {
     await this.init();
     const records: DurableOperation[] = [];
-    for (const name of await fs.readdir(this.directory)) {
+    for (const name of await NodeFS.promises.readdir(this.directory)) {
       if (!name.endsWith(".json")) continue;
       let raw: unknown;
       try {
-        raw = JSON.parse(await fs.readFile(path.join(this.directory, name), "utf8"));
+        raw = JSON.parse(
+          await NodeFS.promises.readFile(NodePath.join(this.directory, name), "utf8"),
+        );
       } catch {
         throw new Error("provider_wal_corrupt");
       }
@@ -379,8 +385,8 @@ class ProviderWal {
   async write(record: DurableOperation): Promise<void> {
     await this.init();
     const target = this.file(record.providerOperationId);
-    const temp = `${target}.${process.pid}.${randomUUID()}.tmp`;
-    const handle = await fs.open(temp, "wx", 0o600);
+    const temp = `${target}.${process.pid}.${NodeCrypto.randomUUID()}.tmp`;
+    const handle = await NodeFS.promises.open(temp, "wx", 0o600);
     try {
       await handle.writeFile(JSON.stringify(record), "utf8");
       await handle.sync();
@@ -389,15 +395,16 @@ class ProviderWal {
     }
     try {
       await replaceFile(temp, target);
+      // oxlint-disable-next-line t3code/no-global-process-runtime -- durable WAL host owns its own OS check outside Effect
       if (process.platform !== "win32") await syncDirectory(this.directory);
     } finally {
-      await fs.rm(temp, { force: true }).catch(() => undefined);
+      await NodeFS.promises.rm(temp, { force: true }).catch(() => undefined);
     }
   }
 }
 
 async function syncDirectory(directory: string): Promise<void> {
-  const handle = await fs.open(directory, "r");
+  const handle = await NodeFS.promises.open(directory, "r");
   try {
     await handle.sync();
   } finally {
@@ -408,14 +415,15 @@ async function syncDirectory(directory: string): Promise<void> {
 async function replaceFile(source: string, target: string): Promise<void> {
   for (let attempt = 0; ; attempt += 1) {
     try {
-      await fs.rename(source, target);
+      await NodeFS.promises.rename(source, target);
       return;
     } catch (cause) {
       const code = (cause as NodeJS.ErrnoException).code;
       const sharingViolation =
+        // oxlint-disable-next-line t3code/no-global-process-runtime -- durable WAL host owns its own OS check outside Effect
         process.platform === "win32" && (code === "EACCES" || code === "EPERM" || code === "EBUSY");
       if (!sharingViolation || attempt >= 7) throw cause;
-      await delay(Math.min(100, 5 * 2 ** attempt));
+      await NodeTimersPromises.setTimeout(Math.min(100, 5 * 2 ** attempt));
     }
   }
 }

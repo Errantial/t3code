@@ -1,7 +1,7 @@
 // @effect-diagnostics nodeBuiltinImport:off - lifecycle tests exercise real temp-directory,
 // inode-preserving materialization and atomic-rename behavior without launching a real browser.
-import { promises as NodeFs } from "node:fs";
-import * as NodeOs from "node:os";
+import * as NodeFS from "node:fs";
+import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 
 import { describe, expect, it } from "@effect/vitest";
@@ -81,11 +81,11 @@ const makePlatform = (base: string): PlatformFixture => {
         }),
       replaceFileAtomically: ({ path, contents }) =>
         fsEffect("test-pointer-write", async () => {
-          await NodeFs.mkdir(NodePath.dirname(path), { recursive: true });
+          await NodeFS.promises.mkdir(NodePath.dirname(path), { recursive: true });
           const temporary = `${path}.next`;
-          await NodeFs.writeFile(temporary, contents);
-          await NodeFs.rm(path, { force: true });
-          await NodeFs.rename(temporary, path);
+          await NodeFS.promises.writeFile(temporary, contents);
+          await NodeFS.promises.rm(path, { force: true });
+          await NodeFS.promises.rename(temporary, path);
           pointerWrites.push(new TextDecoder().decode(contents));
         }),
       readSecret: () => Effect.succeed(null),
@@ -113,14 +113,17 @@ const writeReleaseSource = (input: {
     const browserSourceDirectory = NodePath.join(root, "browser");
     const providerSourceDirectory = NodePath.join(root, "provider");
     const extensionDirectory = NodePath.join(providerSourceDirectory, "extension");
-    await NodeFs.mkdir(browserSourceDirectory, { recursive: true });
-    await NodeFs.mkdir(extensionDirectory, { recursive: true });
-    await NodeFs.writeFile(NodePath.join(browserSourceDirectory, "chromium.exe"), "browser");
-    await NodeFs.writeFile(
+    await NodeFS.promises.mkdir(browserSourceDirectory, { recursive: true });
+    await NodeFS.promises.mkdir(extensionDirectory, { recursive: true });
+    await NodeFS.promises.writeFile(
+      NodePath.join(browserSourceDirectory, "chromium.exe"),
+      "browser",
+    );
+    await NodeFS.promises.writeFile(
       NodePath.join(extensionDirectory, "manifest.json"),
       JSON.stringify({ manifest_version: 3, version: extensionVersion }),
     );
-    await NodeFs.writeFile(
+    await NodeFS.promises.writeFile(
       NodePath.join(extensionDirectory, "background.js"),
       input.background ?? `provider ${input.providerReleaseVersion}`,
     );
@@ -145,13 +148,13 @@ const withTempRoot = <A, E>(
 ): Effect.Effect<A, E | ChatGptBrowserHostError> =>
   Effect.gen(function* () {
     const base = yield* fsEffect("test-temp-root", () =>
-      NodeFs.mkdtemp(NodePath.join(NodeOs.tmpdir(), "t3-chatgpt-browser-host-")),
+      NodeFS.promises.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-chatgpt-browser-host-")),
     );
     return yield* use(base).pipe(
       Effect.ensuring(
-        fsEffect("test-cleanup", () => NodeFs.rm(base, { recursive: true, force: true })).pipe(
-          Effect.ignore,
-        ),
+        fsEffect("test-cleanup", () =>
+          NodeFS.promises.rm(base, { recursive: true, force: true }),
+        ).pipe(Effect.ignore),
       ),
     );
   });
@@ -159,15 +162,16 @@ const withTempRoot = <A, E>(
 const readPointer = (path: string) =>
   fsEffect(
     "test-read-pointer",
-    async () => JSON.parse(await NodeFs.readFile(path, "utf8")) as unknown,
+    async () => JSON.parse(await NodeFS.promises.readFile(path, "utf8")) as unknown,
   );
 
-const readText = (path: string) => fsEffect("test-read-text", () => NodeFs.readFile(path, "utf8"));
-const statPath = (path: string) => fsEffect("test-stat-path", () => NodeFs.stat(path));
+const readText = (path: string) =>
+  fsEffect("test-read-text", () => NodeFS.promises.readFile(path, "utf8"));
+const statPath = (path: string) => fsEffect("test-stat-path", () => NodeFS.promises.stat(path));
 const pathExists = (path: string) =>
   fsEffect("test-path-exists", async () => {
     try {
-      await NodeFs.access(path);
+      await NodeFS.promises.access(path);
       return true;
     } catch {
       return false;
@@ -193,7 +197,7 @@ describe("ChatGPT managed browser host", () => {
                 validationProfile = input.profileDirectory;
                 validationExtension = input.extensionRoot;
                 validationBuildStamp = (
-                  await NodeFs.readFile(
+                  await NodeFS.promises.readFile(
                     NodePath.join(input.extensionRoot, "build-stamp.txt"),
                     "utf8",
                   )
@@ -396,7 +400,7 @@ describe("ChatGPT managed browser host", () => {
           yield* host.prepareRelease;
           const publishedInode = (yield* statPath(fixture.paths.extensionRoot)).ino;
           yield* fsEffect("test-damage-extension", () =>
-            NodeFs.writeFile(
+            NodeFS.promises.writeFile(
               NodePath.join(fixture.paths.extensionRoot, "background.js"),
               "damaged",
             ),

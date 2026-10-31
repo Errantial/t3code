@@ -24,7 +24,10 @@ describe("planHiddenLauncher", () => {
 
   it("wraps the .cmd task the laptop created", () => {
     const plan = planHiddenLauncher({ execute: "C:\\Users\\emilg\\.t3\\remote-runtime-sync.cmd" });
-    assert.equal(plan?.commandLine, 'cmd.exe /d /s /c ""C:\\Users\\emilg\\.t3\\remote-runtime-sync.cmd""');
+    assert.equal(
+      plan?.commandLine,
+      'cmd.exe /d /s /c ""C:\\Users\\emilg\\.t3\\remote-runtime-sync.cmd""',
+    );
     assert.equal(plan?.launcherPath, `C:\\Users\\emilg\\.t3\\${HIDDEN_LAUNCHER_FILE_NAME}`);
   });
 
@@ -33,7 +36,10 @@ describe("planHiddenLauncher", () => {
       execute: "C:\\Users\\emilg\\.t3\\remote-runtime-sync.cmd",
       arguments: "--once",
     });
-    assert.equal(plan?.commandLine, 'cmd.exe /d /s /c ""C:\\Users\\emilg\\.t3\\remote-runtime-sync.cmd" --once"');
+    assert.equal(
+      plan?.commandLine,
+      'cmd.exe /d /s /c ""C:\\Users\\emilg\\.t3\\remote-runtime-sync.cmd" --once"',
+    );
   });
 
   it("recognises a command run through cmd.exe", () => {
@@ -48,7 +54,10 @@ describe("planHiddenLauncher", () => {
     assert.equal(planHiddenLauncher({ execute: "wscript.exe", arguments: '//B "x.vbs"' }), null);
     assert.equal(planHiddenLauncher({ execute: "C:\\tools\\sync.exe" }), null);
     assert.equal(planHiddenLauncher({ execute: "powershell.exe", arguments: "-NoProfile" }), null);
-    assert.equal(planHiddenLauncher({ execute: "powershell.exe", arguments: "-File relative.ps1" }), null);
+    assert.equal(
+      planHiddenLauncher({ execute: "powershell.exe", arguments: "-File relative.ps1" }),
+      null,
+    );
   });
 });
 
