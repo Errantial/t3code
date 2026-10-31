@@ -1,4 +1,10 @@
-import { OrchestratorMcpFailure, type OrchestrationV2Command, ProjectId } from "@t3tools/contracts";
+import {
+  OrchestratorMcpFailure,
+  type OrchestrationV2Command,
+  type OrchestrationV2Run,
+  type OrchestrationV2RuntimeRequest,
+  ProjectId,
+} from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Path from "effect/Path";
 
@@ -36,6 +42,74 @@ const forwarding = Effect.gen(function* () {
   const scope = yield* McpInvocationContext.McpInvocationContext;
   return { scope, service: yield* PeerForwarding.PeerForwarding };
 });
+
+type DigestAttention =
+  | "needs-approval"
+  | "needs-input"
+  | "plan-ready"
+  | "working"
+  | "error"
+  | "done"
+  | "idle";
+
+function digestAttention(
+  runs: ReadonlyArray<OrchestrationV2Run>,
+  pending: ReadonlyArray<OrchestrationV2RuntimeRequest>,
+): DigestAttention {
+  if (pending.some((request) => request.kind === "permission")) return "needs-approval";
+  if (pending.length > 0) return "needs-input";
+  const status = runs.at(-1)?.status;
+  if (status === "failed") return "error";
+  if (status === "running" || status === "starting" || status === "preparing") return "working";
+  if (status === "completed") return "done";
+  return "idle";
+}
+
+function speakAttention(attention: DigestAttention): string {
+  switch (attention) {
+    case "needs-approval":
+      return "waiting for approval";
+    case "needs-input":
+      return "waiting for your answer";
+    case "plan-ready":
+      return "ready with a plan";
+    case "working":
+      return "still working";
+    case "error":
+      return "in error";
+    case "done":
+      return "finished";
+    default:
+      return "idle";
+  }
+}
+
+function speakStatus(status: string): string {
+  switch (status) {
+    case "failed":
+      return "hit an error";
+    case "waiting":
+      return "is waiting for you";
+    case "running":
+    case "starting":
+    case "preparing":
+      return "is working";
+    case "completed":
+      return "finished";
+    default:
+      return "is idle";
+  }
+}
+
+function stripForVoice(text: string): string {
+  return text
+    .replace(/```[\s\S]*?```/g, " ")
+    .replace(/`[^`]*`/g, " ")
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
+    .replace(/[#>*_~]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
 
 const handlers = {
   list_instruction_files: McpToolAccess.reads((input) =>
@@ -345,6 +419,95 @@ const handlers = {
           savedAt: thread.savedAt == null ? null : String(thread.savedAt),
         })),
         nextCursor: offset + limit < saved.length ? offset + limit : null,
+      };
+    }),
+  ),
+  workspace_digest: McpToolAccess.reads((input) =>
+    Effect.gen(function* () {
+      const { scope, service } = yield* forwarding;
+      const remote = PeerForwarding.remoteTarget(scope, input.environmentId);
+      if (remote !== undefined) {
+        return yield* service.call(scope, InstructionToolkit.tools.workspace_digest, remote, input);
+      }
+      const threadManagement = yield* ThreadManagement.ThreadManagementService;
+      const shells = yield* threadManagement
+        .listProjectThreads({
+          ...(input.projectId === undefined ? {} : { projectId: ProjectId.make(input.projectId) }),
+          includeSubagents: false,
+        })
+        .pipe(Effect.mapError(failure));
+      const rank = (status: string): number =>
+        status === "failed" || status === "waiting"
+          ? 0
+          : status === "running" || status === "starting" || status === "preparing"
+            ? 1
+            : status === "completed"
+              ? 2
+              : 3;
+      const active = shells
+        .filter((thread) => thread.deletedAt === null && thread.archivedAt === null)
+        .sort((left, right) => rank(left.status) - rank(right.status))
+        .map((thread) => ({
+          threadId: thread.id,
+          projectId: thread.projectId,
+          title: thread.title,
+          status: thread.status,
+        }));
+      const offset = input.cursor ?? 0;
+      const limit = input.limit ?? 20;
+      const page = active.slice(offset, offset + limit);
+      const spoken = page
+        .map((thread) => `${thread.title}: ${speakStatus(thread.status)}.`)
+        .join(" ");
+      return {
+        spoken: spoken.length === 0 ? "No active threads." : spoken,
+        threads: page.map((thread) => ({
+          ...thread,
+          link: McpInvocationContext.threadLinkFor(scope, thread.threadId),
+        })),
+        nextCursor: offset + limit < active.length ? offset + limit : null,
+      };
+    }),
+  ),
+  thread_digest: McpToolAccess.reads((input) =>
+    Effect.gen(function* () {
+      const { scope, service } = yield* forwarding;
+      const remote = PeerForwarding.remoteTarget(scope, input.environmentId);
+      if (remote !== undefined) {
+        return yield* service.call(scope, InstructionToolkit.tools.thread_digest, remote, input);
+      }
+      const { projection } = yield* readThread(input.threadId, [
+        "runs",
+        "messages",
+        "runtimeRequests",
+      ]);
+      const pending = projection.runtimeRequests.filter((request) => request.status === "pending");
+      const attention = digestAttention(projection.runs, pending);
+      const lastAssistant = [...projection.messages]
+        .reverse()
+        .find((message) => message.role === "assistant");
+      const parts = [`Thread "${projection.thread.title}" is ${speakAttention(attention)}.`];
+      if (lastAssistant !== undefined) {
+        const text = stripForVoice(lastAssistant.text);
+        parts.push(
+          `Latest reply: ${text.slice(0, input.maxReplyChars ?? 800)}${text.length > (input.maxReplyChars ?? 800) ? "…" : ""}`,
+        );
+      }
+      for (const request of pending) {
+        parts.push(
+          request.kind === "permission"
+            ? "It is asking for permission."
+            : "It has a question for you.",
+        );
+      }
+      return {
+        spoken: parts.join(" "),
+        attention,
+        pendingRequests: pending.map((request) => ({
+          requestId: String(request.id),
+          kind: request.kind,
+        })),
+        threadId: projection.thread.id,
       };
     }),
   ),

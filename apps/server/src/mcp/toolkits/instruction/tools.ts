@@ -225,6 +225,63 @@ const ListSavedThreadsTool = Tool.make("list_saved_threads", {
   }),
 }).annotate(Tool.Readonly, true);
 
+const ThreadDigestTool = Tool.make("thread_digest", {
+  ...base,
+  description:
+    "A plain-language, TTS-friendly digest of one thread: what it is doing, the latest reply, and anything it waits on.",
+  parameters: Schema.Struct({
+    ...environmentField,
+    threadId: ThreadId,
+    maxReplyChars: Schema.optional(
+      Schema.Int.check(Schema.isBetween({ minimum: 100, maximum: 4000 })),
+    ),
+  }),
+  success: Schema.Struct({
+    spoken: Schema.String,
+    attention: Schema.Literals([
+      "needs-approval",
+      "needs-input",
+      "plan-ready",
+      "working",
+      "error",
+      "done",
+      "idle",
+    ]),
+    pendingRequests: Schema.Array(
+      Schema.Struct({
+        requestId: Schema.String,
+        kind: Schema.String,
+      }),
+    ),
+    threadId: ThreadId,
+  }),
+}).annotate(Tool.Readonly, true);
+
+const WorkspaceDigestTool = Tool.make("workspace_digest", {
+  ...base,
+  description:
+    "A one-line-per-thread, TTS-friendly briefing across this machine. Needs-attention threads first, then working, then recently finished. Pages with `cursor` and `limit`.",
+  parameters: Schema.Struct({
+    ...environmentField,
+    projectId: Schema.optional(Schema.String),
+    cursor: Schema.optional(NonNegativeInt),
+    limit: Schema.optional(Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 100 }))),
+  }),
+  success: Schema.Struct({
+    spoken: Schema.String,
+    threads: Schema.Array(
+      Schema.Struct({
+        threadId: ThreadId,
+        projectId: Schema.String,
+        title: Schema.String,
+        status: Schema.String,
+        link: Schema.optional(Schema.String),
+      }),
+    ),
+    nextCursor: Schema.NullOr(NonNegativeInt),
+  }),
+}).annotate(Tool.Readonly, true);
+
 export const InstructionToolkit = Toolkit.make(
   ListFilesTool,
   GetFileTool,
@@ -240,4 +297,6 @@ export const InstructionToolkit = Toolkit.make(
   SaveThreadTool,
   UnsaveThreadTool,
   ListSavedThreadsTool,
+  ThreadDigestTool,
+  WorkspaceDigestTool,
 );
