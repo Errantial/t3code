@@ -727,7 +727,6 @@ export const layerStaticAndDevRoute = Layer.unwrap(
   ),
 );
 
-
 // Instruction library: global/project files, sync targets and per-thread optional attachments.
 // Stored under T3CODE_HOME/instructions so the fleet sync script can mirror it between machines.
 const instructionStore = Effect.gen(function* () {
@@ -833,5 +832,32 @@ export const layerInstructionAttachmentsRoute = HttpRouter.add(
     const store = yield* instructionStore;
     const fileIds = store.setThreadAttachments(body.threadId, body.fileIds);
     return HttpServerResponse.jsonUnsafe({ threadId: body.threadId, fileIds });
+  }),
+);
+
+export const layerInstructionProfileRoute = HttpRouter.add(
+  "POST",
+  "/api/instructions/profile",
+  Effect.gen(function* () {
+    yield* authenticateRawRouteWithScope(AuthOrchestrationOperateScope);
+    const request = yield* HttpServerRequest.HttpServerRequest;
+    const body = cast<unknown, Parameters<InstructionStore["setProfile"]>[0]>(yield* request.json);
+    const store = yield* instructionStore;
+    return HttpServerResponse.jsonUnsafe({ profile: store.setProfile(body) });
+  }),
+);
+
+export const layerInstructionMaterializeRoute = HttpRouter.add(
+  "POST",
+  "/api/instructions/materialize",
+  Effect.gen(function* () {
+    yield* authenticateRawRouteWithScope(AuthOrchestrationOperateScope);
+    const request = yield* HttpServerRequest.HttpServerRequest;
+    const body = cast<unknown, { readonly force?: boolean }>(yield* request.json);
+    const store = yield* instructionStore;
+    const result = store.materializeAll(body);
+    return result.conflicts.length > 0
+      ? HttpServerResponse.jsonUnsafe(result, { status: 409 })
+      : HttpServerResponse.jsonUnsafe(result);
   }),
 );

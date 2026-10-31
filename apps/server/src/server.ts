@@ -737,6 +737,8 @@ const layerMakeRoutes = Layer.mergeAll(
     ServerHttp.layerInstructionSyncRoute,
     ServerHttp.layerInstructionSyncRemoveRoute,
     ServerHttp.layerInstructionAttachmentsRoute,
+    ServerHttp.layerInstructionProfileRoute,
+    ServerHttp.layerInstructionMaterializeRoute,
     GuestHttp.layer,
     DeviceHubProxy.layer,
     ProviderMcpRelay.routeLayer,

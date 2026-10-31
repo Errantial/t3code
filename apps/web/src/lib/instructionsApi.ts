@@ -14,9 +14,18 @@ export interface InstructionSyncTarget {
   provider: "codex" | "claude" | "opencode" | "cursor" | "custom";
   scope: "global" | "project";
   projectId?: string;
+  environmentId?: string;
   workspaceRoot?: string;
   path?: string;
   filename?: string;
+}
+
+export interface ProjectInstructionProfile {
+  projectId: string;
+  mode: "shared" | "per-environment";
+  shared: string[];
+  environments: Record<string, string[]>;
+  updatedAt: string;
 }
 
 export interface InstructionSync {
@@ -38,6 +47,7 @@ export interface InstructionSnapshot {
   syncs: InstructionSync[];
   threadAttachments: Record<string, string[]>;
   targets: Record<string, InstructionTargetStatus[]>;
+  profiles: Record<string, ProjectInstructionProfile>;
 }
 
 async function call<T>(path: string, init?: RequestInit): Promise<T> {
@@ -102,5 +112,27 @@ export function putThreadAttachments(
   return call("/api/instructions/attachments", {
     method: "POST",
     body: JSON.stringify({ threadId, fileIds }),
+  });
+}
+
+export function putInstructionProfile(input: {
+  projectId: string;
+  mode: "shared" | "per-environment";
+  shared?: string[];
+  environments?: Record<string, string[]>;
+}): Promise<{ profile: ProjectInstructionProfile }> {
+  return call("/api/instructions/profile", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function materializeInstructions(force = false): Promise<{
+  written: Array<{ fileId: string; path: string }>;
+  conflicts: Array<{ fileId: string; path: string }>;
+}> {
+  return call("/api/instructions/materialize", {
+    method: "POST",
+    body: JSON.stringify({ force }),
   });
 }

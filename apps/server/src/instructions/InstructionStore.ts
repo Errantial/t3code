@@ -14,6 +14,8 @@ export interface InstructionSyncTarget {
   readonly provider: InstructionProvider;
   readonly scope: InstructionScope;
   readonly projectId?: string;
+  /** Selects the machine this target belongs to in a multi-environment project. */
+  readonly environmentId?: string;
   /** Project workspace root, required for project-scoped targets. */
   readonly workspaceRoot?: string;
   /** Overrides the provider default path. */
@@ -41,6 +43,20 @@ export interface InstructionSync {
   readonly updatedAt: string;
 }
 
+export type InstructionProfileMode = "shared" | "per-environment";
+
+/**
+ * A project either shares one instruction set with every linked environment,
+ * or selects files per environment. Thread optional files still layer on top.
+ */
+export interface ProjectInstructionProfile {
+  readonly projectId: string;
+  readonly mode: InstructionProfileMode;
+  readonly shared: ReadonlyArray<string>;
+  readonly environments: Readonly<Record<string, ReadonlyArray<string>>>;
+  readonly updatedAt: string;
+}
+
 export interface InstructionTargetStatus {
   readonly path: string;
   readonly exists: boolean;
@@ -54,6 +70,7 @@ export interface InstructionStoreSnapshot {
   readonly syncs: ReadonlyArray<InstructionSync>;
   readonly threadAttachments: Readonly<Record<string, ReadonlyArray<string>>>;
   readonly targets: Readonly<Record<string, ReadonlyArray<InstructionTargetStatus>>>;
+  readonly profiles: Readonly<Record<string, ProjectInstructionProfile>>;
 }
 
 interface StoreIndex {
@@ -62,6 +79,7 @@ interface StoreIndex {
   syncs: InstructionSync[];
   threadAttachments: Record<string, string[]>;
   written: Record<string, Record<string, string>>;
+  profiles: Record<string, ProjectInstructionProfile>;
 }
 
 const DEFAULT_PATHS: Record<
@@ -99,7 +117,7 @@ export class InstructionNotFoundError extends Error {
 }
 
 function emptyIndex(): StoreIndex {
-  return { version: 1, files: [], syncs: [], threadAttachments: {}, written: {} };
+  return { version: 1, files: [], syncs: [], threadAttachments: {}, written: {}, profiles: {} };
 }
 
 function sha256(text: string): string {
@@ -144,6 +162,8 @@ export class InstructionStore {
           : {},
       written:
         parsed.written !== undefined && typeof parsed.written === "object" ? parsed.written : {},
+      profiles:
+        parsed.profiles !== undefined && typeof parsed.profiles === "object" ? parsed.profiles : {},
     };
     return this.cached;
   }
@@ -219,7 +239,90 @@ export class InstructionStore {
       syncs: index.syncs,
       threadAttachments: index.threadAttachments,
       targets,
+      profiles: index.profiles,
     };
+  }
+
+  profile(projectId: string): ProjectInstructionProfile {
+    return (
+      this.load().profiles[projectId] ?? {
+        projectId,
+        mode: "shared",
+        shared: [],
+        environments: {},
+        updatedAt: new Date(0).toISOString(),
+      }
+    );
+  }
+
+  setProfile(input: {
+    readonly projectId: string;
+    readonly mode: InstructionProfileMode;
+    readonly shared?: ReadonlyArray<string>;
+    readonly environments?: Readonly<Record<string, ReadonlyArray<string>>>;
+  }): ProjectInstructionProfile {
+    const index = this.load();
+    const known = new Set(index.files.map((file) => file.id));
+    const clean = (ids: ReadonlyArray<string> | undefined) =>
+      [...new Set(ids ?? [])].filter((id) => known.has(id));
+    const environments = Object.fromEntries(
+      Object.entries(input.environments ?? {}).map(([environmentId, ids]) => [
+        environmentId,
+        clean(ids),
+      ]),
+    );
+    const profile: ProjectInstructionProfile = {
+      projectId: input.projectId,
+      mode: input.mode,
+      shared: clean(input.shared),
+      environments,
+      updatedAt: new Date().toISOString(),
+    };
+    this.save({ ...index, profiles: { ...index.profiles, [input.projectId]: profile } });
+    return profile;
+  }
+
+  /**
+   * Rewrites every sync target. A target whose local content changed since the
+   * last write is a conflict and is left alone unless forced.
+   */
+  materializeAll(options: { readonly force?: boolean } = {}): {
+    readonly written: ReadonlyArray<{ readonly fileId: string; readonly path: string }>;
+    readonly conflicts: ReadonlyArray<{ readonly fileId: string; readonly path: string }>;
+  } {
+    const index = this.load();
+    const written: Array<{ fileId: string; path: string }> = [];
+    const conflicts: Array<{ fileId: string; path: string }> = [];
+    for (const file of index.files) {
+      const sync = index.syncs.find((candidate) => candidate.fileId === file.id);
+      if (sync === undefined) continue;
+      for (const target of sync.targets) {
+        const path = this.resolveTarget(target);
+        if (path === null) continue;
+        const lastWrittenHash = index.written[file.id]?.[path] ?? "";
+        if (NodeFS.existsSync(path) && lastWrittenHash !== "") {
+          const actual = sha256(NodeFS.readFileSync(path, "utf8"));
+          if (actual !== lastWrittenHash && options.force !== true) {
+            conflicts.push({ fileId: file.id, path });
+            continue;
+          }
+        }
+        const hash = this.writeTarget(file, path);
+        (index.written[file.id] ??= {})[path] = hash;
+        written.push({ fileId: file.id, path });
+      }
+    }
+    this.save(index);
+    return { written, conflicts };
+  }
+
+  private writeTarget(file: InstructionFile, path: string): string {
+    const body = generated(file.content, file);
+    NodeFS.mkdirSync(NodePath.dirname(path), { recursive: true });
+    const temporary = `${path}.${process.pid}.tmp`;
+    NodeFS.writeFileSync(temporary, body, "utf8");
+    NodeFS.renameSync(temporary, path);
+    return sha256(body);
   }
 
   putFile(input: {

@@ -5,7 +5,10 @@ import {
   type InstructionFile,
   type InstructionSnapshot,
   type InstructionSyncTarget,
+  type ProjectInstructionProfile,
+  materializeInstructions,
   putInstruction,
+  putInstructionProfile,
   putInstructionSync,
   putThreadAttachments,
   readInstructions,
@@ -34,7 +37,13 @@ const emptyDraft = (): Draft => ({
 
 function targetLine(target: InstructionSyncTarget): string {
   const path = target.provider === "custom" ? (target.path ?? "") : (target.filename ?? "");
-  return [target.provider, target.scope, target.workspaceRoot ?? "", path].join("|");
+  return [
+    target.provider,
+    target.scope,
+    target.environmentId ?? "",
+    target.workspaceRoot ?? "",
+    path,
+  ].join("|");
 }
 
 function parseTargets(value: string): InstructionSyncTarget[] {
@@ -43,7 +52,9 @@ function parseTargets(value: string): InstructionSyncTarget[] {
     .map((line) => line.trim())
     .filter(Boolean)
     .map((line) => {
-      const [provider, scope, workspaceRoot, path] = line.split("|").map((part) => part.trim());
+      const [provider, scope, environmentId, workspaceRoot, path] = line
+        .split("|")
+        .map((part) => part.trim());
       if (
         !["codex", "claude", "opencode", "cursor", "custom"].includes(provider ?? "") ||
         (scope !== "global" && scope !== "project")
@@ -53,6 +64,7 @@ function parseTargets(value: string): InstructionSyncTarget[] {
       return {
         provider: provider as InstructionSyncTarget["provider"],
         scope: scope as InstructionSyncTarget["scope"],
+        ...(environmentId ? { environmentId } : {}),
         ...(workspaceRoot ? { workspaceRoot } : {}),
         ...(path ? (provider === "custom" ? { path } : { filename: path }) : {}),
       };
@@ -71,6 +83,10 @@ export function InstructionsPanel() {
   const [syncText, setSyncText] = useState("");
   const [threadId, setThreadId] = useState("");
   const [threadFiles, setThreadFiles] = useState<string[]>([]);
+  const [profileProjectId, setProfileProjectId] = useState("");
+  const [profileMode, setProfileMode] = useState<"shared" | "per-environment">("shared");
+  const [profileShared, setProfileShared] = useState<string[]>([]);
+  const [profileEnvironments, setProfileEnvironments] = useState("");
 
   const refresh = async () => {
     try {
@@ -188,6 +204,68 @@ export function InstructionsPanel() {
       await putThreadAttachments(threadId.trim(), threadFiles);
       await refresh();
       setNotice(`Attachments saved for ${threadId.trim()}`);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    }
+  };
+
+  const applyProfile = (profile: ProjectInstructionProfile | undefined) => {
+    setProfileMode(profile?.mode ?? "shared");
+    setProfileShared(profile?.shared ?? []);
+    setProfileEnvironments(
+      Object.entries(profile?.environments ?? {})
+        .map(([environmentId, ids]) => `${environmentId}=${ids.join(",")}`)
+        .join("\n"),
+    );
+  };
+
+  const loadProfile = (source: InstructionSnapshot | null = snapshot) => {
+    const profile = source?.profiles[profileProjectId.trim()];
+    applyProfile(profile);
+    setNotice(profile === undefined ? "No saved profile; showing defaults" : "Profile loaded");
+  };
+
+  const saveProfile = async () => {
+    try {
+      const environments = Object.fromEntries(
+        profileEnvironments
+          .split(/\r?\n/)
+          .map((line) => line.trim())
+          .filter(Boolean)
+          .map((line) => {
+            const [environmentId, ids = ""] = line.split("=");
+            return [
+              (environmentId ?? "").trim(),
+              ids
+                .split(",")
+                .map((id) => id.trim())
+                .filter(Boolean),
+            ] as const;
+          }),
+      );
+      await putInstructionProfile({
+        projectId: profileProjectId.trim(),
+        mode: profileMode,
+        shared: profileShared,
+        environments,
+      });
+      const next = await refresh();
+      applyProfile(next?.profiles[profileProjectId.trim()]);
+      setNotice("Project profile saved");
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    }
+  };
+
+  const materialize = async (force: boolean) => {
+    try {
+      const result = await materializeInstructions(force);
+      await refresh();
+      setNotice(
+        result.conflicts.length === 0
+          ? `Materialized ${result.written.length} target${result.written.length === 1 ? "" : "s"}`
+          : `Stopped on ${result.conflicts.length} drifted target${result.conflicts.length === 1 ? "" : "s"}; review or force`,
+      );
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     }
@@ -314,15 +392,15 @@ export function InstructionsPanel() {
 
       <SettingsSection title="Sync targets">
         <p className="text-xs text-muted-foreground">
-          One target per line: provider|scope|workspaceRoot|filename-or-path. Providers: codex,
-          claude, opencode, cursor, custom. Project targets need a workspace root; custom uses the
-          path field.
+          One target per line: provider|scope|environmentId|workspaceRoot|filename-or-path.
+          Providers: codex, claude, opencode, cursor, custom. Environment id and workspace root are
+          optional; custom uses the path field.
         </p>
         <textarea
           className={areaClass}
           value={syncText}
           onChange={(event) => setSyncText(event.target.value)}
-          placeholder={"codex|global||AGENTS.md\nclaude|global||CLAUDE.md"}
+          placeholder={"codex|global|||AGENTS.md\nclaude|project||/repo|CLAUDE.md"}
           disabled={draft.id === undefined}
         />
         <div className="mt-3 flex items-center gap-2">
@@ -354,6 +432,98 @@ export function InstructionsPanel() {
             ))}
           </div>
         ) : null}
+      </SettingsSection>
+
+      <SettingsSection title="Project instruction profile">
+        <p className="text-xs text-muted-foreground">
+          One shared file set for every linked environment, or a per-environment selection.
+          Environment ids match the linked environment. Thread optional files still layer on top.
+        </p>
+        <div className="flex flex-wrap items-end gap-2">
+          <label className="flex min-w-64 flex-1 flex-col gap-1 text-xs font-medium">
+            Project id
+            <input
+              className={inputClass}
+              value={profileProjectId}
+              onChange={(event) => setProfileProjectId(event.target.value)}
+              placeholder="project id"
+            />
+          </label>
+          <Button type="button" size="sm" variant="outline" onClick={() => loadProfile()}>
+            Load
+          </Button>
+          <Button
+            type="button"
+            size="sm"
+            disabled={profileProjectId.trim().length === 0}
+            onClick={() => void saveProfile()}
+          >
+            Save profile
+          </Button>
+        </div>
+        <div className="mt-3 grid gap-3 sm:grid-cols-2">
+          <label className="flex flex-col gap-1 text-xs font-medium">
+            Mode
+            <select
+              className={inputClass}
+              value={profileMode}
+              onChange={(event) =>
+                setProfileMode(event.target.value as "shared" | "per-environment")
+              }
+            >
+              <option value="shared">Shared for every environment</option>
+              <option value="per-environment">Per environment</option>
+            </select>
+          </label>
+          <label className="flex flex-col gap-1 text-xs font-medium">
+            Per-environment selection
+            <textarea
+              className={`${areaClass} min-h-24`}
+              value={profileEnvironments}
+              onChange={(event) => setProfileEnvironments(event.target.value)}
+              placeholder={"environment-id=file-id,file-id"}
+              disabled={profileMode !== "per-environment"}
+            />
+          </label>
+        </div>
+        <div className="mt-3 grid gap-1 sm:grid-cols-2">
+          {files.length === 0 ? (
+            <p className="text-xs text-muted-foreground">No files yet.</p>
+          ) : (
+            files.map((file) => (
+              <label key={file.id} className="flex items-center gap-2 text-sm">
+                <input
+                  type="checkbox"
+                  checked={profileShared.includes(file.id)}
+                  disabled={profileMode !== "shared"}
+                  onChange={(event) =>
+                    setProfileShared((current) =>
+                      event.target.checked
+                        ? [...new Set([...current, file.id])]
+                        : current.filter((id) => id !== file.id),
+                    )
+                  }
+                />
+                {file.title}
+              </label>
+            ))
+          )}
+        </div>
+      </SettingsSection>
+
+      <SettingsSection title="Materialize">
+        <p className="text-xs text-muted-foreground">
+          Rewrites every sync target from the stored files. Drifted targets stop the run unless you
+          force it. The fleet mirror uses the same conflict rule.
+        </p>
+        <div className="mt-3 flex items-center gap-2">
+          <Button type="button" size="sm" variant="outline" onClick={() => void materialize(false)}>
+            Materialize
+          </Button>
+          <Button type="button" size="sm" variant="outline" onClick={() => void materialize(true)}>
+            Force materialize
+          </Button>
+        </div>
       </SettingsSection>
 
       <SettingsSection title="Thread attachments">
