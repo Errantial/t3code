@@ -82,6 +82,18 @@ function commandArgs(command: ChildProcess.Command): ReadonlyArray<string> {
 const ARCHIVE = { archiveVersion: "1.2.3-preview.20260911.4" } as const;
 
 describe("ssh tunnel scripts", () => {
+  it("resolves the release a remote runtime archive is published under", () => {
+    assert.equal(
+      SshTunnel.remoteRuntimeReleaseVersion("0.1.5-v1.1.4.20261031.98beeb3e80fd.connect1"),
+      "0.1.5",
+    );
+    assert.equal(
+      SshTunnel.remoteRuntimeReleaseVersion("0.1.5-nightly.20261029.3877"),
+      "0.1.5-nightly.20261029.3877",
+    );
+    assert.equal(SshTunnel.remoteRuntimeReleaseVersion("0.1.5"), "0.1.5");
+  });
+
   it("rejects archive versions that are not a single exact version segment", () => {
     for (const archiveVersion of [
       "../other",

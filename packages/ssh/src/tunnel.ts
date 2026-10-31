@@ -68,6 +68,18 @@ export interface RemoteT3RunnerOptions {
   readonly releaseBaseUrl?: string | null;
 }
 
+/**
+ * The version a remote runtime archive is published under. Fork desktop builds append
+ * their own release suffix (`0.1.5-v1.1.4.20261031.98beeb3e80fd.connect1`), but the
+ * archive and its release tag use the base version (`v0.1.5`). Using the full app
+ * version makes the remote bootstrap download a tag that does not exist.
+ */
+export function remoteRuntimeReleaseVersion(appVersion: string): string {
+  const trimmed = appVersion.trim();
+  const forkRelease = /^(.+?)-v\d+\.\d+\.\d+\.\d{8}\.[0-9a-f]{8,}\.connect\d+$/i.exec(trimmed);
+  return forkRelease?.[1] ?? trimmed;
+}
+
 export interface SshEnvironmentManagerOptions {
   readonly resolveCliRunner?: Effect.Effect<RemoteT3RunnerOptions>;
 }

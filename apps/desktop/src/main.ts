@@ -20,6 +20,7 @@ import * as Electron from "electron";
 import * as NetService from "@t3tools/shared/Net";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import type { RemoteT3RunnerOptions } from "@t3tools/ssh/tunnel";
+import { remoteRuntimeReleaseVersion } from "@t3tools/ssh/tunnel";
 import serverPackageJson from "../../server/package.json" with { type: "json" };
 
 import * as DesktopIpc from "./ipc/DesktopIpc.ts";
@@ -42,6 +43,7 @@ import * as DesktopClerk from "./app/DesktopClerk.ts";
 import * as DesktopCliCommand from "./app/DesktopCliCommand.ts";
 import * as DesktopApplicationMenu from "./window/DesktopApplicationMenu.ts";
 import * as DesktopAssets from "./app/DesktopAssets.ts";
+import * as RemoteRuntimeSyncMigration from "./remoteRuntimeSyncMigration.ts";
 import * as DesktopBackendConfiguration from "./backend/DesktopBackendConfiguration.ts";
 import * as DesktopBackendPool from "./backend/DesktopBackendPool.ts";
 import * as DesktopLocalEnvironmentAuth from "./backend/DesktopLocalEnvironmentAuth.ts";
@@ -113,7 +115,7 @@ const resolveDesktopSshCliRunner = (
       nodeEngineRange: serverPackageJson.engines.node,
     };
   }
-  return { archiveVersion: environment.appVersion };
+  return { archiveVersion: remoteRuntimeReleaseVersion(environment.appVersion) };
 };
 
 const layerDesktopSshEnvironment = Layer.unwrap(
@@ -239,5 +241,21 @@ const layerDesktopRuntime = layerDesktopClerk.pipe(
   ),
   Layer.provideMerge(DesktopPreReadyPlatform.layer),
 );
+
+// One-way repair for the support task older fork builds created on Windows. The task
+// itself keeps running; only its launcher changes, so a console window never appears.
+if (process.platform === "win32" && Electron.app.isPackaged) {
+  void Electron.app
+    .whenReady()
+    .then(() => RemoteRuntimeSyncMigration.migrateRemoteRuntimeSyncTask())
+    .then((result) => {
+      if (result.status === "migrated") {
+        console.info(
+          `[remote-runtime-sync] scheduled task now runs hidden via ${result.launcherPath ?? "wscript"}`,
+        );
+      }
+    })
+    .catch(() => undefined);
+}
 
 DesktopApp.program.pipe(Effect.provide(layerDesktopRuntime), NodeRuntime.runMain);
