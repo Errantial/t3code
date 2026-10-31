@@ -272,6 +272,12 @@ export function useThreadActions() {
   const unsettleThreadMutation = useOrchestrationCommand(threadEnvironment.unsettle, {
     reportFailure: false,
   });
+  const saveThreadMutation = useOrchestrationCommand(threadEnvironment.save, {
+    reportFailure: false,
+  });
+  const unsaveThreadMutation = useOrchestrationCommand(threadEnvironment.unsave, {
+    reportFailure: false,
+  });
   const pinThreadMutation = useOrchestrationCommand(threadEnvironment.pin, {
     reportFailure: false,
   });
@@ -648,6 +654,18 @@ export function useThreadActions() {
     });
   };
 
+  const saveThread = async (target: ScopedThreadRef) =>
+    saveThreadMutation({
+      environmentId: target.environmentId,
+      input: { threadId: target.threadId },
+    });
+
+  const unsaveThread = async (target: ScopedThreadRef) =>
+    unsaveThreadMutation({
+      environmentId: target.environmentId,
+      input: { threadId: target.threadId },
+    });
+
   const setThreadAutoSettle = async (target: ScopedThreadRef, enabled: boolean) => {
     if (!readEnvironmentSupportsAutoSettleOptOut(target.environmentId)) {
       return AsyncResult.failure(
@@ -934,6 +952,8 @@ export function useThreadActions() {
     confirmAndDeleteThread,
     settleThread,
     unsettleThread,
+    saveThread,
+    unsaveThread,
     snoozeThread,
     unsnoozeThread,
     pinThread,

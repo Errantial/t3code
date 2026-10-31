@@ -61,6 +61,7 @@ import {
 import type { OlderSettledScope } from "@t3tools/client-runtime/state/threads";
 
 import {
+  BookmarkIcon,
   CheckIcon,
   ChevronDownIcon,
   FolderIcon,
@@ -345,6 +346,8 @@ interface SidebarThreadPartitionInput {
   readonly pinnedThreadsOnTop: boolean;
   /** Boring mode: folders list active threads by the user's latest message. */
   readonly sortActiveBySend: boolean;
+  /** Saved view: show saved threads in the active list regardless of settled/pinned state. */
+  readonly forceActive?: boolean;
   // Snooze wakes, the queued-turn grace and the Working shelf's exit grace depend
   // on the clock, so the minute tick, the precise snooze-wake tick and the inbox
   // tracker's expiry version are inputs: a new key repartitions.
@@ -409,6 +412,8 @@ function useSidebarThreads(input: {
   readonly folderGroups: readonly SidebarProjectSnapshot[] | null;
   // Keeps folders with no active threads, so a project the user filtered to can start one.
   readonly keepEmptyFolders: boolean;
+  /** Saved view: show saved threads in the active list regardless of settled/pinned state. */
+  readonly forceActive?: boolean;
 }) {
   const {
     projectScopeKey,
@@ -605,6 +610,7 @@ function partitionSidebarThreads(input: SidebarThreadPartitionInput) {
     workingShelfEnabled,
     pinnedThreadsOnTop,
     sortActiveBySend,
+    forceActive = false,
   } = input;
   const preciseNow = new Date().toISOString();
   const visible = filterSidebarV2VisibleThreads(threads, scopedProjectKeys, delegatedUnderParent);
@@ -627,6 +633,10 @@ function partitionSidebarThreads(input: SidebarThreadPartitionInput) {
     if (configLoaded) {
       activeReorderable.add(threadKey);
       draggable.add(threadKey);
+    }
+    if (forceActive) {
+      active.push(thread);
+      continue;
     }
     if (optimisticDrop?.key === threadKey) {
       const projected = applySidebarThreadDrop(
@@ -901,6 +911,8 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
   const {
     settleThread,
     unsettleThread,
+    saveThread,
+    unsaveThread,
     snoozeThread,
     unsnoozeThread,
     pinThread,
@@ -1006,6 +1018,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
   const [optimisticDrop, setOptimisticDrop] = useState<SidebarOptimisticDrop | null>(null);
   const threadSearchInputRef = useRef<HTMLInputElement>(null);
   const [threadSearchQuery, setThreadSearchQuery] = useState("");
+  const [savedOnly, setSavedOnly] = useState(false);
   const [searchHighlightKey, setSearchHighlightKey] = useState<string | null>(null);
   const searchEnvironmentIds = useConnectedEnvironmentIds();
   const queuePendingFileDrop = useSidebarPendingFileDropStore((s) => s.queuePendingFileDrop);
@@ -1075,7 +1088,11 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
             ),
           ),
         );
-  const threads = useQuietThreadShells();
+  const allThreads = useQuietThreadShells();
+  const savedThreadsForView = allThreads.filter((thread) => thread.savedAt != null);
+  const threads = savedOnly
+    ? savedThreadsForView
+    : allThreads.filter((thread) => thread.savedAt == null);
   const routeRowThreadKey =
     routeThreadRef === null
       ? null
@@ -1293,6 +1310,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
         : scopedProjectGroups
       : null,
     keepEmptyFolders: scopedProjectGroups.length > 0,
+    forceActive: savedOnly,
   });
 
   // Ranked across environments as the palette ranks them, so one
@@ -1805,6 +1823,36 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
           stackedThreadToast({
             type: "error",
             title: "Failed to pin thread",
+            description: error instanceof Error ? error.message : "An error occurred.",
+          }),
+        );
+      }
+    })();
+  };
+  const attemptSave = (threadRef: ScopedThreadRef) => {
+    void (async () => {
+      const result = await saveThread(threadRef);
+      if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
+        const error = squashAtomCommandFailure(result);
+        toastManager.add(
+          stackedThreadToast({
+            type: "error",
+            title: "Failed to save thread",
+            description: error instanceof Error ? error.message : "An error occurred.",
+          }),
+        );
+      }
+    })();
+  };
+  const attemptUnsave = (threadRef: ScopedThreadRef) => {
+    void (async () => {
+      const result = await unsaveThread(threadRef);
+      if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
+        const error = squashAtomCommandFailure(result);
+        toastManager.add(
+          stackedThreadToast({
+            type: "error",
+            title: "Failed to restore thread",
             description: error instanceof Error ? error.message : "An error occurred.",
           }),
         );
@@ -2530,6 +2578,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
             .threadAutoSettleOptOut === true;
         const isRegeneratingTitle = thread.titleRegeneration != null;
         const isSettled = settledThreadKeysRef.current.has(threadKey);
+        const isSaved = thread.savedAt != null;
         const isSnoozed = snoozedThreadKeysRef.current.has(threadKey);
         const isPinned = thread.pinnedAt != null;
         const snoozePresets = resolveSnoozePresets(
@@ -2561,6 +2610,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                 : null,
               isPinned,
               isSettled,
+              isSaved,
               autoSettleEnabled: thread.autoSettleDisabledAt == null,
               isSnoozed,
               canSnoozeNow: canSnooze(thread, { now: new Date().toISOString() }),
@@ -2640,6 +2690,12 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
             return;
           case "unsettle":
             attemptUnsettle(threadRef);
+            return;
+          case "save":
+            attemptSave(threadRef);
+            return;
+          case "unsave":
+            attemptUnsave(threadRef);
             return;
           case "unsnooze":
             attemptUnsnooze(threadRef);
@@ -3072,6 +3128,15 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                   </ComboboxPopup>
                 </Combobox>
               }
+              savedToggle={
+                <SidebarHeaderIconButton
+                  label={savedOnly ? "Show all threads" : "Saved threads"}
+                  aria-pressed={savedOnly}
+                  onClick={() => setSavedOnly((value) => !value)}
+                >
+                  <BookmarkIcon />
+                </SidebarHeaderIconButton>
+              }
               onNewProject={openAddProjectCommandPalette}
               onNewThread={handleNewThreadClick}
               newThreadDisabled={projects.length === 0}
@@ -3094,6 +3159,21 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
         }
       >
         <SidebarGroup className="flex-1" role="presentation">
+          {savedOnly && !isSearchingThreads ? (
+            <div className="flex items-center justify-between gap-2 px-2.5 py-1 text-xs font-medium text-sidebar-muted-foreground">
+              <span className="inline-flex items-center gap-1.5">
+                <BookmarkIcon className="size-3.5" />
+                Saved threads
+              </span>
+              <button
+                type="button"
+                onClick={() => setSavedOnly(false)}
+                className="cursor-pointer text-xs text-sidebar-muted-foreground hover:text-sidebar-foreground"
+              >
+                Show all
+              </button>
+            </div>
+          ) : null}
           {isSearchingThreads ? (
             threadSearchResults.length > 0 ? (
               <TooltipProvider
@@ -3302,6 +3382,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                             onSettle={attemptSettle}
                             onActionSweepStart={startActionSweep}
                             onUnsettle={attemptUnsettle}
+                            onUnsave={attemptUnsave}
                             onSnooze={attemptSnooze}
                             onUnsnooze={attemptUnsnooze}
                             onUnpin={attemptUnpin}

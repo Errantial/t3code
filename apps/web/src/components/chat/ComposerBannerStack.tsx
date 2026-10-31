@@ -16,6 +16,8 @@ export interface ComposerBannerStackItem {
   readonly id: string;
   readonly variant: ComposerBannerVariant;
   readonly group?: ComposerBannerGroup;
+  /** Activity banners sort after environment notices. */
+  readonly priority?: "activity";
   readonly icon: ReactNode;
   readonly title: ReactNode;
   readonly description?: ReactNode;

@@ -86,6 +86,8 @@ export type DeleteThreadInput = ThreadCommandInput;
 export type ArchiveThreadInput = ThreadCommandInput;
 export type UnarchiveThreadInput = ThreadCommandInput;
 export type SettleThreadInput = ThreadCommandInput;
+export type SaveThreadInput = ThreadCommandInput;
+export type UnsaveThreadInput = ThreadCommandInput;
 
 export interface UnsettleThreadInput extends ThreadCommandInput {
   readonly reason: "user";
@@ -405,6 +407,8 @@ function simpleThreadCommand(
     | "thread.archive"
     | "thread.unarchive"
     | "thread.settle"
+    | "thread.save"
+    | "thread.unsave"
     | "thread.pin"
     | "thread.unpin"
     | "thread.guest-share.close",
@@ -542,6 +546,18 @@ export const unsettleThread = Effect.fn("EnvironmentCommands.unsettleThread")(fu
     threadId: input.threadId,
     reason: input.reason,
   });
+});
+
+export const saveThread = Effect.fn("EnvironmentCommands.saveThread")(function* (
+  input: SaveThreadInput,
+) {
+  return yield* simpleThreadCommand("thread.save", input);
+});
+
+export const unsaveThread = Effect.fn("EnvironmentCommands.unsaveThread")(function* (
+  input: UnsaveThreadInput,
+) {
+  return yield* simpleThreadCommand("thread.unsave", input);
 });
 
 export const snoozeThread = Effect.fn("EnvironmentCommands.snoozeThread")(function* (

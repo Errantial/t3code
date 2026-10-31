@@ -1374,6 +1374,69 @@ it.effect("explicit settle clears snooze atomically and stays idempotent after r
   }).pipe(Effect.provide(layerTest)),
 );
 
+it.effect("save shelves a thread independently of settlement and unsave restores its prior state", () =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const projections = yield* ProjectionStore.ProjectionStoreV2;
+    const events = yield* EventSink.EventSinkV2;
+    const threadId = ThreadId.make("thread:saved-state");
+    yield* orchestrator.dispatch({
+      type: "thread.create",
+      commandId: CommandId.make("create-saved-state"),
+      threadId,
+      projectId: ProjectId.make("project:saved-state"),
+      title: "Saved thread",
+      modelSelection,
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      branch: null,
+      worktreePath: null,
+      createdBy: "user",
+      creationSource: "web",
+    });
+    yield* TestClock.adjust("1 second");
+    const savedCommandId = CommandId.make("save-thread");
+    yield* orchestrator.dispatch({ type: "thread.save", commandId: savedCommandId, threadId });
+    const saved = yield* projections.getThreadShell(threadId);
+    assert.isNotNull(saved);
+    assert.isNotNull(saved.savedAt);
+    assert.isNull(saved.settledAt);
+    const savedEvents = yield* events.readByCommandId({ commandId: savedCommandId }).pipe(Stream.runCollect);
+    assert.lengthOf(savedEvents, 1);
+    assert.equal(savedEvents[0]?.event.type, "thread.saved");
+    yield* orchestrator.dispatch({
+      type: "thread.save",
+      commandId: CommandId.make("save-thread-again"),
+      threadId,
+    });
+    assert.deepEqual(yield* projections.getThreadShell(threadId), saved);
+
+    yield* TestClock.adjust("1 second");
+    yield* orchestrator.dispatch({
+      type: "thread.settle",
+      commandId: CommandId.make("settle-while-saved"),
+      threadId,
+    });
+    const settledButSaved = yield* projections.getThreadShell(threadId);
+    assert.isNotNull(settledButSaved);
+    assert.equal(settledButSaved.settledOverride, "settled");
+    assert.deepEqual(settledButSaved.savedAt, saved.savedAt);
+
+    yield* TestClock.adjust("1 second");
+    const unsaveCommandId = CommandId.make("unsave-thread");
+    yield* orchestrator.dispatch({ type: "thread.unsave", commandId: unsaveCommandId, threadId });
+    const restored = yield* projections.getThreadShell(threadId);
+    assert.isNotNull(restored);
+    assert.isNull(restored.savedAt);
+    assert.equal(restored.settledOverride, "settled");
+    const unsavedEvents = yield* events
+      .readByCommandId({ commandId: unsaveCommandId })
+      .pipe(Stream.runCollect);
+    assert.lengthOf(unsavedEvents, 1);
+    assert.equal(unsavedEvents[0]?.event.type, "thread.unsaved");
+  }).pipe(Effect.provide(layerTest)),
+);
+
 it.effect("dispatch records the command outcome and its duration", () =>
   Effect.gen(function* () {
     const orchestrator = yield* Orchestrator.OrchestratorV2;

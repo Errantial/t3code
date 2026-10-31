@@ -202,6 +202,8 @@ export const layer: Layer.Layer<
       "thread.unarchived",
       "thread.settled",
       "thread.unsettled",
+      "thread.saved",
+      "thread.unsaved",
       "thread.snoozed",
       "thread.unsnoozed",
       "thread.pinned",

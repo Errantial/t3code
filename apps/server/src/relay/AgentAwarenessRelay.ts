@@ -104,6 +104,8 @@ function shouldPublishAgentAwarenessEvent(
       return true;
     // Unsettling must not re-alert a dismissed result.
     case "thread.unsettled":
+    case "thread.saved":
+    case "thread.unsaved":
     case "thread.guest-share-updated":
     case "thread.snoozed":
     case "thread.unsnoozed":

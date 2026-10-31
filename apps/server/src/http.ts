@@ -30,6 +30,11 @@ import * as HttpApiBuilder from "effect/http-api/HttpApiBuilder";
 import { OtlpTracer, OtlpSerialization } from "effect/observability";
 
 import * as ServerConfig from "./config.ts";
+import {
+  InstructionConflictError,
+  InstructionNotFoundError,
+  InstructionStore,
+} from "./instructions/InstructionStore.ts";
 import { ASSET_ROUTE_PREFIX, readMcpAppHtml, resolveAsset } from "./assets/AssetAccess.ts";
 import { sourceControlMediaResponse } from "./assets/sourceControlMediaResponse.ts";
 import { statMediaFile, streamMediaFile, type OpenMediaFile } from "./assets/MediaFile.ts";
@@ -720,4 +725,113 @@ export const layerStaticAndDevRoute = Layer.unwrap(
   loadImmutableBuildAssets.pipe(
     Effect.map((assets) => HttpRouter.add("GET", "*", handleStaticAndDevRequest(assets))),
   ),
+);
+
+
+// Instruction library: global/project files, sync targets and per-thread optional attachments.
+// Stored under T3CODE_HOME/instructions so the fleet sync script can mirror it between machines.
+const instructionStore = Effect.gen(function* () {
+  const config = yield* ServerConfig.ServerConfig;
+  const path = yield* Path.Path;
+  return new InstructionStore(path.join(config.baseDir, "instructions"));
+});
+
+function instructionErrorResponse(error: unknown): HttpServerResponse.HttpServerResponse {
+  if (error instanceof InstructionConflictError) {
+    return HttpServerResponse.jsonUnsafe(
+      { error: "conflict", message: error.message, currentRevision: error.currentRevision },
+      { status: 409 },
+    );
+  }
+  if (error instanceof InstructionNotFoundError) {
+    return HttpServerResponse.jsonUnsafe(
+      { error: "not_found", message: error.message },
+      { status: 404 },
+    );
+  }
+  return HttpServerResponse.jsonUnsafe(
+    { error: "invalid_request", message: error instanceof Error ? error.message : String(error) },
+    { status: 400 },
+  );
+}
+
+export const layerInstructionGetRoute = HttpRouter.add(
+  "GET",
+  "/api/instructions",
+  Effect.gen(function* () {
+    yield* authenticateRawRouteWithScope(AuthOrchestrationReadScope);
+    const store = yield* instructionStore;
+    return HttpServerResponse.jsonUnsafe(store.snapshot());
+  }),
+);
+
+export const layerInstructionPutRoute = HttpRouter.add(
+  "POST",
+  "/api/instructions/files",
+  Effect.gen(function* () {
+    yield* authenticateRawRouteWithScope(AuthOrchestrationOperateScope);
+    const request = yield* HttpServerRequest.HttpServerRequest;
+    const body = cast<unknown, Parameters<InstructionStore["putFile"]>[0]>(yield* request.json);
+    const store = yield* instructionStore;
+    const result = yield* Effect.sync(() => {
+      try {
+        return { ok: true as const, file: store.putFile(body) };
+      } catch (error) {
+        return { ok: false as const, error };
+      }
+    });
+    return result.ok
+      ? HttpServerResponse.jsonUnsafe({ file: result.file })
+      : instructionErrorResponse(result.error);
+  }),
+);
+
+export const layerInstructionSyncRoute = HttpRouter.add(
+  "POST",
+  "/api/instructions/syncs",
+  Effect.gen(function* () {
+    yield* authenticateRawRouteWithScope(AuthOrchestrationOperateScope);
+    const request = yield* HttpServerRequest.HttpServerRequest;
+    const body = cast<unknown, Parameters<InstructionStore["setSync"]>[0]>(yield* request.json);
+    const store = yield* instructionStore;
+    const result = yield* Effect.sync(() => {
+      try {
+        return { ok: true as const, sync: store.setSync(body) };
+      } catch (error) {
+        return { ok: false as const, error };
+      }
+    });
+    return result.ok
+      ? HttpServerResponse.jsonUnsafe({ sync: result.sync })
+      : instructionErrorResponse(result.error);
+  }),
+);
+
+export const layerInstructionSyncRemoveRoute = HttpRouter.add(
+  "POST",
+  "/api/instructions/syncs/remove",
+  Effect.gen(function* () {
+    yield* authenticateRawRouteWithScope(AuthOrchestrationOperateScope);
+    const request = yield* HttpServerRequest.HttpServerRequest;
+    const body = cast<unknown, { readonly id: string }>(yield* request.json);
+    const store = yield* instructionStore;
+    store.removeSync(body.id);
+    return HttpServerResponse.jsonUnsafe({ removed: true });
+  }),
+);
+
+export const layerInstructionAttachmentsRoute = HttpRouter.add(
+  "POST",
+  "/api/instructions/attachments",
+  Effect.gen(function* () {
+    yield* authenticateRawRouteWithScope(AuthOrchestrationOperateScope);
+    const request = yield* HttpServerRequest.HttpServerRequest;
+    const body = cast<
+      unknown,
+      { readonly threadId: string; readonly fileIds: ReadonlyArray<string> }
+    >(yield* request.json);
+    const store = yield* instructionStore;
+    const fileIds = store.setThreadAttachments(body.threadId, body.fileIds);
+    return HttpServerResponse.jsonUnsafe({ threadId: body.threadId, fileIds });
+  }),
 );

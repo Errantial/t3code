@@ -10,6 +10,8 @@ export type ThreadActionMenuId =
   | "unpin"
   | "settle"
   | "unsettle"
+  | "save"
+  | "unsave"
   | "auto-settle"
   | "auto-settle:enabled"
   | "auto-settle:disabled"
@@ -77,6 +79,7 @@ export interface ThreadActionMenuState {
   } | null;
   readonly isPinned: boolean;
   readonly isSettled: boolean;
+  readonly isSaved?: boolean;
   readonly autoSettleEnabled: boolean;
   readonly isSnoozed: boolean;
   readonly canSnoozeNow: boolean;
@@ -139,6 +142,9 @@ export function buildThreadActionMenuItems(
           state.isSettled
             ? { id: "unsettle" as const, label: "Un-settle thread", icon: "circle-check" }
             : { id: "settle" as const, label: "Settle thread", icon: "circle-check" },
+          state.isSaved
+            ? { id: "unsave" as const, label: "Restore from Saved", icon: "bookmark" }
+            : { id: "save" as const, label: "Save for later", icon: "bookmark" },
         ]
       : []),
     ...(state.supports.snooze

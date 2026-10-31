@@ -44,6 +44,7 @@ import {
   reorderPinnedThread,
   reorderActiveThread,
   setThreadAutoSettle,
+  saveThread,
   settleThread,
   snoozeThread,
   startThreadTurn,
@@ -52,6 +53,7 @@ import {
   unlinkThreadPullRequest,
   unpinThread,
   unsettleThread,
+  unsaveThread,
   unsnoozeThread,
   updateThreadMetadata,
   visitThread,
@@ -163,6 +165,18 @@ export function createThreadEnvironmentAtoms<R, E>(
     unsettle: createEnvironmentCommand(runtime, {
       label: "environment-data:commands:thread:unsettle",
       execute: unsettleThread,
+      scheduler,
+      concurrency,
+    }),
+    save: createEnvironmentCommand(runtime, {
+      label: "environment-data:commands:thread:save",
+      execute: saveThread,
+      scheduler,
+      concurrency,
+    }),
+    unsave: createEnvironmentCommand(runtime, {
+      label: "environment-data:commands:thread:unsave",
+      execute: unsaveThread,
       scheduler,
       concurrency,
     }),
@@ -392,6 +406,12 @@ export function createThreadEnvironmentAtoms<R, E>(
       settledAt: null,
       unsettledAt: thread.settledOverride === "active" ? (thread.unsettledAt ?? null) : now,
     })),
+    save: optimistic.wrap(commands.save, (thread, _input, now) =>
+      thread.savedAt != null ? thread : { ...thread, savedAt: now },
+    ),
+    unsave: optimistic.wrap(commands.unsave, (thread) =>
+      thread.savedAt == null ? thread : { ...thread, savedAt: null },
+    ),
     snooze: optimistic.wrap(commands.snooze, (thread, input, now, accepted) =>
       (!accepted &&
         (thread.pendingRuntimeRequest !== null ||

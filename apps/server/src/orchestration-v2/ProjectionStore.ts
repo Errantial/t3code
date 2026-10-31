@@ -755,6 +755,8 @@ export function applyToProjection(
     case "thread.deleted":
     case "thread.settled":
     case "thread.unsettled":
+    case "thread.saved":
+    case "thread.unsaved":
     case "thread.snoozed":
     case "thread.unsnoozed":
     case "thread.auto-settle-set":
@@ -1525,6 +1527,7 @@ export function threadShellFromProjection(
     settledOverride: projection.thread.settledOverride,
     settledAt: projection.thread.settledAt,
     unsettledAt: projection.thread.unsettledAt ?? null,
+    savedAt: projection.thread.savedAt ?? null,
     snoozedUntil: projection.thread.snoozedUntil ?? null,
     snoozedAt: projection.thread.snoozedAt ?? null,
     pinnedAt: projection.thread.pinnedAt ?? null,
@@ -1791,6 +1794,7 @@ function shellFromState(input: {
     settledOverride: input.state.thread.settledOverride,
     settledAt: input.state.thread.settledAt,
     unsettledAt: input.state.thread.unsettledAt ?? null,
+    savedAt: input.state.thread.savedAt ?? null,
     snoozedUntil: input.state.thread.snoozedUntil ?? null,
     snoozedAt: input.state.thread.snoozedAt ?? null,
     pinnedAt: input.state.thread.pinnedAt ?? null,
@@ -1848,6 +1852,8 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
             case "thread.deleted":
             case "thread.settled":
             case "thread.unsettled":
+            case "thread.saved":
+            case "thread.unsaved":
             case "thread.snoozed":
             case "thread.unsnoozed":
             case "thread.auto-settle-set":
@@ -2654,6 +2660,8 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
             event.type !== "thread.deleted" &&
             event.type !== "thread.settled" &&
             event.type !== "thread.unsettled" &&
+            event.type !== "thread.saved" &&
+            event.type !== "thread.unsaved" &&
             event.type !== "thread.snoozed" &&
             event.type !== "thread.unsnoozed" &&
             event.type !== "thread.auto-settle-set" &&
