@@ -76,6 +76,14 @@ describe("desktop update UI helpers", () => {
       );
     },
   );
+  it("links a fork build to its release tag", () => {
+    expect(
+      getDesktopUpdateReleaseUrl(
+        "0.1.5-v1.1.4.20261031.2b0773973df3.connect1",
+        "Errantial/t3onsteroids",
+      ),
+    ).toBe("https://github.com/Errantial/t3onsteroids/releases/tag/v1.1.4");
+  });
 });
 
 describe("canCheckForUpdate", () => {

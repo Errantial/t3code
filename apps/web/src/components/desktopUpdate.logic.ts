@@ -21,6 +21,15 @@ function desktopReleaseRepositoryUrl(repository: string | undefined): string {
   return `https://github.com/${releaseRepository}/releases`;
 }
 
+// Fork builds carry their release tag inside the T3 base version, e.g.
+// `0.1.5-v1.1.4.20261031.abcdef.connect1` is published as tag `v1.1.4`.
+const FORK_RELEASE_TAG = /(?:^|-)v(\d+\.\d+\.\d+)(?:[.-]|$)/u;
+
+function desktopReleaseTag(version: string): string {
+  const match = FORK_RELEASE_TAG.exec(version);
+  return match?.[1] ? `v${match[1]}` : `v${version}`;
+}
+
 /** The download RPC can beat the updater's downloadedVersion event; fall back to the requested version. */
 export function getDesktopUpdateDownloadedVersion(state: DesktopUpdateState): string | null {
   return state.downloadedVersion ?? state.availableVersion;
@@ -32,7 +41,7 @@ export function getDesktopUpdateReleaseUrl(
 ): string | null {
   const normalizedVersion = version?.trim();
   if (!normalizedVersion) return null;
-  return `${desktopReleaseRepositoryUrl(repository)}/tag/v${encodeURIComponent(normalizedVersion)}`;
+  return `${desktopReleaseRepositoryUrl(repository)}/tag/${encodeURIComponent(desktopReleaseTag(normalizedVersion))}`;
 }
 
 export function getDesktopUpdateReleaseHistoryUrl(
