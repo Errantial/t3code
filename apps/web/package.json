@@ -33,8 +33,6 @@
     "@pierre/trees": "1.0.0-beta.6",
     "@t3tools/client-runtime": "workspace:*",
     "@t3tools/contracts": "workspace:*",
-    "@t3tools/provider-acp-registry": "workspace:*",
-    "@t3tools/provider-chatgpt-browser": "workspace:*",
     "@t3tools/provider-core": "workspace:*",
     "@t3tools/shared": "workspace:*",
     "@tanstack/react-pacer": "^0.19.4",

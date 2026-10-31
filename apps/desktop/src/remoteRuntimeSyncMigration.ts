@@ -1,15 +1,15 @@
-import { spawn } from "node:child_process";
-import { mkdir, writeFile } from "node:fs/promises";
-import { dirname, isAbsolute, join } from "node:path";
+import * as NodeChildProcess from "node:child_process";
+import * as NodeFSP from "node:fs/promises";
+import * as NodePath from "node:path";
 
 /**
  * Windows Task Scheduler task created as a support workaround for the SSH runtime
  * bootstrap. Its action ran a console program directly, so a console window flashed
  * every time the task fired (every minute on the machines that have it).
  */
-export const REMOTE_RUNTIME_SYNC_TASK_NAME = "T3 Remote Runtime Sync";
+const REMOTE_RUNTIME_SYNC_TASK_NAME = "T3 Remote Runtime Sync";
 export const HIDDEN_LAUNCHER_FILE_NAME = "remote-runtime-sync-hidden.vbs";
-export const MIGRATED_INTERVAL = "PT15M";
+const MIGRATED_INTERVAL = "PT15M";
 
 export interface ScheduledTaskAction {
   readonly execute: string;
@@ -26,7 +26,6 @@ export interface HiddenLauncherPlan {
   readonly launcherPath: string;
 }
 
-const CONSOLE_HOSTS = new Set(["cmd.exe", "cmd", "powershell.exe", "powershell", "pwsh.exe", "pwsh"]);
 const HIDDEN_LAUNCHERS = new Set(["wscript.exe", "wscript", "cscript.exe", "cscript"]);
 
 function baseName(value: string): string {
@@ -61,27 +60,34 @@ export function planHiddenLauncher(action: ScheduledTaskAction): HiddenLauncherP
   if (HIDDEN_LAUNCHERS.has(host)) return null;
 
   if (host === "cmd.exe" || host === "cmd" || host.endsWith(".cmd") || host.endsWith(".bat")) {
-    const scriptPath = host.endsWith(".cmd") || host.endsWith(".bat")
-      ? execute
-      : unquote(argumentsText.replace(/^(?:\/[a-z]+\s+)*/i, ""));
-    if (!scriptPath || !isAbsolute(scriptPath)) return null;
-    const commandLine = host.endsWith(".cmd") || host.endsWith(".bat")
-      ? `cmd.exe /d /s /c ""${scriptPath}"${argumentsText ? ` ${argumentsText}` : ""}"`
-      : `"${execute}" ${argumentsText}`.trim();
+    const scriptPath =
+      host.endsWith(".cmd") || host.endsWith(".bat")
+        ? execute
+        : unquote(argumentsText.replace(/^(?:\/[a-z]+\s+)*/i, ""));
+    if (!scriptPath || !NodePath.isAbsolute(scriptPath)) return null;
+    const commandLine =
+      host.endsWith(".cmd") || host.endsWith(".bat")
+        ? `cmd.exe /d /s /c ""${scriptPath}"${argumentsText ? ` ${argumentsText}` : ""}"`
+        : `"${execute}" ${argumentsText}`.trim();
     return {
       scriptPath,
       commandLine,
-      launcherPath: join(dirname(scriptPath), HIDDEN_LAUNCHER_FILE_NAME),
+      launcherPath: NodePath.join(NodePath.dirname(scriptPath), HIDDEN_LAUNCHER_FILE_NAME),
     };
   }
 
-  if (host === "powershell.exe" || host === "powershell" || host === "pwsh.exe" || host === "pwsh") {
+  if (
+    host === "powershell.exe" ||
+    host === "powershell" ||
+    host === "pwsh.exe" ||
+    host === "pwsh"
+  ) {
     const scriptPath = powershellScriptPath(argumentsText);
-    if (!scriptPath || !isAbsolute(scriptPath)) return null;
+    if (!scriptPath || !NodePath.isAbsolute(scriptPath)) return null;
     return {
       scriptPath,
       commandLine: argumentsText ? `"${execute}" ${argumentsText}` : `"${execute}"`,
-      launcherPath: join(dirname(scriptPath), HIDDEN_LAUNCHER_FILE_NAME),
+      launcherPath: NodePath.join(NodePath.dirname(scriptPath), HIDDEN_LAUNCHER_FILE_NAME),
     };
   }
 
@@ -111,7 +117,7 @@ export function renderHiddenLauncher(plan: HiddenLauncherPlan): string {
 function runPowerShell(script: string): Promise<{ code: number; stdout: string; stderr: string }> {
   return new Promise((resolvePromise, rejectPromise) => {
     const encoded = Buffer.from(script, "utf16le").toString("base64");
-    const child = spawn(
+    const child = NodeChildProcess.spawn(
       "powershell.exe",
       ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand", encoded],
       { windowsHide: true, stdio: ["ignore", "pipe", "pipe"] },
@@ -120,8 +126,12 @@ function runPowerShell(script: string): Promise<{ code: number; stdout: string; 
     let stderr = "";
     child.stdout.setEncoding("utf8");
     child.stderr.setEncoding("utf8");
-    child.stdout.on("data", (chunk: string) => { stdout += chunk; });
-    child.stderr.on("data", (chunk: string) => { stderr += chunk; });
+    child.stdout.on("data", (chunk: string) => {
+      stdout += chunk;
+    });
+    child.stderr.on("data", (chunk: string) => {
+      stderr += chunk;
+    });
     child.once("error", rejectPromise);
     child.once("close", (code) => resolvePromise({ code: code ?? -1, stdout, stderr }));
   });
@@ -168,6 +178,7 @@ export interface RemoteRuntimeSyncMigrationResult {
  * recognised by its `wscript.exe` action and left untouched.
  */
 export async function migrateRemoteRuntimeSyncTask(): Promise<RemoteRuntimeSyncMigrationResult> {
+  // oxlint-disable-next-line t3code/no-global-process-runtime -- Electron main runs this migration before any Effect runtime exists.
   if (process.platform !== "win32") return { status: "absent", detail: "not windows" };
 
   const query = await runPowerShell(QUERY_TASK);
@@ -194,10 +205,11 @@ export async function migrateRemoteRuntimeSyncTask(): Promise<RemoteRuntimeSyncM
   }
 
   const plan = planHiddenLauncher(action);
-  if (plan === null) return { status: "unsupported", detail: `unrecognised action: ${action.execute}` };
+  if (plan === null)
+    return { status: "unsupported", detail: `unrecognised action: ${action.execute}` };
 
-  await mkdir(dirname(plan.launcherPath), { recursive: true });
-  await writeFile(plan.launcherPath, renderHiddenLauncher(plan), "utf8");
+  await NodeFSP.mkdir(NodePath.dirname(plan.launcherPath), { recursive: true });
+  await NodeFSP.writeFile(plan.launcherPath, renderHiddenLauncher(plan), "utf8");
 
   const rewrite = await runPowerShell(rewriteTaskScript(plan.launcherPath));
   if (rewrite.code !== 0 || rewrite.stdout.trim() !== "ok") {

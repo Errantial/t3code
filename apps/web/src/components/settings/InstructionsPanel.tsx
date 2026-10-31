@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { Button } from "../ui/button";
 import { SettingsPageContainer, SettingsSection } from "./settingsLayout";
 import {
@@ -54,17 +54,13 @@ function parseTargets(value: string): InstructionSyncTarget[] {
         provider: provider as InstructionSyncTarget["provider"],
         scope: scope as InstructionSyncTarget["scope"],
         ...(workspaceRoot ? { workspaceRoot } : {}),
-        ...(path
-          ? provider === "custom"
-            ? { path }
-            : { filename: path }
-          : {}),
+        ...(path ? (provider === "custom" ? { path } : { filename: path }) : {}),
       };
     });
 }
 
 const inputClass =
-  "w-full rounded-md border border-input bg-transparent px-2.5 py-1.5 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring";
+  "w-full rounded-md border border-input bg-transparent px-2.5 py-1.5 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring ring-inset";
 const areaClass = `${inputClass} min-h-40 font-mono text-xs`;
 
 export function InstructionsPanel() {
@@ -88,27 +84,34 @@ export function InstructionsPanel() {
     }
   };
 
+  // The server owns the instruction library; this panel has no atom for it yet.
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- initial snapshot load from the server-owned instruction library
   useEffect(() => {
-    void refresh();
+    let cancelled = false;
+    void readInstructions().then(
+      (next) => {
+        if (cancelled) return;
+        setSnapshot(next);
+        setError(null);
+      },
+      (cause: unknown) => {
+        if (cancelled) return;
+        setError(cause instanceof Error ? cause.message : String(cause));
+      },
+    );
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
-  const selectedSync = useMemo(
-    () =>
-      draft.id === undefined
-        ? undefined
-        : snapshot?.syncs.find((sync) => sync.fileId === draft.id),
-    [draft.id, snapshot],
-  );
-
-  useEffect(() => {
-    setSyncText(selectedSync?.targets.map(targetLine).join("\n") ?? "");
-  }, [selectedSync]);
+  const selectedSync =
+    draft.id === undefined ? undefined : snapshot?.syncs.find((sync) => sync.fileId === draft.id);
 
   const files = snapshot?.files ?? [];
   const optionalFiles = files.filter((file) => file.kind === "optional");
   const targets = draft.id === undefined ? [] : (snapshot?.targets[draft.id] ?? []);
 
-  const selectFile = (file: InstructionFile) => {
+  const selectFile = (file: InstructionFile, source: InstructionSnapshot | null = snapshot) => {
     setDraft({
       id: file.id,
       kind: file.kind,
@@ -119,6 +122,12 @@ export function InstructionsPanel() {
       content: file.content,
       revision: file.revision,
     });
+    setSyncText(
+      source?.syncs
+        .find((sync) => sync.fileId === file.id)
+        ?.targets.map(targetLine)
+        .join("\n") ?? "",
+    );
     setNotice(null);
     setError(null);
   };
@@ -137,7 +146,7 @@ export function InstructionsPanel() {
       });
       const next = await refresh();
       const saved = next?.files.find((file) => file.id === result.file.id);
-      if (saved) selectFile(saved);
+      if (saved) selectFile(saved, next);
       setNotice("Saved");
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
@@ -317,7 +326,12 @@ export function InstructionsPanel() {
           disabled={draft.id === undefined}
         />
         <div className="mt-3 flex items-center gap-2">
-          <Button type="button" size="sm" disabled={draft.id === undefined} onClick={() => void saveSync()}>
+          <Button
+            type="button"
+            size="sm"
+            disabled={draft.id === undefined}
+            onClick={() => void saveSync()}
+          >
             Save sync targets
           </Button>
           {selectedSync ? (
@@ -330,7 +344,9 @@ export function InstructionsPanel() {
           <div className="mt-3 flex flex-col gap-1">
             {targets.map((target) => (
               <div key={target.path} className="flex items-center gap-2 text-xs">
-                <span className={`rounded px-1.5 py-0.5 ${target.drift ? "bg-amber-500/15 text-amber-700" : "bg-muted"}`}>
+                <span
+                  className={`rounded px-1.5 py-0.5 ${target.drift ? "bg-warning-surface text-warning" : "bg-muted"}`}
+                >
                   {target.drift ? "drift" : target.exists ? "ok" : "missing"}
                 </span>
                 <code className="truncate">{target.path}</code>
@@ -391,7 +407,7 @@ export function InstructionsPanel() {
         </div>
       </SettingsSection>
 
-      {notice ? <p className="text-xs text-emerald-600">{notice}</p> : null}
+      {notice ? <p className="text-xs text-success">{notice}</p> : null}
       {error ? <p className="text-xs text-destructive">{error}</p> : null}
     </SettingsPageContainer>
   );

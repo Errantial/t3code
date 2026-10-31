@@ -194,6 +194,9 @@ export default defineConfig({
       ".repos",
       ".repos/**",
       "infra/task-cache/vendor/**",
+      // The browser extension loads these scripts by manifest filename; they
+      // run in ChatGPT's page context and predate the app's TS lint rules.
+      "packages/provider-chatgpt-browser/assets/extension/**",
       "dist",
       "dist-electron",
       "node_modules",

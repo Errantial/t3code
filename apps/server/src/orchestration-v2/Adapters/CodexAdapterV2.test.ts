@@ -246,6 +246,29 @@ describe("CodexAdapterV2 runtime policy", () => {
       assert.isDefined(withT3.additionalContext?.["t3_code_runtime"]);
     }),
   );
+
+  it.effect("sends turn context as application additional context", () =>
+    Effect.gen(function* () {
+      const params = yield* CodexAdapterV2.buildCodexTurnStartParams({
+        nativeThreadId: "native-turn-context",
+        codexInput: [{ type: "text", text: "review" }],
+        runtimePolicy: { runtimeMode: "full-access", interactionMode: "default", cwd: null },
+        modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5.4" },
+        turnContext: [
+          { key: "instruction_files", trust: "trusted", text: "Review for races." },
+          { key: "page", trust: "untrusted", text: "untrusted page text" },
+        ],
+      });
+      assert.deepEqual(params.additionalContext?.["instruction_files"], {
+        kind: "application",
+        value: "Review for races.",
+      });
+      assert.deepEqual(params.additionalContext?.["page"], {
+        kind: "untrusted",
+        value: "untrusted page text",
+      });
+    }),
+  );
 });
 
 describe("CodexAdapterV2 native protocol logging", () => {

@@ -3135,6 +3135,56 @@ it.effect("does not start a turn whose run settled during the app context read",
   }),
 );
 
+it.effect("skips turn-context contributors when the run settled before start", () =>
+  Effect.gen(function* () {
+    const built = yield* Ref.make(0);
+    const contextReadStarted = yield* Deferred.make<void>();
+    const runFailed = yield* Deferred.make<void>();
+    const current = yield* Ref.make(true);
+    const { observed } = yield* captureRootRunTermination({
+      key: "stream-end:turn-context-settled",
+      shouldStartProviderTurn: () => Ref.get(current),
+      shouldFinalizeRun: () => Ref.get(current),
+      events: () => Stream.unwrap(Deferred.await(contextReadStarted).pipe(Effect.as(Stream.empty))),
+      appContext: Deferred.succeed(contextReadStarted, undefined).pipe(
+        Effect.andThen(Deferred.await(runFailed)),
+        Effect.as([]),
+      ),
+      refreshAfterTurn: Ref.set(current, false).pipe(
+        Effect.andThen(Deferred.succeed(runFailed, undefined)),
+      ),
+      buildTurnContext: () =>
+        Ref.update(built, (count) => count + 1).pipe(
+          Effect.as([{ key: "instruction_files", trust: "trusted" as const, text: "role" }]),
+        ),
+    });
+    assert.deepEqual(observed, ["run:failed", "pull-requests-refreshed"]);
+    assert.equal(yield* Ref.get(built), 0);
+  }),
+);
+
+it.effect("passes built turn context to the provider turn", () =>
+  Effect.gen(function* () {
+    const seen = yield* Ref.make<
+      ReadonlyArray<ProviderAdapter.ProviderAdapterV2TurnInput["turnContext"]>
+    >([]);
+    const built = yield* Ref.make(0);
+    yield* captureRootRunTermination({
+      key: "stream-end:turn-context-delivery",
+      shouldFinalizeRun: () => Effect.succeed(true),
+      buildTurnContext: () =>
+        Ref.update(built, (count) => count + 1).pipe(
+          Effect.as([{ key: "instruction_files", trust: "trusted" as const, text: "role" }]),
+        ),
+      startTurn: (turnInput) => Ref.update(seen, (current) => [...current, turnInput.turnContext]),
+    });
+    assert.equal(yield* Ref.get(built), 1);
+    assert.deepEqual(yield* Ref.get(seen), [
+      [{ key: "instruction_files", trust: "trusted", text: "role" }],
+    ]);
+  }),
+);
+
 it.effect("keeps completed runs completed when pull request refresh fails", () =>
   Effect.gen(function* () {
     const { observed } = yield* captureRootRunTermination({
@@ -3170,6 +3220,7 @@ function captureRootRunTermination(input: {
   readonly refreshAfterTurn?: Effect.Effect<void>;
   readonly onSubscriptionClose?: Effect.Effect<void>;
   readonly shouldStartProviderTurn?: RunExecutionService.RunExecutionServiceV2StartRootRunInput["shouldStartProviderTurn"];
+  readonly buildTurnContext?: RunExecutionService.RunExecutionServiceV2StartRootRunInput["buildTurnContext"];
   readonly appContext?: ReturnType<McpAppModelContext.McpAppModelContext["Service"]["forThread"]>;
   readonly ingestNormalized?: ProviderEventIngestor.ProviderEventIngestorV2["Service"]["ingestNormalized"];
   readonly beforeTerminalWrite?: (
@@ -3343,6 +3394,9 @@ function captureRootRunTermination(input: {
         ...(input.shouldStartProviderTurn === undefined
           ? {}
           : { shouldStartProviderTurn: input.shouldStartProviderTurn }),
+        ...(input.buildTurnContext === undefined
+          ? {}
+          : { buildTurnContext: input.buildTurnContext }),
         ...(input.hasUnpairedRunInterruptRequest === undefined
           ? {}
           : {

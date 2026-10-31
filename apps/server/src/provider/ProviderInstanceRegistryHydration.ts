@@ -26,6 +26,7 @@ import type * as ProviderHost from "@t3tools/provider-core/server/ProviderHost";
 import type * as BackgroundPolicy from "../background/BackgroundPolicy.ts";
 import * as ServerConfig from "../config.ts";
 import type * as PortScanner from "../preview/PortScanner.ts";
+import type * as SqlClient from "effect/sql/SqlClient";
 
 type ProviderInstanceRegistryHydrationEnv =
   | Exclude<
@@ -40,7 +41,8 @@ type ProviderInstanceRegistryHydrationEnv =
   | Path.Path
   | FileSystem.FileSystem
   // The Claude runner counts its CLIs as running agents for port discovery.
-  | PortScanner.PortDiscovery;
+  | PortScanner.PortDiscovery
+  | SqlClient.SqlClient;
 
 export const deriveProviderInstanceConfigMap = (
   settings: ServerSettings,

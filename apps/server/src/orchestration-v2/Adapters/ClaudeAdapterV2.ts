@@ -175,6 +175,7 @@ import {
   T3_CODE_ORCHESTRATION_INSTRUCTIONS,
 } from "@t3tools/provider-core/server/orchestrationInstructions";
 import { buildRuntimeInstructions } from "@t3tools/provider-core/server/runtimeInstructions";
+import { insertTurnContext } from "@t3tools/provider-core/server/turnContext";
 import {
   mcpToolPresentation,
   normalizeMcpText,
@@ -10111,7 +10112,9 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                 ? null
                 : yield* makeClaudeUserMessageWithAttachments({
                     text: applyClaudePromptEffortPrefix(
-                      turnInput.message.text,
+                      insertTurnContext(turnInput.message.text, turnInput.turnContext, {
+                        afterSlashCommand: true,
+                      }),
                       compileClaudeModelSelection(turnInput.modelSelection).promptEffort,
                     ),
                     attachments: turnInput.message.attachments,

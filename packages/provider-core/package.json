@@ -107,6 +107,10 @@
       "types": "./src/server/orchestrationInstructions.ts",
       "import": "./src/server/orchestrationInstructions.ts"
     },
+    "./server/turnContext": {
+      "types": "./src/server/turnContext.ts",
+      "import": "./src/server/turnContext.ts"
+    },
     "./server/pathExpansion": {
       "types": "./src/server/pathExpansion.ts",
       "import": "./src/server/pathExpansion.ts"

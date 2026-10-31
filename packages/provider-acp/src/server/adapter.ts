@@ -102,6 +102,7 @@ import {
   t3AcpPromptWithInstructions,
   type T3AcpInstructionState,
 } from "@t3tools/provider-core/server/orchestrationInstructions";
+import { insertTurnContext } from "@t3tools/provider-core/server/turnContext";
 import { buildRuntimeInstructions } from "@t3tools/provider-core/server/runtimeInstructions";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import type * as ProviderContinuationRequests from "@t3tools/provider-core/server/ProviderContinuationRequests";
@@ -7218,12 +7219,17 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
             resolveExtractedTextPath: host.resolveExtractedTextPath,
           });
           const isNativeSlashCommand = userText.trimStart().startsWith("/");
-          const text = t3AcpPromptWithInstructions({
+          const instructionText = t3AcpPromptWithInstructions({
             prompt: messageText,
             state: instructionState,
             ...(previousInstructionState === undefined || compactionMarker !== undefined
               ? {}
               : { previousState: previousInstructionState }),
+          });
+          // The context rides on the prompt for ACP providers; a native slash
+          // command keeps its first token so the provider still recognizes it.
+          const text = insertTurnContext(instructionText, turnInput.turnContext, {
+            afterSlashCommand: isNativeSlashCommand,
           });
           if (text.length > 0) {
             prompt.push({ type: "text", text });
@@ -7299,7 +7305,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
           }
           return {
             prompt,
-            instructionState: text === messageText ? undefined : instructionState,
+            instructionState: instructionText === messageText ? undefined : instructionState,
             compactionMarker,
           };
         });

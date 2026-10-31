@@ -14,7 +14,7 @@ import {
   HttpServerResponse,
 } from "effect/http";
 
-export const PROVIDER_MCP_RELAY_ROUTE_PREFIX = "/api/provider-mcp";
+const PROVIDER_MCP_RELAY_ROUTE_PREFIX = "/api/provider-mcp";
 
 export interface ProviderMcpPublication {
   readonly providerSessionId: string;
@@ -23,6 +23,7 @@ export interface ProviderMcpPublication {
   readonly authorizationHeader: string;
 }
 
+/** @public The relay's published conflict error; it appears in `ProviderMcpRelayShape`. */
 export class ProviderMcpPublicationConflict extends Data.TaggedError(
   "ProviderMcpPublicationConflict",
 )<{

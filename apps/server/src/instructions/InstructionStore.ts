@@ -1,16 +1,10 @@
 // @effect-diagnostics nodeBuiltinImport:off
 // @effect-diagnostics globalDate:off
 // @effect-diagnostics cryptoRandomUUID:off
-import { createHash } from "node:crypto";
-import {
-  existsSync,
-  mkdirSync,
-  readFileSync,
-  renameSync,
-  writeFileSync,
-} from "node:fs";
-import { homedir } from "node:os";
-import { dirname, isAbsolute, join, resolve } from "node:path";
+import * as NodeCrypto from "node:crypto";
+import * as NodeFS from "node:fs";
+import * as NodeOS from "node:os";
+import * as NodePath from "node:path";
 
 export type InstructionScope = "global" | "project";
 export type InstructionKind = "sync" | "optional";
@@ -109,7 +103,7 @@ function emptyIndex(): StoreIndex {
 }
 
 function sha256(text: string): string {
-  return createHash("sha256").update(text, "utf8").digest("hex");
+  return NodeCrypto.createHash("sha256").update(text, "utf8").digest("hex");
 }
 
 function generated(content: string, file: InstructionFile): string {
@@ -127,19 +121,19 @@ export class InstructionStore {
   private readonly indexPath: string;
   private cached: StoreIndex | undefined;
 
-  constructor(root: string, home: string = homedir()) {
+  constructor(root: string, home: string = NodeOS.homedir()) {
     this.root = root;
     this.home = home;
-    this.indexPath = join(root, "index.json");
+    this.indexPath = NodePath.join(root, "index.json");
   }
 
   private load(): StoreIndex {
     if (this.cached !== undefined) return this.cached;
-    if (!existsSync(this.indexPath)) {
+    if (!NodeFS.existsSync(this.indexPath)) {
       this.cached = emptyIndex();
       return this.cached;
     }
-    const parsed = JSON.parse(readFileSync(this.indexPath, "utf8")) as Partial<StoreIndex>;
+    const parsed = JSON.parse(NodeFS.readFileSync(this.indexPath, "utf8")) as Partial<StoreIndex>;
     this.cached = {
       version: 1,
       files: Array.isArray(parsed.files) ? parsed.files : [],
@@ -155,10 +149,10 @@ export class InstructionStore {
   }
 
   private save(index: StoreIndex): void {
-    mkdirSync(this.root, { recursive: true });
+    NodeFS.mkdirSync(this.root, { recursive: true });
     const temporary = `${this.indexPath}.${process.pid}.tmp`;
-    writeFileSync(temporary, `${JSON.stringify(index, null, 2)}\n`, "utf8");
-    renameSync(temporary, this.indexPath);
+    NodeFS.writeFileSync(temporary, `${JSON.stringify(index, null, 2)}\n`, "utf8");
+    NodeFS.renameSync(temporary, this.indexPath);
     this.cached = index;
   }
 
@@ -170,25 +164,27 @@ export class InstructionStore {
       const path = this.resolveTarget(target);
       if (path === null) continue;
       const body = generated(file.content, file);
-      mkdirSync(dirname(path), { recursive: true });
+      NodeFS.mkdirSync(NodePath.dirname(path), { recursive: true });
       const temporary = `${path}.${process.pid}.tmp`;
-      writeFileSync(temporary, body, "utf8");
-      renameSync(temporary, path);
+      NodeFS.writeFileSync(temporary, body, "utf8");
+      NodeFS.renameSync(temporary, path);
       written[path] = sha256(body);
     }
   }
 
   private resolveTarget(target: InstructionSyncTarget): string | null {
     if (target.path !== undefined) {
-      return isAbsolute(target.path) ? target.path : resolve(this.home, target.path);
+      return NodePath.isAbsolute(target.path)
+        ? target.path
+        : NodePath.resolve(this.home, target.path);
     }
     if (target.provider === "custom") return null;
     if (target.scope === "global") {
-      return join(this.home, DEFAULT_PATHS[target.provider].global);
+      return NodePath.join(this.home, DEFAULT_PATHS[target.provider].global);
     }
     if (target.workspaceRoot === undefined) return null;
     const filename = target.filename ?? DEFAULT_PATHS[target.provider].project;
-    return join(target.workspaceRoot, filename);
+    return NodePath.join(target.workspaceRoot, filename);
   }
 
   snapshot(): InstructionStoreSnapshot {
@@ -204,8 +200,8 @@ export class InstructionStore {
       targets[file.id] = sync.targets.flatMap((target) => {
         const path = this.resolveTarget(target);
         if (path === null) return [];
-        const exists = existsSync(path);
-        const actual = exists ? sha256(readFileSync(path, "utf8")) : "";
+        const exists = NodeFS.existsSync(path);
+        const actual = exists ? sha256(NodeFS.readFileSync(path, "utf8")) : "";
         const lastWrittenHash = written[path] ?? "";
         return [
           {
@@ -242,11 +238,7 @@ export class InstructionStore {
       input.id === undefined ? undefined : index.files.find((file) => file.id === input.id);
     if (existing !== undefined && input.expectedRevision !== undefined) {
       if (existing.revision !== input.expectedRevision) {
-        throw new InstructionConflictError(
-          existing.id,
-          input.expectedRevision,
-          existing.revision,
-        );
+        throw new InstructionConflictError(existing.id, input.expectedRevision, existing.revision);
       }
     }
     const now = new Date().toISOString();
@@ -264,9 +256,10 @@ export class InstructionStore {
       ...(filename === undefined ? {} : { filename }),
       ...(input.updatedBy === undefined ? {} : { updatedBy: input.updatedBy }),
     };
-    const files = existing === undefined
-      ? [...index.files, file]
-      : index.files.map((candidate) => (candidate.id === file.id ? file : candidate));
+    const files =
+      existing === undefined
+        ? [...index.files, file]
+        : index.files.map((candidate) => (candidate.id === file.id ? file : candidate));
     const next: StoreIndex = { ...index, files };
     this.materialize(next, file);
     this.save(next);
@@ -289,9 +282,10 @@ export class InstructionStore {
       targets: input.targets,
       updatedAt: new Date().toISOString(),
     };
-    const syncs = existing === undefined
-      ? [...index.syncs, sync]
-      : index.syncs.map((candidate) => (candidate.id === sync.id ? sync : candidate));
+    const syncs =
+      existing === undefined
+        ? [...index.syncs, sync]
+        : index.syncs.map((candidate) => (candidate.id === sync.id ? sync : candidate));
     const next: StoreIndex = { ...index, syncs };
     this.materialize(next, file);
     this.save(next);
@@ -307,11 +301,24 @@ export class InstructionStore {
     const index = this.load();
     const known = new Set(index.files.map((file) => file.id));
     const validated = [...new Set(fileIds)].filter((id) => known.has(id));
-    this.save({ ...index, threadAttachments: { ...index.threadAttachments, [threadId]: validated } });
+    this.save({
+      ...index,
+      threadAttachments: { ...index.threadAttachments, [threadId]: validated },
+    });
     return validated;
   }
 
   threadAttachments(threadId: string): ReadonlyArray<string> {
     return this.load().threadAttachments[threadId] ?? [];
+  }
+
+  /** Optional files attached to a thread, in attachment order. */
+  threadInstructionFiles(threadId: string): ReadonlyArray<InstructionFile> {
+    const index = this.load();
+    const byId = new Map(index.files.map((file) => [file.id, file]));
+    return this.threadAttachments(threadId).flatMap((id) => {
+      const file = byId.get(id);
+      return file === undefined || file.kind !== "optional" ? [] : [file];
+    });
   }
 }

@@ -393,7 +393,7 @@ it.effect("keeps exact ChatGPT Browser cancellation pending when the live adapte
           } as never),
       }),
       Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({
-        get: () => Effect.succeed(Option.none()),
+        get: () => Effect.succeedNone,
       }),
       layerMemoryChatGptBrowserOperationStore,
     );

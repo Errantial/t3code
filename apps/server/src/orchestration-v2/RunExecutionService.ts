@@ -47,6 +47,7 @@ import * as CheckpointService from "./CheckpointService.ts";
 import * as EventSink from "./EventSink.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
+import type { TurnContextEntry } from "@t3tools/provider-core/server/turnContext";
 import { checkpointChatGptBrowserProviderEvent } from "@t3tools/provider-chatgpt-browser/server";
 import * as ProviderEventIngestor from "./ProviderEventIngestor.ts";
 import type { ProjectionStoreV2Error } from "./ProjectionStore.ts";
@@ -571,6 +572,8 @@ export interface RunExecutionServiceV2StartRootRunInput {
   readonly relatedThreadIds?: ReadonlyArray<ThreadId>;
   readonly relatedProviderThreadIds?: ReadonlyArray<ProviderThreadId>;
   readonly shouldStartProviderTurn?: () => Effect.Effect<boolean, ProjectionStoreV2Error>;
+  /** Runs after the ownership check so a settled run never builds context. */
+  readonly buildTurnContext?: () => Effect.Effect<ReadonlyArray<TurnContextEntry>, never>;
   readonly shouldFinalizeRun?: () => Effect.Effect<boolean, ProjectionStoreV2Error>;
   readonly hasUnpairedRunInterruptRequest?: () => Effect.Effect<boolean, never>;
   readonly loadRunInterruptReason?: () => Effect.Effect<string | undefined, never>;
@@ -584,6 +587,11 @@ export interface RunExecutionServiceV2Shape {
     input: RunExecutionServiceV2StartRootRunInput,
   ) => Effect.Effect<void, RunExecutionServiceV2Error>;
 }
+
+const isRunExecutionIngestError = Schema.is(RunExecutionIngestError);
+const isProviderAdapterEventStreamError = Schema.is(
+  ProviderAdapter.ProviderAdapterEventStreamError,
+);
 
 export class RunExecutionServiceV2 extends Context.Service<
   RunExecutionServiceV2,
@@ -1513,13 +1521,12 @@ export const layer: Layer.Layer<
                 if (yield* Ref.get(rootRunFinalized)) return;
                 const ingestFailure = Cause.findErrorOption(cause);
                 const nestedFailure =
-                  Option.isSome(ingestFailure) &&
-                  Schema.is(RunExecutionIngestError)(ingestFailure.value)
+                  Option.isSome(ingestFailure) && isRunExecutionIngestError(ingestFailure.value)
                     ? ingestFailure.value.cause
                     : undefined;
                 const recoverableExactOperationLoss =
                   input.session.eventStreamRecovery === "exact_operation_replay" &&
-                  Schema.is(ProviderAdapter.ProviderAdapterEventStreamError)(nestedFailure) &&
+                  isProviderAdapterEventStreamError(nestedFailure) &&
                   nestedFailure.recovery === "exact_operation_replay" &&
                   (yield* Ref.get(providerTurnAccepted));
                 if (recoverableExactOperationLoss) {
@@ -1704,6 +1711,24 @@ export const layer: Layer.Layer<
           key: `mcp_app_${entry.itemId.replace(/[^\w.-]/g, "_")}`,
           text: entry.text,
         }));
+        const compact =
+          input.message.attachments.length === 0 &&
+          input.message.text.trim().toLowerCase() === "/compact";
+        // Check after the context read: ingestion can settle the run while
+        // it awaits. A failed ownership read fails the start below.
+        const shouldStart =
+          input.shouldStartProviderTurn === undefined
+            ? Exit.succeed(true)
+            : yield* Effect.exit(input.shouldStartProviderTurn());
+        if (Exit.isSuccess(shouldStart) && !shouldStart.value) {
+          yield* Fiber.interrupt(providerEventFiber);
+          return;
+        }
+
+        // Contributors run only for a turn that will start. Compaction keeps
+        // its prompt identical because the native command carries no context.
+        const turnContext =
+          compact || input.buildTurnContext === undefined ? [] : yield* input.buildTurnContext();
         const turnInput = {
           appThread: input.appThread,
           threadId: input.run.threadId,
@@ -1725,21 +1750,9 @@ export const layer: Layer.Layer<
           modelSelection: input.modelSelection,
           runtimePolicy: input.runtimePolicy,
           ...(appContext.length === 0 ? {} : { appContext }),
+          ...(turnContext.length === 0 ? {} : { turnContext }),
         };
-        // Check after the context read: ingestion can settle the run while
-        // it awaits. A failed ownership read fails the start below.
-        const shouldStart =
-          input.shouldStartProviderTurn === undefined
-            ? Exit.succeed(true)
-            : yield* Effect.exit(input.shouldStartProviderTurn());
-        if (Exit.isSuccess(shouldStart) && !shouldStart.value) {
-          yield* Fiber.interrupt(providerEventFiber);
-          return;
-        }
 
-        const compact =
-          input.message.attachments.length === 0 &&
-          input.message.text.trim().toLowerCase() === "/compact";
         const startTurn = compact
           ? (input.session.compactThread?.(turnInput) ??
             Effect.fail(

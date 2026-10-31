@@ -749,7 +749,10 @@ export const make = Effect.gen(function* () {
                 id: `effect:restart-continuation:${continuationRun.id}`,
                 commandId,
                 threadId: projection.thread.id,
-                request: { type: "provider-runtime.continue", sourceRunId: continuationRun.id },
+                request: {
+                  type: "provider-runtime.continue" as const,
+                  sourceRunId: continuationRun.id,
+                },
               },
             ]
           : []),

@@ -140,6 +140,10 @@
       // These workspace packages are private to this monorepo.
       "includeEntryExports": true,
     },
+    "packages/provider-chatgpt-browser": {
+      // The browser extension loads these scripts by manifest filename; nothing imports them.
+      "entry": ["assets/extension/*.js"],
+    },
     "packages/effect-acp": {
       "includeEntryExports": true,
       "entry": ["test/fixtures/*.ts"],

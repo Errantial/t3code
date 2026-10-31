@@ -27,6 +27,9 @@ import * as Schema from "effect/Schema";
 
 import * as ServerConfig from "../config.ts";
 import { withWorkspaceLease } from "../workspace/workspaceLease.ts";
+import { InstructionStore } from "../instructions/InstructionStore.ts";
+import { makeInstructionTurnContextContributor } from "../instructions/instructionTurnContext.ts";
+import { buildTurnContext } from "@t3tools/provider-core/server/turnContext";
 import * as GitWorkflowService from "../git/GitWorkflowService.ts";
 import * as ProjectService from "../project/ProjectService.ts";
 import * as ProviderAuthService from "../provider/ProviderAuthService.ts";
@@ -149,6 +152,7 @@ export const layer: Layer.Layer<
     const idAllocator = yield* IdAllocator.IdAllocatorV2;
     const fileSystem = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
+    const config = yield* ServerConfig.ServerConfig;
     const gitWorkflow = yield* GitWorkflowService.GitWorkflowService;
     const projects = yield* ProjectService.ProjectService;
     const providerAuth = yield* ProviderAuthService.ProviderAuthService;
@@ -156,6 +160,8 @@ export const layer: Layer.Layer<
     const providerSessions = yield* ProviderSessionManager.ProviderSessionManagerV2;
     const runExecution = yield* RunExecutionService.RunExecutionServiceV2;
     const runtimePolicy = yield* RuntimePolicy.RuntimePolicyV2;
+    const instructionStore = new InstructionStore(path.join(config.baseDir, "instructions"));
+    const instructionContributor = makeInstructionTurnContextContributor(instructionStore);
     const isManagedWorktreePath = yield* makeIsManagedWorktreePath;
 
     const recreateMissingWorktree = Effect.fn("ProviderTurnStartService.recreateMissingWorktree")(
@@ -1169,7 +1175,7 @@ export const layer: Layer.Layer<
             cause: {
               detail:
                 "ChatGPT Browser resume failed while an exact provider operation may still exist; fresh-session fallback is forbidden.",
-              resumeFailure: resumed.failure,
+              resumeFailure: resumed._tag === "Failure" ? resumed.failure : undefined,
             },
           });
         }
@@ -1510,6 +1516,11 @@ export const layer: Layer.Layer<
             sameNativeThread &&
             !acceptedAttempts.some((source) => source.nativeThreadId !== undefined)),
         shouldStartProviderTurn: runControls.shouldStartProviderTurn,
+        buildTurnContext: () =>
+          buildTurnContext({
+            contributors: [instructionContributor],
+            turn: { threadId: projection.thread.id },
+          }),
         shouldFinalizeRun: runControls.shouldFinalizeRun,
         hasUnpairedRunInterruptRequest: runControls.hasUnpairedRunInterruptRequest,
         loadRunInterruptReason: runControls.loadRunInterruptReason,
