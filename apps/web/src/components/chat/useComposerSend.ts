@@ -60,6 +60,11 @@ import { resolvePlanFollowUpSubmission } from "../../proposedPlan";
 import { type ChatMessage } from "../../types";
 import { stackedThreadToast, toastManager } from "../ui/toast";
 import { newMessageId, newThreadId } from "~/lib/utils";
+import { putThreadAttachments } from "../../lib/instructionsApi";
+import {
+  selectedInstructionIds,
+  useInstructionPickerStore,
+} from "../../lib/instructionPickerStore";
 import { useNewThreadHandler } from "../../hooks/useHandleNewThread";
 import { buildThreadRouteParams } from "../../threadRoutes";
 import {
@@ -1331,6 +1336,25 @@ export function useComposerSend(input: ComposerSendInput) {
         turnStartSucceeded = true;
         setKeepFullHistory(routeThreadKey, false);
         clearUsageLimitsFor(routeThreadKey);
+        const instructionIds = selectedInstructionIds(draftId);
+        if (isLocalDraftThread && draftId !== null && instructionIds.length > 0) {
+          const attached = await settlePromise(() =>
+            putThreadAttachments(threadIdForSend, [...instructionIds]),
+          );
+          if (attached._tag === "Failure") {
+            const attachError = squashAtomCommandFailure(attached);
+            toastManager.add(
+              stackedThreadToast({
+                type: "warning",
+                title: "Thread started, but instruction files were not attached",
+                description:
+                  attachError instanceof Error ? attachError.message : "An error occurred.",
+              }),
+            );
+          } else {
+            useInstructionPickerStore.getState().clear(draftId);
+          }
+        }
         if (turnUsesAttachmentUploads) {
           releaseDraftAttachments(composerAttachmentsSnapshot);
         }

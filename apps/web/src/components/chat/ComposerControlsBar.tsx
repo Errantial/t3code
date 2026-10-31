@@ -5,6 +5,7 @@ import { type AppModelOption } from "../../modelSelection";
 import { CircleAlertIcon } from "lucide-react";
 import { CompactComposerControlsMenu } from "./CompactComposerControlsMenu";
 import { ComposerControl } from "./ComposerControl";
+import { ComposerInstructionPicker } from "./ComposerInstructionPicker";
 import {
   ComposerPermissionsSection,
   ComposerFooterModeControls,
@@ -241,6 +242,19 @@ export function ComposerControlsBar(props: {
             ),
           },
         ]),
+    ...(routeKind === "draft" && draftId !== null
+      ? [
+          {
+            id: "instructions",
+            content: (
+              <ComposerInstructionPicker
+                draftId={String(draftId)}
+                size={composerControlsCollapsed ? "xs" : "sm"}
+              />
+            ),
+          },
+        ]
+      : []),
   ];
   // Its own element, so typing (which rebuilds the controls around it) leaves it cached.
   const composerModelPicker = (
