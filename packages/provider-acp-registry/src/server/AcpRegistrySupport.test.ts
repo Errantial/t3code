@@ -138,7 +138,9 @@ const makeFakeUvToolchain = Effect.fn("AcpRegistrySupport.test.makeFakeUvToolcha
   };
 });
 
-describe("AcpRegistrySupport", () => {
+// quarantine: https://github.com/Errantial/t3onsteroids/issues/1 POSIX path and executable fixtures
+/* oxlint-disable t3code/no-global-process-runtime -- selecting a POSIX-only registry fixture */
+describe.skipIf(process.platform === "win32")("AcpRegistrySupport", () => {
   it("selects the preferred compatible distribution", () => {
     const agent = makeAgent({
       binary: {
