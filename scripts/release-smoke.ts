@@ -23,6 +23,8 @@ const workspaceFiles = [
   "apps/mobile/modules/t3-terminal/package.json",
   "apps/marketing/package.json",
   "infra/relay/package.json",
+  "infra/task-cache/package.json",
+  "evals/package.json",
   "oxlint-plugin-t3code/package.json",
   "packages/client-runtime/package.json",
   "packages/contracts/package.json",
@@ -34,6 +36,7 @@ const workspaceFiles = [
   "packages/provider-pi/package.json",
   "packages/provider-acp/package.json",
   "packages/provider-acp-registry/package.json",
+  "packages/provider-chatgpt-browser/package.json",
   "packages/provider-cursor/package.json",
   "packages/provider-fx/package.json",
   "packages/provider-grok/package.json",
@@ -238,10 +241,15 @@ try {
 
   NodeFS.rmSync(NodePath.resolve(tempRoot, "pnpm-lock.yaml"), { force: true });
 
-  NodeChildProcess.execFileSync("vp", ["install", "--lockfile-only", "--ignore-scripts"], {
-    cwd: tempRoot,
-    stdio: "inherit",
-  });
+  const vpBin = NodePath.join(repoRoot, "node_modules", "vite-plus", "dist", "bin.js");
+  NodeChildProcess.execFileSync(
+    process.execPath,
+    [vpBin, "install", "--lockfile-only", "--ignore-scripts"],
+    {
+      cwd: tempRoot,
+      stdio: "inherit",
+    },
+  );
 
   const lockfile = NodeFS.readFileSync(NodePath.resolve(tempRoot, "pnpm-lock.yaml"), "utf8");
   assertContains(lockfile, "lockfileVersion:", "Expected pnpm-lock.yaml to be regenerated.");
@@ -330,11 +338,27 @@ try {
   const mergedPreviewWindowsManifestPath = NodePath.resolve(tempRoot, "release-assets/preview.yml");
   const { arm64Path: winDebugArm64Path, x64Path: winDebugX64Path } =
     writeWindowsBuilderDebugFixtures(tempRoot);
-  NodeChildProcess.execFileSync(
-    "bash",
-    [
-      "-lc",
-      `
+  // oxlint-disable-next-line t3code/no-global-process-runtime -- release tooling selects the host runner
+  if (process.platform === "win32") {
+    const mergeScript = NodePath.resolve(repoRoot, "scripts/merge-update-manifests.ts");
+    const mergeWindows = (arm64: string, x64: string, output: string) => {
+      NodeChildProcess.execFileSync(
+        process.execPath,
+        [mergeScript, "--platform", "win", arm64, x64, output],
+        { stdio: "inherit" },
+      );
+      NodeFS.rmSync(arm64, { force: true });
+      NodeFS.rmSync(x64, { force: true });
+    };
+    mergeWindows(winArm64Path, winX64Path, mergedWindowsManifestPath);
+    mergeWindows(nightlyWinArm64Path, nightlyWinX64Path, mergedNightlyWindowsManifestPath);
+    mergeWindows(previewWinArm64Path, previewWinX64Path, mergedPreviewWindowsManifestPath);
+  } else {
+    NodeChildProcess.execFileSync(
+      "bash",
+      [
+        "-lc",
+        `
         release_assets_dir=${JSON.stringify(NodePath.resolve(tempRoot, "release-assets"))}
         shopt -s nullglob
         found_windows_manifest=false
@@ -363,12 +387,13 @@ try {
           exit 1
         fi
       `,
-    ],
-    {
-      cwd: repoRoot,
-      stdio: "inherit",
-    },
-  );
+      ],
+      {
+        cwd: repoRoot,
+        stdio: "inherit",
+      },
+    );
+  }
 
   const mergedWindowsManifest = NodeFS.readFileSync(mergedWindowsManifestPath, "utf8");
   assertContains(
