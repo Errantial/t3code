@@ -1,4 +1,6 @@
 import { describe, expect, it } from "@effect/vitest";
+import * as NodePath from "node:path";
+import * as NodeURL from "node:url";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
@@ -166,12 +168,14 @@ describe("ManagedTunnelLimits", () => {
         Effect.promise(() => PGlite.create()),
         (client) => Effect.promise(() => client.close()),
       );
-      const migrationsDir = new URL("../../migrations/postgres/", import.meta.url).pathname;
+      const migrationsDir = NodeURL.fileURLToPath(
+        new URL("../../migrations/postgres/", import.meta.url),
+      );
       const migrations = (yield* fs.readDirectory(migrationsDir)).toSorted();
       const applyMigrations = (names: ReadonlyArray<string>) =>
         Effect.forEach(names, (name) =>
           fs
-            .readFileString(`${migrationsDir}${name}/migration.sql`)
+            .readFileString(NodePath.join(migrationsDir, name, "migration.sql"))
             .pipe(Effect.flatMap((migration) => Effect.promise(() => pg.exec(migration)))),
         );
       const backfill = migrations.indexOf(BACKFILL_MIGRATION);
