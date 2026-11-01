@@ -9,7 +9,7 @@
     "dev:built": "vp build --watch",
     "build": "vp build",
     "preview": "vp preview",
-    "test": "vp test run --passWithNoTests --project unit --project browser"
+    "test": "node ../../scripts/test-web.mjs"
   },
   "dependencies": {
     "@base-ui/react": "^1.4.1",
