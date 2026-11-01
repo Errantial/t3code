@@ -184,6 +184,10 @@ export const make = Effect.fn("cloud.server_self_update.make")(function* () {
 
     return yield* Effect.gen(function* () {
       yield* reportProgress("downloading");
+      const archiveBaseUrl =
+        input.release === undefined
+          ? undefined
+          : `https://github.com/Errantial/t3onsteroids/releases/download/${input.release.tag}`;
       const paths = yield* ensurePinnedRuntimeInstalled({
         baseDir: serverConfig.baseDir,
         version: targetVersion,
@@ -194,6 +198,10 @@ export const make = Effect.fn("cloud.server_self_update.make")(function* () {
         platform,
         arch,
         releaseBaseUrl,
+        archiveBaseUrl,
+        checksumsFile:
+          input.release?.checksumsFile ??
+          (archiveBaseUrl === undefined ? undefined : "SHA256SUMS.txt"),
         validate: (runtime) =>
           runner
             .run({

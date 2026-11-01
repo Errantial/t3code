@@ -877,6 +877,14 @@ export class ServerProviderUpdateError extends Schema.TaggedError<ServerProvider
   }
 }
 
+export const ServerReleaseArchive = Schema.Struct({
+  /** GitHub release tag in the t3onsteroids repository, for example `v1.1.7`. */
+  tag: TrimmedNonEmptyString,
+  /** Checksums asset name; the fork publishes `SHA256SUMS.txt`. */
+  checksumsFile: Schema.optionalKey(TrimmedNonEmptyString),
+});
+export type ServerReleaseArchive = typeof ServerReleaseArchive.Type;
+
 export const ServerSelfUpdateInput = Schema.Struct({
   /** Exact npm version, never a dist-tag, so server and client agree on the request. */
   targetVersion: TrimmedNonEmptyString,
@@ -884,6 +892,8 @@ export const ServerSelfUpdateInput = Schema.Struct({
   channel: Schema.optionalKey(DesktopUpdateChannelSchema),
   /** The target release's highest migration; the host refuses to leave Nightly without it. */
   targetDatabaseMigration: Schema.optionalKey(Schema.Int),
+  /** Set for a t3onsteroids GitHub release instead of an npm version. */
+  release: Schema.optionalKey(ServerReleaseArchive),
 });
 export type ServerSelfUpdateInput = typeof ServerSelfUpdateInput.Type;
 

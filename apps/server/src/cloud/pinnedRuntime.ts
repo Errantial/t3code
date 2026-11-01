@@ -111,6 +111,10 @@ interface PinnedRuntimeInstallInput {
   readonly arch: string;
   readonly httpClient: HttpClient.HttpClient;
   readonly releaseBaseUrl?: string | undefined;
+  /** The complete download base for one release tag, instead of `<releaseBaseUrl>/v<version>`. */
+  readonly archiveBaseUrl?: string | undefined;
+  /** Release checksums asset; upstream names it `SHA256SUMS`, the fork publishes `SHA256SUMS.txt`. */
+  readonly checksumsFile?: string | undefined;
   readonly onProgress?: (progress: PinnedRuntimeProgress) => void;
 }
 
@@ -178,7 +182,9 @@ const installFromArchive = Effect.fn("cloud.pinned_runtime.install_archive")(fun
     });
   }
   const httpClient = input.httpClient;
-  const baseUrl = cliReleaseDownloadBaseUrl(input.version, input.releaseBaseUrl);
+  const baseUrl =
+    input.archiveBaseUrl ?? cliReleaseDownloadBaseUrl(input.version, input.releaseBaseUrl);
+  const checksumsFile = input.checksumsFile ?? CLI_RELEASE_CHECKSUMS_FILE;
   const fileName = cliArchiveFileName(input.version, platformKey);
 
   input.onProgress?.({ stage: "download", received: 0, total: undefined });
@@ -186,7 +192,7 @@ const installFromArchive = Effect.fn("cloud.pinned_runtime.install_archive")(fun
     new TextDecoder().decode(
       yield* fetchReleaseAsset(
         httpClient,
-        `${baseUrl}/${CLI_RELEASE_CHECKSUMS_FILE}`,
+        `${baseUrl}/${checksumsFile}`,
         "downloading the t3 release checksums",
       ),
     ),

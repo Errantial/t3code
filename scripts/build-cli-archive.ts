@@ -272,38 +272,76 @@ const bundleLinuxLibatomic = Effect.fn("bundleLinuxLibatomic")(function* (input:
   yield* fs.copyFile(source, path.join(input.contentDir, "lib/libatomic.so.1"));
 
   // libatomic is GPL-3.0-or-later WITH GCC-exception-3.1, so its terms and source travel with it.
-  const owner = yield* spawner.string(
-    ChildProcess.make("dpkg-query", ["-S", yield* fs.realPath(source)]),
-  );
-  // Keep the arch qualifier so a second installed arch cannot add its own line.
-  const [, qualifiedPkg, pkg] = /^(([^:\s]+)(?::[^:\s]+)?): /.exec(owner) ?? [];
-  const versions = qualifiedPkg
-    ? yield* spawner.string(
-        ChildProcess.make("dpkg-query", [
-          "-W",
-          "-f=${Version} ${source:Package} ${source:Version}",
-          qualifiedPkg,
+  const realSource = yield* fs.realPath(source);
+  // Debian and RPM hosts name the owning package differently; record whichever the build host has.
+  const dpkgOwner = yield* spawner
+    .string(ChildProcess.make("dpkg-query", ["-S", realSource]))
+    .pipe(Effect.option);
+  let provenance: string;
+  if (Option.isSome(dpkgOwner)) {
+    // Keep the arch qualifier so a second installed arch cannot add its own line.
+    const [, qualifiedPkg, pkg] = /^(([^:\s]+)(?::[^:\s]+)?): /.exec(dpkgOwner.value) ?? [];
+    const versions = qualifiedPkg
+      ? yield* spawner.string(
+          ChildProcess.make("dpkg-query", [
+            "-W",
+            "-f=${Version} ${source:Package} ${source:Version}",
+            qualifiedPkg,
+          ]),
+        )
+      : "";
+    const [version, sourcePackage, sourceVersion] = versions.trim().split(" ");
+    if (!pkg || !version || !sourcePackage || !sourceVersion) {
+      return yield* new CliArchiveInputMissingError({
+        inputPath: `dpkg package for ${source}`,
+        hint: "The archive copies libatomic's license and source reference from its Ubuntu package.",
+      });
+    }
+    provenance = [
+      `libatomic.so.1 is copied from the Ubuntu package ${pkg} ${version}.`,
+      `Source: https://launchpad.net/ubuntu/+source/${sourcePackage}/${sourceVersion}`,
+    ].join("\n");
+  } else {
+    // Oracle Linux, Fedora and other RPM hosts have no dpkg database.
+    const rpmOwner = yield* spawner
+      .string(
+        ChildProcess.make("rpm", [
+          "-qf",
+          "--qf",
+          "%{NAME} %{VERSION}-%{RELEASE} %{SOURCERPM}",
+          realSource,
         ]),
       )
-    : "";
-  const [version, sourcePackage, sourceVersion] = versions.trim().split(" ");
-  if (!pkg || !version || !sourcePackage || !sourceVersion) {
-    return yield* new CliArchiveInputMissingError({
-      inputPath: `dpkg package for ${source}`,
-      hint: "The archive copies libatomic's license and source reference from its Ubuntu package.",
-    });
+      .pipe(Effect.option);
+    if (Option.isNone(rpmOwner)) {
+      return yield* new CliArchiveInputMissingError({
+        inputPath: `package owning ${source}`,
+        hint: "Install dpkg-query or rpm so the archive can record libatomic's provenance.",
+      });
+    }
+    const [name, packageVersion, sourceRpm] = rpmOwner.value.trim().split(/\s+/);
+    if (!name || !packageVersion || !sourceRpm) {
+      return yield* new CliArchiveInputMissingError({
+        inputPath: `rpm package for ${source}`,
+        hint: "The build host's rpm did not report libatomic's name, version and source RPM.",
+      });
+    }
+    const osRelease = yield* fs
+      .readFileString("/etc/os-release")
+      .pipe(Effect.orElseSucceed(() => ""));
+    const distribution = /^PRETTY_NAME="?([^"\n]+)"?$/m.exec(osRelease)?.[1]?.trim() ?? "the Linux";
+    provenance = [
+      `libatomic.so.1 is copied from the ${distribution} package ${name}-${packageVersion}.`,
+      `Source package: ${sourceRpm}`,
+    ].join("\n");
   }
-  const header = [
-    `libatomic.so.1 is copied from the Ubuntu package ${pkg} ${version}.`,
-    `Source: https://launchpad.net/ubuntu/+source/${sourcePackage}/${sourceVersion}`,
-  ].join("\n");
   // Vendored because CI runner images strip /usr/share/doc.
   const license = yield* fs.readFileString(
     path.join(input.repoRoot, "scripts/licenses/libatomic.LICENSE"),
   );
   yield* fs.writeFileString(
     path.join(input.contentDir, "lib/libatomic.so.1.LICENSE"),
-    `${header}\n\n${license}`,
+    `${provenance}\n\n${license}`,
   );
 
   // RUNPATH resolves through symlinks and is not inherited by child processes, unlike LD_LIBRARY_PATH.

@@ -1,4 +1,5 @@
 import * as NodeAssert from "node:assert/strict";
+// @effect-diagnostics-next-line nodeBuiltinImport:off -- the fixture compares the host platform joined path
 import * as NodePath from "node:path";
 import * as NodeSqlite from "node:sqlite";
 

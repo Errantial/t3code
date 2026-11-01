@@ -179,6 +179,7 @@ import * as ProviderMaintenanceRunner from "./provider/providerMaintenanceRunner
 import * as ProviderAuthService from "./provider/ProviderAuthService.ts";
 import { makeProviderInstallation } from "./provider/providerInstallation.ts";
 import * as ServerSelfUpdate from "./cloud/selfUpdate.ts";
+import * as FleetUpdates from "./fleetUpdate/FleetUpdates.ts";
 import * as ServerLifecycleEvents from "./serverLifecycleEvents.ts";
 import * as ServerRuntimeStartup from "./serverRuntimeStartup.ts";
 import * as ServerSettings from "./serverSettings.ts";
@@ -2476,6 +2477,10 @@ export const layerWsRpc = (
           ServerSelfUpdate.updateProgressStream(serverSelfUpdate, input),
         [WS_METHODS.serverCommitDesktopUpdate]: (input) =>
           serverSelfUpdate.commitDesktopUpdate(input.requestId),
+        [WS_METHODS.fleetStatus]: (input) =>
+          FleetUpdates.makeService().pipe(Effect.flatMap((fleet) => fleet.status(input))),
+        [WS_METHODS.fleetUpdate]: (input) =>
+          FleetUpdates.makeService().pipe(Effect.flatMap((fleet) => fleet.update(input))),
         [WS_METHODS.serverUpsertKeybinding]:
           /* Request instrumentation already owns the span; keep this helper in that context. */
           Effect.fnUntraced(function* (rule) {

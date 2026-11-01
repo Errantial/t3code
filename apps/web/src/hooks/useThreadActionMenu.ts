@@ -97,6 +97,7 @@ export function useThreadActionMenu(input: {
   const providersByEnvironment = useEnvironmentProviders();
   const controlBrowserTab = useAtomCommand(orchestrationEnvironment.controlBrowserTab);
   const timestampFormat = useClientSettings((s) => s.timestampFormat);
+  const pinnedThreadsOnTop = useClientSettings((s) => s.sidebarPinnedThreadsOnTop);
   const { copyToClipboard: copyPathToClipboard } = useCopyToClipboard<{ path: string }>({
     onCopy: ({ path }) => {
       toastManager.add({ type: "success", title: "Path copied", description: path });
@@ -145,6 +146,7 @@ export function useThreadActionMenu(input: {
         branch: thread.branch ?? null,
         projectFilter: null,
         isPinned: thread.pinnedAt != null,
+        pinnedThreadsOnTop,
         isSettled: supports.settlement && thread.settledOverride === "settled",
         autoSettleEnabled: thread.autoSettleDisabledAt == null,
         isSnoozed: supports.snooze && effectiveSnoozed(thread, { now: now.toISOString() }),

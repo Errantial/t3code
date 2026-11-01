@@ -29,6 +29,7 @@ import * as Schema from "effect/Schema";
 import { APP_VERSION, HOSTED_APP_CHANNEL, HOSTED_APP_CHANNEL_LABEL } from "../../branding";
 import { CliCommandSettingsRow } from "./CliCommandSettingsRow";
 import { MobileAppSettingsRow } from "./MobileAppSettingsRow";
+import { FleetUpdatesSettings } from "./FleetUpdatesSettings";
 import {
   canCheckForUpdate,
   getDesktopUpdateButtonTooltip,
@@ -892,12 +893,12 @@ export function GeneralSettingsPanel() {
         />
         <SettingsRow
           {...searchableSetting("pinned-threads-on-top")}
-          description="Keep pinned threads above the rest of the list. Turn this off to sort pinned threads with everything else by activity; pinning then only keeps a thread from settling automatically."
+          description="Labs pin overhaul. On keeps a pinned section and Settle. Off sorts pinned threads with activity and hides Settle for pinned threads until they are unpinned; pinning still prevents automatic settling."
           resetAction={
             settings.sidebarPinnedThreadsOnTop !==
             DEFAULT_UNIFIED_SETTINGS.sidebarPinnedThreadsOnTop ? (
               <SettingResetButton
-                label="pinned threads on top"
+                label="pin overhaul"
                 onClick={() =>
                   updateSettings({
                     sidebarPinnedThreadsOnTop: DEFAULT_UNIFIED_SETTINGS.sidebarPinnedThreadsOnTop,
@@ -912,7 +913,7 @@ export function GeneralSettingsPanel() {
               onCheckedChange={(checked) =>
                 updateSettings({ sidebarPinnedThreadsOnTop: Boolean(checked) })
               }
-              aria-label="Pinned threads on top"
+              aria-label="Labs pin overhaul"
             />
           }
         />
@@ -2032,6 +2033,8 @@ export function AboutSettingsPanel() {
         )}
         <MobileAppSettingsRow />
       </SettingsSection>
+
+      <FleetUpdatesSettings />
 
       <SettingsSection id="legal" title="Legal">
         <SettingsRow

@@ -25,7 +25,7 @@ import * as PubSub from "effect/PubSub";
 import * as Queue from "effect/Queue";
 import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
-import { Headers } from "effect/http";
+import { FetchHttpClient, Headers } from "effect/http";
 import { RpcGroup, RpcMessage, RpcServer } from "effect/rpc";
 import * as SqlClient from "effect/sql/SqlClient";
 
@@ -710,6 +710,7 @@ it.effect(
           Layer.fresh(layerConfigSources),
           Layer.mock(PreviewAutomationBroker.PreviewAutomationBroker)({}),
           Layer.mock(ServerBrowser.ServerBrowser)({}),
+          FetchHttpClient.layer,
         ),
       ),
       Effect.scoped,
@@ -866,6 +867,7 @@ it.effect("on-demand clients get provider config without workspace snapshots", (
         Layer.fresh(layerConfigSources),
         Layer.mock(PreviewAutomationBroker.PreviewAutomationBroker)({}),
         Layer.mock(ServerBrowser.ServerBrowser)({}),
+        FetchHttpClient.layer,
       ),
     ),
     Effect.scoped,

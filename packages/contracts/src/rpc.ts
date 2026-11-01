@@ -27,6 +27,12 @@ import {
   PeerLinkSummary,
 } from "./peerLink.ts";
 import {
+  FleetStatusResult,
+  FleetUpdateError,
+  FleetUpdateInput,
+  FleetUpdateResult,
+} from "./fleetUpdate.ts";
+import {
   ChatGptReconnectProfileInput,
   ChatGptReconnectProfile,
   ChatGptImportProfileInput,
@@ -494,6 +500,8 @@ export const WS_METHODS = {
   serverUpdateServer: "server.updateServer",
   serverUpdateServerWithProgress: "server.updateServerWithProgress",
   serverCommitDesktopUpdate: "server.commitDesktopUpdate",
+  fleetStatus: "fleet.status",
+  fleetUpdate: "fleet.update",
   serverUpsertKeybinding: "server.upsertKeybinding",
   serverRemoveKeybinding: "server.removeKeybinding",
   serverRunStorageCleanup: "server.runStorageCleanup",
@@ -757,6 +765,18 @@ const WsServerCommitDesktopUpdateRpc = Rpc.make(WS_METHODS.serverCommitDesktopUp
   payload: DesktopUpdateCommitInput,
   success: ServerSelfUpdateResult,
   error: Schema.Union([ServerSelfUpdateError, EnvironmentAuthorizationError]),
+});
+
+const WsFleetStatusRpc = Rpc.make(WS_METHODS.fleetStatus, {
+  payload: Schema.Struct({ tag: Schema.optional(TrimmedNonEmptyString) }),
+  success: FleetStatusResult,
+  error: EnvironmentAuthorizationError,
+});
+
+const WsFleetUpdateRpc = Rpc.make(WS_METHODS.fleetUpdate, {
+  payload: FleetUpdateInput,
+  success: FleetUpdateResult,
+  error: Schema.Union([FleetUpdateError, EnvironmentAuthorizationError]),
 });
 
 const WsServerRunStorageCleanupRpc = Rpc.make(WS_METHODS.serverRunStorageCleanup, {
@@ -1965,6 +1985,8 @@ export const WsRpcGroup = RpcGroup.make(
   WsServerUpdateServerRpc,
   WsServerUpdateServerWithProgressRpc,
   WsServerCommitDesktopUpdateRpc,
+  WsFleetStatusRpc,
+  WsFleetUpdateRpc,
   WsServerUpsertKeybindingRpc,
   WsServerRemoveKeybindingRpc,
   WsServerRunStorageCleanupRpc,

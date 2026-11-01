@@ -1,4 +1,3 @@
-import * as NodePath from "node:path";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
 import {
@@ -8,6 +7,7 @@ import {
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
+import * as Path from "effect/Path";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as PlatformError from "effect/PlatformError";
@@ -117,11 +117,12 @@ describe("DesktopClientSettings", () => {
       Effect.gen(function* () {
         const environment = yield* DesktopEnvironment.DesktopEnvironment;
         const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
         const settings = yield* DesktopClientSettings.DesktopClientSettings;
         const dotfiles = yield* fileSystem.makeTempDirectoryScoped({
           prefix: "t3-desktop-client-settings-dotfiles-",
         });
-        const linkedSettingsPath = NodePath.join(dotfiles, "client-settings.json");
+        const linkedSettingsPath = path.join(dotfiles, "client-settings.json");
         yield* fileSystem.writeFileString(linkedSettingsPath, "{}\n");
         yield* fileSystem.makeDirectory(environment.stateDir, { recursive: true });
         yield* fileSystem.symlink(linkedSettingsPath, environment.clientSettingsPath);

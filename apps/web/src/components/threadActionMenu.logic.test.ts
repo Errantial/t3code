@@ -87,4 +87,17 @@ describe("buildThreadActionMenuItems", () => {
       "Reload ChatGPT tab",
     );
   });
+
+  it("hides Settle for a pinned thread until it is unpinned when the Labs pin overhaul is off", () => {
+    const ids = (state: ThreadActionMenuState) =>
+      buildThreadActionMenuItems(state).map((item) => item.id);
+    const overhaulOff = ids({ ...baseState, isPinned: true, pinnedThreadsOnTop: false });
+    expect(overhaulOff).toContain("unpin");
+    expect(overhaulOff).toContain("save");
+    expect(overhaulOff).not.toContain("settle");
+    // An unpinned thread keeps Settle even with the overhaul off.
+    expect(ids({ ...baseState, isPinned: false, pinnedThreadsOnTop: false })).toContain("settle");
+    // On is the current behavior.
+    expect(ids({ ...baseState, isPinned: true, pinnedThreadsOnTop: true })).toContain("settle");
+  });
 });

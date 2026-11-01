@@ -146,7 +146,17 @@ const layerInstallRuntime = (platform: NodeJS.Platform) =>
 describe("RelayClient", () => {
   // quarantine: https://github.com/Errantial/t3onsteroids/issues/1 Windows installer-lock timing differs
   /* oxlint-disable t3code/no-global-process-runtime -- test collection selects the host platform */
-  const itWindows = process.platform === "win32" ? it.skip : it;
+  /* oxlint-disable t3code/no-test-timeout-or-unreasoned-skip -- quarantine: https://github.com/Errantial/t3onsteroids/issues/1 the Windows branch skips the staging fixture */
+  const itWindows = (name: string, self: () => Effect.Effect<void, unknown, never>) =>
+    process.platform === "win32" ? it.skip(name, () => {}) : it.effect(name, self);
+
+  const itWindowsEach =
+    <T>(cases: ReadonlyArray<T>) =>
+    (name: string, self: (args: T) => Effect.Effect<void, unknown, never>) =>
+      process.platform === "win32"
+        ? it.skip.each(cases)(name, () => {})
+        : it.effect.each(cases)(name, self);
+  /* oxlint-enable t3code/no-test-timeout-or-unreasoned-skip */
   /* oxlint-enable t3code/no-global-process-runtime */
   itWindows("cancels a contended install without removing the other installer's lock", () =>
     Effect.gen(function* () {
@@ -654,7 +664,7 @@ describe("RelayClient", () => {
   });
 
   // quarantine: https://github.com/Errantial/t3onsteroids/issues/1 Windows staging fixture fails before the rename
-  itWindows.each([
+  itWindowsEach([
     ["linux", "EBUSY"],
     ["win32", "EXDEV"],
   ] as const)("fails staging at once on %s for %s", ([platform, code]) =>

@@ -1,11 +1,11 @@
 import { describe, expect, it } from "@effect/vitest";
-import * as NodePath from "node:path";
 import * as NodeURL from "node:url";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Path from "effect/Path";
 import * as Semaphore from "effect/Semaphore";
 import { PGlite } from "@electric-sql/pglite";
 import { drizzle } from "drizzle-orm/pglite";
@@ -164,6 +164,7 @@ describe("ManagedTunnelLimits", () => {
   it.effect("counts each allocation by its tunnel and link state", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
       const pg = yield* Effect.acquireRelease(
         Effect.promise(() => PGlite.create()),
         (client) => Effect.promise(() => client.close()),
@@ -175,7 +176,7 @@ describe("ManagedTunnelLimits", () => {
       const applyMigrations = (names: ReadonlyArray<string>) =>
         Effect.forEach(names, (name) =>
           fs
-            .readFileString(NodePath.join(migrationsDir, name, "migration.sql"))
+            .readFileString(path.join(migrationsDir, name, "migration.sql"))
             .pipe(Effect.flatMap((migration) => Effect.promise(() => pg.exec(migration)))),
         );
       const backfill = migrations.indexOf(BACKFILL_MIGRATION);

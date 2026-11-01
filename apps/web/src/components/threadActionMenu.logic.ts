@@ -78,6 +78,8 @@ export interface ThreadActionMenuState {
     readonly isActive: boolean;
   } | null;
   readonly isPinned: boolean;
+  /** Off keeps pinned threads in activity order and hides Settle until they are unpinned. */
+  readonly pinnedThreadsOnTop?: boolean;
   readonly isSettled: boolean;
   readonly isSaved?: boolean;
   readonly autoSettleEnabled: boolean;
@@ -139,9 +141,14 @@ export function buildThreadActionMenuItems(
       : []),
     ...(state.supports.settlement
       ? [
-          state.isSettled
-            ? { id: "unsettle" as const, label: "Un-settle thread", icon: "circle-check" }
-            : { id: "settle" as const, label: "Settle thread", icon: "circle-check" },
+          // With the Labs pin overhaul off, a pinned thread has no Settle until it is unpinned.
+          ...(state.isPinned && state.pinnedThreadsOnTop === false
+            ? []
+            : [
+                state.isSettled
+                  ? { id: "unsettle" as const, label: "Un-settle thread", icon: "circle-check" }
+                  : { id: "settle" as const, label: "Settle thread", icon: "circle-check" },
+              ]),
           state.isSaved
             ? { id: "unsave" as const, label: "Restore from Saved", icon: "bookmark" }
             : { id: "save" as const, label: "Save for later", icon: "bookmark" },

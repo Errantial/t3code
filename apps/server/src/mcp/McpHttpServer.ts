@@ -55,6 +55,8 @@ import { ThreadToolkit } from "./toolkits/thread/tools.ts";
 import { InstructionToolkit } from "./toolkits/instruction/tools.ts";
 import * as ThreadHandlers from "./toolkits/thread/handlers.ts";
 import * as InstructionHandlers from "./toolkits/instruction/handlers.ts";
+import * as FleetHandlers from "./toolkits/fleet/handlers.ts";
+import { FleetToolkit } from "./toolkits/fleet/tools.ts";
 import * as ThreadMetadataMcpService from "./ThreadMetadataMcpService.ts";
 import * as McpSessionRegistry from "./McpSessionRegistry.ts";
 import * as PreviewAutomationBroker from "./PreviewAutomationBroker.ts";
@@ -1096,6 +1098,7 @@ export const layerOrchestratorToolkit = toolkitRegistration(
 
 export const layerThreadToolkit = toolkitRegistration(ThreadToolkit, ThreadHandlers.layer);
 const layerInstructionToolkit = toolkitRegistration(InstructionToolkit, InstructionHandlers.layer);
+const layerFleetToolkit = toolkitRegistration(FleetToolkit, FleetHandlers.layer);
 
 const layerWorktreeToolkitRegistration = toolkitRegistration(
   WorktreeToolkit,
@@ -1153,6 +1156,7 @@ export const layerTools = Layer.mergeAll(
   layerOrchestratorToolkit,
   layerThreadToolkit,
   layerInstructionToolkit,
+  layerFleetToolkit,
   layerAttachmentToolkit,
   layerProjectRegistration,
   layerEnvironmentToolkit,
