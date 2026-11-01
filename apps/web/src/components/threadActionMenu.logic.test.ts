@@ -40,6 +40,7 @@ describe("buildThreadActionMenuItems", () => {
         ? [
             "unpin",
             "unsettle",
+            "save",
             "unsnooze",
             "rename",
             "regenerate-title",
@@ -50,6 +51,7 @@ describe("buildThreadActionMenuItems", () => {
         : [
             "pin",
             "settle",
+            "save",
             "snooze",
             "rename",
             "regenerate-title",
