@@ -47,6 +47,7 @@ import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { InlineButton } from "../ui/button";
 import { DraftProjectName } from "./DraftProjectName";
 import { DraftHeroProjectHeading } from "./DraftHeroProjectHeading";
+import { OPEN_SWARM_EVENT } from "./SwarmDialog";
 import { TriageDraftHero } from "./TriageDraftHero";
 import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import { resolveProjectDefaultProviderModelSelection } from "../../providerInstances";
@@ -368,6 +369,25 @@ export function DraftHeroHeadline({
       </Tooltip>
     ) : null;
 
+  const orStartSwarm = (
+    <Tooltip>
+      <TooltipTrigger
+        render={
+          <InlineButton
+            tone="muted"
+            className="pointer-events-auto"
+            onClick={() => window.dispatchEvent(new Event(OPEN_SWARM_EVENT))}
+          />
+        }
+      >
+        start a swarm
+      </TooltipTrigger>
+      <TooltipPopup side="bottom">
+        Describe an outcome and launch a team of agents on it
+      </TooltipPopup>
+    </Tooltip>
+  );
+
   if (isScratchDraft && isTriageDraftPrompt) {
     const environment = environments.find(
       (entry) => entry.environmentId === activeProject.environmentId,
@@ -398,8 +418,14 @@ export function DraftHeroHeadline({
         </h1>
       )}
       {scratchWorkspaceRoot === null ? null : (
-        <p className="mt-2 flex h-6 w-full items-center justify-center text-sm">
+        <p className="mt-2 flex h-6 w-full items-center justify-center gap-2 text-sm">
           {isScratchDraft ? projectSelector : orStartWithoutProject}
+          {!isScratchDraft && orStartWithoutProject ? (
+            <span aria-hidden className="text-muted-foreground/40">
+              ·
+            </span>
+          ) : null}
+          {orStartSwarm}
         </p>
       )}
     </div>

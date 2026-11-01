@@ -239,6 +239,9 @@ and your next message starts the agent again with the new setup.
 Provider commands must start the message to run. T3 Code commands such as
 `/model` and `/plan`, and skill mentions, work on any line.
 
+`/swarm` opens the swarm dialog: describe an outcome and the architect agent builds
+and launches a team of child threads. See [Swarms](./swarm.md).
+
 Send `/compact` in an existing conversation to reduce context usage when the
 provider supports it. Web and desktop also offer compaction from the context meter.
 

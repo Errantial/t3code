@@ -258,6 +258,66 @@ export const OrchestratorMcpTaskCancelResult = Schema.Struct({
 });
 export type OrchestratorMcpTaskCancelResult = typeof OrchestratorMcpTaskCancelResult.Type;
 
+export const OrchestratorMcpSwarmMemberInput = Schema.Struct({
+  key: TrimmedNonEmptyString.check(Schema.isMaxLength(64)).annotate({
+    description: "Stable short id for this member, unique in the swarm (such as 'research-a').",
+  }),
+  title: OrchestratorMcpTitle.annotate({
+    description: "Short role title shown in the thread list, such as 'Researcher: prior art'.",
+  }),
+  task: OrchestratorMcpPrompt.annotate({
+    description:
+      "Complete, self-contained instructions for this member. Parent conversation history is not copied, so include every fact the member needs.",
+  }),
+  role: Schema.optional(OrchestratorMcpTaskRole),
+  target: Schema.optional(OrchestratorMcpTarget),
+  isolation: Schema.optional(
+    Schema.Literals(["shared", "worktree"]).annotate({
+      description:
+        "'shared' (default): parent checkout. 'worktree': new prepared checkout from the parent commit for a separate branch or PR.",
+    }),
+  ),
+});
+export type OrchestratorMcpSwarmMemberInput = typeof OrchestratorMcpSwarmMemberInput.Type;
+
+export const OrchestratorMcpCreateSwarmInput = Schema.Struct({
+  title: OrchestratorMcpTitle.annotate({
+    description: "Short swarm name used in the result summary, such as 'Release hardening'.",
+  }),
+  members: Schema.Array(OrchestratorMcpSwarmMemberInput).check(
+    Schema.isMinLength(1),
+    Schema.isMaxLength(12),
+  ),
+  clientRequestId: Schema.optional(OrchestratorMcpClientRequestId),
+});
+export type OrchestratorMcpCreateSwarmInput = typeof OrchestratorMcpCreateSwarmInput.Type;
+
+export const OrchestratorMcpSwarmMemberResult = Schema.Struct({
+  key: TrimmedNonEmptyString,
+  title: TrimmedNonEmptyString,
+  taskId: NodeId,
+  childThreadId: Schema.NullOr(ThreadId),
+  link: Schema.optional(Schema.String),
+  status: OrchestratorMcpDelegatedTaskStatus,
+  providerInstanceId: ProviderInstanceId,
+  model: Schema.NullOr(Schema.String),
+});
+export type OrchestratorMcpSwarmMemberResult = typeof OrchestratorMcpSwarmMemberResult.Type;
+
+export const OrchestratorMcpSwarmMemberFailure = Schema.Struct({
+  key: TrimmedNonEmptyString,
+  title: TrimmedNonEmptyString,
+  message: Schema.String,
+});
+export type OrchestratorMcpSwarmMemberFailure = typeof OrchestratorMcpSwarmMemberFailure.Type;
+
+export const OrchestratorMcpCreateSwarmResult = Schema.Struct({
+  title: TrimmedNonEmptyString,
+  launched: Schema.Array(OrchestratorMcpSwarmMemberResult),
+  failed: Schema.Array(OrchestratorMcpSwarmMemberFailure),
+});
+export type OrchestratorMcpCreateSwarmResult = typeof OrchestratorMcpCreateSwarmResult.Type;
+
 export const OrchestratorMcpCreateThreadRequest = Schema.Struct({
   prompt: Schema.optional(OrchestratorMcpPrompt),
   title: Schema.optional(OrchestratorMcpTitle),

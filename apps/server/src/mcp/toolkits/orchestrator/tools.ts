@@ -7,6 +7,8 @@ import {
   OrchestratorMcpEnvironmentLinksResult,
   OrchestratorMcpEnvironmentUnlinkInput,
   OrchestratorMcpEnvironmentUnlinkResult,
+  OrchestratorMcpCreateSwarmInput,
+  OrchestratorMcpCreateSwarmResult,
   OrchestratorMcpCreateThreadsInput,
   OrchestratorMcpCreateThreadsResult,
   OrchestratorMcpDelegateTaskInput,
@@ -207,6 +209,19 @@ const RequestSecretTool = Tool.make("request_secret", {
   .annotate(Tool.Title, "Request a secret from the user")
   .annotate(Tool.Destructive, false);
 
+const CreateSwarmTool = Tool.make("create_swarm", {
+  description:
+    "Needs an agent running inside a T3 thread. Launch a whole swarm of T3-owned child agents in one call: every member becomes a child thread with its own provider instance, model, options, and self-contained task prompt, and the members start in parallel. Use this when the user asks for a swarm, a team, or several agents working together. Design the roster first, then call this once; do not launch members one delegate_task call at a time. Call orchestrator_capabilities before choosing providers and models, and never invent ids or model names. Each member's `task` must carry every fact the member needs: parent conversation history is not copied. Members inherit this thread's runtime mode and checkout unless `isolation: 'worktree'` asks for a prepared separate checkout, which suits a separate branch or PR per member. Titles should name the role. A member that should lead its own sub-team gets that instruction in its own task; it can call create_swarm or delegate_task itself. The result names each childThreadId: report the roster with its roles and models to the user, then end the turn. Members run asynchronously and their completion wakes this thread, so do not wait or poll. A member that fails to launch is listed under `failed` while the rest continue.",
+  parameters: OrchestratorMcpCreateSwarmInput,
+  success: OrchestratorMcpCreateSwarmResult,
+  failure: OrchestratorMcpFailure,
+  failureMode: "return",
+  dependencies,
+})
+  .annotate(Tool.Title, "Launch a swarm of agents")
+  .annotate(Tool.Destructive, true)
+  .annotate(Tool.OpenWorld, true);
+
 const CreateThreadsTool = Tool.make("create_threads", {
   description:
     "Create new top-level threads in this checkout. Not delegation. One thread or its own worktree: `t3_thread_launch`. Project, branch, and worktree inherit.",
@@ -350,6 +365,7 @@ const EnvironmentUnlinkTool = Tool.make("t3_environment_unlink", {
 export const OrchestratorToolkit = Toolkit.make(
   OrchestratorCapabilitiesTool,
   DelegateTaskTool,
+  CreateSwarmTool,
   TaskStatusTool,
   TaskCancelTool,
   WorkflowStopTool,

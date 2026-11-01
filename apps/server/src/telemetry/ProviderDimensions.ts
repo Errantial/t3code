@@ -103,6 +103,13 @@ export function handoffSettings(tool: string, args: unknown, result: unknown): F
         mode: oneOf(stringField(input, "mode"), ["async", "wait"]) ?? "async",
         ...(output.waitTimedOut === true ? { waitTimedOut: true } : {}),
       });
+    case "create_swarm": {
+      const members = Array.isArray(input.members) ? input.members : [];
+      return {
+        batchSize: members.length,
+        targetChosen: members.some((member) => asFields(member).target !== undefined),
+      };
+    }
     case "create_threads": {
       const threads = Array.isArray(input.threads) ? input.threads : [];
       return {

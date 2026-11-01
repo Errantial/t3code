@@ -201,6 +201,7 @@ import { ComposerPrimaryActions } from "./ComposerPrimaryActions";
 import { ComposerFooterPrimaryActions } from "./ComposerFooterControls";
 import { ComposerPendingUserInputPanel } from "./ComposerPendingUserInputPanel";
 import { ComposerPlanFollowUpBanner } from "./ComposerPlanFollowUpBanner";
+import { OPEN_SWARM_EVENT, SwarmDialog } from "./SwarmDialog";
 import { resolveComposerMenuActiveItemId } from "./composerMenuHighlight";
 import { buildPullRequestReferenceContext } from "../pullRequest/pullRequestDetail.logic";
 import { getComposerPromptInjectionState, getComposerReasoningStep } from "./composerProviderState";
@@ -1007,6 +1008,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   const [isDragOverComposer, setIsDragOverComposer] = useState(false);
   const [isComposerPrimaryActionsCompact, setIsComposerPrimaryActionsCompact] = useState(false);
   const [isComposerModelPickerOpen, setIsComposerModelPickerOpen] = useState(false);
+  const [isSwarmDialogOpen, setIsSwarmDialogOpen] = useState(false);
   const isMobileViewport = useMediaQuery("max-sm");
   const isSoftwareKeyboardOpen = useSoftwareKeyboardOpen();
   const [isComposerFocused, setIsComposerFocused] = useState(false);
@@ -1868,6 +1870,17 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         }
         return;
       }
+      if (item.command === "swarm") {
+        const applied = applyPromptReplacement(trigger.rangeStart, trigger.rangeEnd, "", {
+          expectedText: snapshot.value.slice(trigger.rangeStart, trigger.rangeEnd),
+          focusEditorAfterReplace: false,
+        });
+        if (applied) {
+          setComposerHighlightedItemId(null);
+          setIsSwarmDialogOpen(true);
+        }
+        return;
+      }
       if (!planModeUiEnabled) return;
       void handleInteractionModeChange(item.command === "plan" ? "plan" : "default");
       const applied = applyPromptReplacement(trigger.rangeStart, trigger.rangeEnd, "", {
@@ -2464,6 +2477,26 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     return inserted;
   };
   const insertComposerTextAtEndStable = useStableCallback(insertComposerTextAtEnd);
+
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- keeps the command palette's window event wired to this composer while mounted
+  useEffect(() => {
+    const openSwarm = () => setIsSwarmDialogOpen(true);
+    window.addEventListener(OPEN_SWARM_EVENT, openSwarm);
+    return () => window.removeEventListener(OPEN_SWARM_EVENT, openSwarm);
+  }, []);
+
+  const addSwarmBrief = (swarmPrompt: string) => {
+    const inserted = insertComposerTextStable(swarmPrompt, "end", { ensureLeadingBoundary: true });
+    if (!inserted) {
+      const current = promptRef.current.trimEnd();
+      setPrompt(current.length === 0 ? swarmPrompt : `${current}\n\n${swarmPrompt}`);
+    }
+    toastManager.add({
+      type: "info",
+      title: "Swarm brief added",
+      description: "Review it, then send the message to launch the swarm.",
+    });
+  };
 
   const addComposerFolders = (folders: File[]) => {
     const target = folderDropTarget({
@@ -3532,6 +3565,11 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
           </div>
         </ComposerSurface.Main>
       </div>
+      <SwarmDialog
+        open={isSwarmDialogOpen}
+        onOpenChange={setIsSwarmDialogOpen}
+        onSubmit={addSwarmBrief}
+      />
     </form>
   );
 });

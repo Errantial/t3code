@@ -17,6 +17,29 @@ it("states t3_thread_read page size limits in the parameter descriptions", () =>
   }
 });
 
+it("accepts a create_swarm roster and keeps member limits in the schema", () => {
+  const decode = Schema.decodeUnknownExit(OrchestratorToolkit.tools.create_swarm.parametersSchema);
+  const member = {
+    key: "research-a",
+    title: "Researcher: prior art",
+    task: "Read the linked design notes and return the three strongest options.",
+  };
+
+  expect(Exit.isSuccess(decode({ title: "Prior art", members: [member] }))).toBe(true);
+  expect(Exit.isSuccess(decode({ title: "Prior art", members: [] }))).toBe(false);
+  expect(
+    Exit.isSuccess(
+      decode({
+        title: "Prior art",
+        members: Array.from({ length: 13 }, (_, index) => ({
+          ...member,
+          key: `member-${index}`,
+        })),
+      }),
+    ),
+  ).toBe(false);
+});
+
 it("refuses a t3_thread_update whose fields do not fit its action", () => {
   const decode = Schema.decodeUnknownExit(
     OrchestratorToolkit.tools.t3_thread_update.parametersSchema,

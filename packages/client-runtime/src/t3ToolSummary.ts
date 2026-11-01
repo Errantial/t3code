@@ -145,6 +145,22 @@ export function summarizeT3ToolCalls(
     case "delegate":
       label = phrase("Delegated", "delegate", quantity(countEntities(entityIds("taskId")), "task"));
       break;
+    case "swarm": {
+      const agents = new Set(
+        selected.flatMap((call) =>
+          (Array.isArray(call.output?.launched) ? call.output.launched : []).flatMap((member) => {
+            const record = asRecord(member);
+            const agentId = id(record?.childThreadId) ?? id(record?.taskId);
+            return agentId === undefined ? [] : [agentId];
+          }),
+        ),
+      );
+      label =
+        agents.size === 0
+          ? "Requested a swarm launch"
+          : phrase("Launched", "launch", quantity(agents.size, "agent", "agents"));
+      break;
+    }
     case "thread-read":
     case "thread-wait": {
       const targets = threadIds.every((value) => value !== undefined)

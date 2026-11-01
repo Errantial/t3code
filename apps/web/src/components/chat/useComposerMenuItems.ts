@@ -218,6 +218,13 @@ export function useComposerMenuItems({
           label: "/model",
           description: "Switch response model for this thread",
         },
+        {
+          id: "slash:swarm",
+          type: "slash-command",
+          command: "swarm",
+          label: "/swarm",
+          description: "Design and launch a swarm of agents",
+        },
         ...(planModeUiEnabled
           ? ([
               {

@@ -1,4 +1,8 @@
-import { OrchestratorMcpFailure } from "@t3tools/contracts";
+import {
+  OrchestratorMcpFailure,
+  type OrchestratorMcpSwarmMemberFailure,
+  type OrchestratorMcpSwarmMemberResult,
+} from "@t3tools/contracts";
 import { OrchestratorToolkit } from "./tools.ts";
 import * as Effect from "effect/Effect";
 
@@ -24,6 +28,68 @@ const handlers = {
       const scope = yield* McpInvocationContext.McpInvocationContext;
       const service = yield* OrchestratorMcpService.OrchestratorMcpService;
       return yield* service.delegateTask(scope, input);
+    }),
+  ),
+  create_swarm: McpToolAccess.actsAsCaller((input) =>
+    Effect.gen(function* () {
+      const scope = yield* McpInvocationContext.McpInvocationContext;
+      const service = yield* OrchestratorMcpService.OrchestratorMcpService;
+      const keys = new Set<string>();
+      for (const member of input.members) {
+        if (keys.has(member.key)) {
+          return yield* new OrchestratorMcpFailure({
+            code: "invalid_request",
+            message: `Swarm member key '${member.key}' is repeated. Give every member a unique key.`,
+          });
+        }
+        keys.add(member.key);
+      }
+      const requestId = input.clientRequestId ?? `${scope.requestNamespace}:swarm`;
+      const outcomes = yield* Effect.forEach(
+        input.members,
+        (member, index) =>
+          service
+            .delegateTask(scope, {
+              task: member.task,
+              title: member.title,
+              ...(member.role === undefined ? {} : { role: member.role }),
+              ...(member.target === undefined ? {} : { target: member.target }),
+              ...(member.isolation === undefined ? {} : { isolation: member.isolation }),
+              mode: "async",
+              clientRequestId: `${requestId}:${index}:${member.key}`,
+            })
+            .pipe(
+              Effect.map((value) => ({ member, outcome: "launched" as const, value })),
+              Effect.catch((failure) =>
+                Effect.succeed({ member, outcome: "failed" as const, failure }),
+              ),
+            ),
+        { concurrency: 1 },
+      );
+      const launched: ReadonlyArray<OrchestratorMcpSwarmMemberResult> = outcomes.flatMap(
+        (entry) => {
+          if (entry.outcome !== "launched") return [];
+          const { member, value } = entry;
+          return [
+            {
+              key: member.key,
+              title: member.title,
+              taskId: value.taskId,
+              childThreadId: value.childThreadId,
+              ...(value.link === undefined ? {} : { link: value.link }),
+              status: value.status,
+              providerInstanceId: value.providerInstanceId,
+              model: value.model,
+            },
+          ];
+        },
+      );
+      const failed: ReadonlyArray<OrchestratorMcpSwarmMemberFailure> = outcomes.flatMap((entry) => {
+        if (entry.outcome !== "failed") return [];
+        const { member, failure } = entry;
+        return [{ key: member.key, title: member.title, message: failure.message }];
+      });
+      return { title: input.title, launched, failed };
     }),
   ),
   task_status: McpToolAccess.actsAsCaller(({ taskId }) =>

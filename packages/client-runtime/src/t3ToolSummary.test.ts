@@ -57,6 +57,26 @@ describe("summarizeT3ToolCalls", () => {
     });
   });
 
+  it("counts the agents a create_swarm call launched", () => {
+    const launched = [
+      { key: "research", taskId: "task-1", childThreadId: "thread-child-1" },
+      { key: "writer", taskId: "task-2", childThreadId: "thread-child-2" },
+    ];
+    expect(summarizeT3ToolCalls("swarm", [completed({}, { launched, failed: [] })])).toEqual({
+      label: "Launched 2 agents",
+      failedCount: 0,
+    });
+    expect(
+      summarizeT3ToolCalls("swarm", [
+        {
+          input: {},
+          output: { launched: [], failed: [{ key: "research", message: "provider unavailable" }] },
+          outcome: "completed",
+        },
+      ]).label,
+    ).toBe("Requested a swarm launch");
+  });
+
   it("does not confuse a child's failure or wait timeout with failure of the orchestration call", () => {
     const failedChild = { taskId: "task-1", status: "failed", summary: "command not found" };
     expect(

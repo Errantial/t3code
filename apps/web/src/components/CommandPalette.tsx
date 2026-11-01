@@ -64,6 +64,7 @@ import {
   MessageSquareDashedIcon,
   LinkIcon,
   MessageSquareIcon,
+  NetworkIcon,
   PaletteIcon,
   RotateCcwIcon,
   SettingsIcon,
@@ -73,6 +74,7 @@ import {
   UserPlusIcon,
 } from "lucide-react";
 import { openThreadFind } from "./chat/threadFindStore";
+import { OPEN_SWARM_EVENT } from "./chat/SwarmDialog";
 import {
   useDeferredValue,
   useEffect,
@@ -1191,6 +1193,17 @@ function OpenCommandPaletteDialog(props: {
       groups: [{ value: NEW_THREAD_IN_GROUP, label: "Projects", items: projectThreadItems }],
     });
   }
+
+  actionItems.push({
+    kind: "action",
+    value: "action:start-swarm",
+    searchTerms: ["swarm", "agents", "team", "parallel", "launch"],
+    title: "Start a swarm",
+    icon: <NetworkIcon className={ITEM_ICON_CLASS} />,
+    run: async () => {
+      window.dispatchEvent(new Event(OPEN_SWARM_EVENT));
+    },
+  });
 
   if (scratchTargetEnvironmentId !== null) {
     actionItems.push({
