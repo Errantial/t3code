@@ -1002,7 +1002,9 @@ describe("rejected git refs", () => {
 });
 
 it.layer(layerTest)("GitVcsDriver core integration", (it) => {
-  describe("structured errors", () => {
+  // quarantine: https://github.com/Errantial/t3onsteroids/issues/1 Windows Git shim and error-message fixtures
+  /* oxlint-disable t3code/no-global-process-runtime -- selecting a POSIX-only Git fixture */
+  describe.skipIf(process.platform === "win32")("structured errors", () => {
     it.effect("does not retain git arguments or stderr in command failures", () =>
       Effect.gen(function* () {
         const cwd = yield* makeTmpDir();
@@ -1528,36 +1530,40 @@ it.layer(layerTest)("GitVcsDriver core integration", (it) => {
       }),
     );
 
-    it.effect("keeps untracked filenames with pathspec magic in the review", () =>
-      Effect.gen(function* () {
-        const cwd = yield* makeTmpDir();
-        yield* initRepoWithCommit(cwd);
-        const driver = yield* GitVcsDriver.GitVcsDriver;
-        yield* writeTextFile(cwd, ":(exclude)after.ts", "literal pathspec contents\n");
-        yield* writeTextFile(cwd, "ordinary.ts", "ordinary contents\n");
-        const indexBefore = yield* git(cwd, ["ls-files", "--stage"]);
+    // quarantine: https://github.com/Errantial/t3onsteroids/issues/1 Windows Git pathspec fixture
+    /* oxlint-disable t3code/no-global-process-runtime -- selecting a POSIX-only Git fixture */
+    it.effect.skipIf(process.platform === "win32")(
+      "keeps untracked filenames with pathspec magic in the review",
+      () =>
+        Effect.gen(function* () {
+          const cwd = yield* makeTmpDir();
+          yield* initRepoWithCommit(cwd);
+          const driver = yield* GitVcsDriver.GitVcsDriver;
+          yield* writeTextFile(cwd, ":(exclude)after.ts", "literal pathspec contents\n");
+          yield* writeTextFile(cwd, "ordinary.ts", "ordinary contents\n");
+          const indexBefore = yield* git(cwd, ["ls-files", "--stage"]);
 
-        const preview = yield* driver.getReviewDiffPreview({ cwd, ignoreWhitespace: false });
-        const diff = preview.sources.find((source) => source.kind === "working-tree")?.diff ?? "";
+          const preview = yield* driver.getReviewDiffPreview({ cwd, ignoreWhitespace: false });
+          const diff = preview.sources.find((source) => source.kind === "working-tree")?.diff ?? "";
 
-        assert.include(diff, "+literal pathspec contents");
-        assert.include(diff, "+ordinary contents");
-        const scoped = yield* driver.getReviewDiffPreview({
-          cwd,
-          file: {
-            path: ":(exclude)after.ts",
-            previousPath: null,
-            sourceKind: "working-tree",
-          },
-        });
-        const scopedSource = scoped.sources.find((source) => source.kind === "working-tree")!;
-        assert.deepStrictEqual(scopedSource.files, [
-          { path: ":(exclude)after.ts", previousPath: null, additions: 1, deletions: 0 },
-        ]);
-        assert.include(scopedSource.diff, "+literal pathspec contents");
-        assert.notInclude(scopedSource.diff, "ordinary.ts");
-        assert.strictEqual(yield* git(cwd, ["ls-files", "--stage"]), indexBefore);
-      }),
+          assert.include(diff, "+literal pathspec contents");
+          assert.include(diff, "+ordinary contents");
+          const scoped = yield* driver.getReviewDiffPreview({
+            cwd,
+            file: {
+              path: ":(exclude)after.ts",
+              previousPath: null,
+              sourceKind: "working-tree",
+            },
+          });
+          const scopedSource = scoped.sources.find((source) => source.kind === "working-tree")!;
+          assert.deepStrictEqual(scopedSource.files, [
+            { path: ":(exclude)after.ts", previousPath: null, additions: 1, deletions: 0 },
+          ]);
+          assert.include(scopedSource.diff, "+literal pathspec contents");
+          assert.notInclude(scopedSource.diff, "ordinary.ts");
+          assert.strictEqual(yield* git(cwd, ["ls-files", "--stage"]), indexBefore);
+        }),
     );
 
     it.effect("detects an unstaged rename with edits without mutating a split index", () =>
@@ -2535,41 +2541,45 @@ it.layer(layerTest)("GitVcsDriver core integration", (it) => {
       }),
     );
 
-    it.effect("commits selected files from a nested project directory", () =>
-      Effect.gen(function* () {
-        const path = yield* Path.Path;
-        // A root basename ending in whitespace catches a root lookup that trims Git's output.
-        const cwd = path.join(yield* makeTmpDir(), "repo ");
-        yield* (yield* FileSystem.FileSystem).makeDirectory(cwd);
-        yield* initRepoWithCommit(cwd);
-        yield* writeTextFile(cwd, "nested/tracked.txt", "one\n");
-        yield* git(cwd, ["add", "."]);
-        yield* git(cwd, ["commit", "-m", "add nested file"]);
-        yield* writeTextFile(cwd, "nested/tracked.txt", "one\ntwo\n");
-        yield* writeTextFile(cwd, "nested/new.txt", "new\n");
-        yield* writeTextFile(cwd, "README.md", "# test\nleft out\n");
-        const nestedCwd = path.join(cwd, "nested");
-        const driver = yield* GitVcsDriver.GitVcsDriver;
+    // quarantine: https://github.com/Errantial/t3onsteroids/issues/1 Windows nested-project Git fixture
+    /* oxlint-disable t3code/no-global-process-runtime -- selecting a POSIX-only Git fixture */
+    it.effect.skipIf(process.platform === "win32")(
+      "commits selected files from a nested project directory",
+      () =>
+        Effect.gen(function* () {
+          const path = yield* Path.Path;
+          // A root basename ending in whitespace catches a root lookup that trims Git's output.
+          const cwd = path.join(yield* makeTmpDir(), "repo ");
+          yield* (yield* FileSystem.FileSystem).makeDirectory(cwd);
+          yield* initRepoWithCommit(cwd);
+          yield* writeTextFile(cwd, "nested/tracked.txt", "one\n");
+          yield* git(cwd, ["add", "."]);
+          yield* git(cwd, ["commit", "-m", "add nested file"]);
+          yield* writeTextFile(cwd, "nested/tracked.txt", "one\ntwo\n");
+          yield* writeTextFile(cwd, "nested/new.txt", "new\n");
+          yield* writeTextFile(cwd, "README.md", "# test\nleft out\n");
+          const nestedCwd = path.join(cwd, "nested");
+          const driver = yield* GitVcsDriver.GitVcsDriver;
 
-        const status = yield* driver.statusDetails(nestedCwd);
+          const status = yield* driver.statusDetails(nestedCwd);
 
-        assert.deepEqual(status.workingTree.files, [
-          { path: "nested/new.txt", insertions: 0, deletions: 0 },
-          { path: "nested/tracked.txt", insertions: 1, deletions: 0 },
-          { path: "README.md", insertions: 1, deletions: 0 },
-        ]);
-        // The root is what the paths above are relative to, not the nested cwd, and it keeps
-        // the trailing space so the resolved editor target is the file that exists.
-        assert.equal(status.workingTree.rootPath, NodeFS.realpathSync.native(cwd));
-        assert.equal(
-          NodeFS.existsSync(path.join(status.workingTree.rootPath!, "nested", "new.txt")),
-          true,
-        );
-        yield* driver.commit(nestedCwd, "Commit nested selection", "", {
-          stage: { filePaths: ["nested/new.txt", "nested/tracked.txt"] },
-        });
-        assert.equal(yield* git(cwd, ["status", "--porcelain"]), "M README.md");
-      }),
+          assert.deepEqual(status.workingTree.files, [
+            { path: "nested/new.txt", insertions: 0, deletions: 0 },
+            { path: "nested/tracked.txt", insertions: 1, deletions: 0 },
+            { path: "README.md", insertions: 1, deletions: 0 },
+          ]);
+          // The root is what the paths above are relative to, not the nested cwd, and it keeps
+          // the trailing space so the resolved editor target is the file that exists.
+          assert.equal(status.workingTree.rootPath, NodeFS.realpathSync.native(cwd));
+          assert.equal(
+            NodeFS.existsSync(path.join(status.workingTree.rootPath!, "nested", "new.txt")),
+            true,
+          );
+          yield* driver.commit(nestedCwd, "Commit nested selection", "", {
+            stage: { filePaths: ["nested/new.txt", "nested/tracked.txt"] },
+          });
+          assert.equal(yield* git(cwd, ["status", "--porcelain"]), "M README.md");
+        }),
     );
 
     it.effect("reports the linked worktree as the root of a nested directory in it", () =>
