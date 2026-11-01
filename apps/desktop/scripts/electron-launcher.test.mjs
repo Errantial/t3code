@@ -15,7 +15,9 @@ import {
   writeDevelopmentLauncherScript,
 } from "./electron-launcher.mjs";
 
-describe("electron development launcher", () => {
+// quarantine: https://github.com/Errantial/t3onsteroids/issues/1 POSIX chmod fixture
+/* oxlint-disable t3code/no-global-process-runtime -- selecting a POSIX-only launcher fixture */
+describe.skipIf(process.platform === "win32")("electron development launcher", () => {
   it("uses captured values only as fallbacks for a live runner environment", () => {
     const environmentScript = makeDevelopmentEnvironmentScript({
       VITE_DEV_SERVER_URL: "http://127.0.0.1:8526",

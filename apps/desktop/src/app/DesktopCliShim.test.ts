@@ -63,7 +63,9 @@ const fakeAppImage = (canMount = true) => {
   return { root, image, appImage, shim };
 };
 
-describe("renderCliShim", () => {
+// quarantine: https://github.com/Errantial/t3onsteroids/issues/1 Linux AppImage shim fixture
+/* oxlint-disable t3code/no-global-process-runtime -- selecting a Linux-only shim fixture */
+describe.skipIf(process.platform !== "linux")("renderCliShim", () => {
   it("extracts the AppImage where it cannot be mounted", () => {
     const { shim } = fakeAppImage(false);
     const result = run(shim, ["--version"], { APPIMAGE_EXTRACT_AND_RUN: "1" });

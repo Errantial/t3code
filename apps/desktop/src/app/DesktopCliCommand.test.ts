@@ -156,31 +156,35 @@ it.layer(NodeServices.layer)("DesktopCliCommand", (it) => {
     }).pipe(Effect.scoped),
   );
 
-  it.effect("refuses to install behind another t3 that runs first", () =>
-    Effect.gen(function* () {
-      const fs = yield* FileSystem.FileSystem;
-      const path = yield* Path.Path;
-      const home = yield* fs.makeTempDirectoryScoped();
-      const shadow = path.join(home, "shadow");
-      yield* fs.makeDirectory(shadow);
-      yield* fs.writeFileString(path.join(shadow, "t3"), "#!/bin/sh\n", { mode: 0o755 });
-      process.env.PATH = [shadow, path.join(home, ".local", "bin")].join(":");
+  // quarantine: https://github.com/Errantial/t3onsteroids/issues/1 Windows PATH ordering fixture
+  /* oxlint-disable t3code/no-global-process-runtime -- selecting a Windows PATH fixture */
+  it.effect.skipIf(process.platform === "win32")(
+    "refuses to install behind another t3 that runs first",
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const home = yield* fs.makeTempDirectoryScoped();
+        const shadow = path.join(home, "shadow");
+        yield* fs.makeDirectory(shadow);
+        yield* fs.writeFileString(path.join(shadow, "t3"), "#!/bin/sh\n", { mode: 0o755 });
+        process.env.PATH = [shadow, path.join(home, ".local", "bin")].join(":");
 
-      const command = yield* commandIn({ home });
-      const theirs = path.join(shadow, "t3");
-      expect((yield* command.state).shadowedBy).toBe(theirs);
-      const error = yield* Effect.flip(command.install);
-      expect(error.message).toContain(theirs);
-      expect(yield* fs.exists(path.join(home, ".local", "bin", "t3"))).toBe(false);
+        const command = yield* commandIn({ home });
+        const theirs = path.join(shadow, "t3");
+        expect((yield* command.state).shadowedBy).toBe(theirs);
+        const error = yield* Effect.flip(command.install);
+        expect(error.message).toContain(theirs);
+        expect(yield* fs.exists(path.join(home, ".local", "bin", "t3"))).toBe(false);
 
-      yield* fs.remove(theirs);
-      const installed = yield* command.install;
-      expect(installed).toMatchObject({
-        onPath: true,
-        installedPath: path.join(home, ".local", "bin", "t3"),
-      });
-      expect(installed.shadowedBy).toBeUndefined();
-    }).pipe(Effect.scoped),
+        yield* fs.remove(theirs);
+        const installed = yield* command.install;
+        expect(installed).toMatchObject({
+          onPath: true,
+          installedPath: path.join(home, ".local", "bin", "t3"),
+        });
+        expect(installed.shadowedBy).toBeUndefined();
+      }).pipe(Effect.scoped),
   );
 
   it.effect("leaves the Windows PATH alone when it cannot be read", () =>

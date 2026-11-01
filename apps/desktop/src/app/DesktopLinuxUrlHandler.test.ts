@@ -157,7 +157,9 @@ const emptyRecording = (): RecordedRegistration => ({
   copies: [],
 });
 
-describe("DesktopLinuxUrlHandler", () => {
+// quarantine: https://github.com/Errantial/t3onsteroids/issues/1 Linux desktop-entry fixture
+/* oxlint-disable t3code/no-global-process-runtime -- selecting a Linux-only URL-handler fixture */
+describe.skipIf(process.platform !== "linux")("DesktopLinuxUrlHandler", () => {
   it("renders a scheme-handler desktop entry with freedesktop Exec quoting", () => {
     const entry = DesktopLinuxUrlHandler.renderUrlHandlerDesktopEntry({
       displayName: "T3 Code (Nightly)",
@@ -485,133 +487,143 @@ const themeIconFixture = (source: Uint8Array) =>
 const iconCacheRuns = (run: ThemeIconRun) =>
   run.commands.filter(({ command }) => command === "gtk-update-icon-cache").length;
 
-it.layer(NodeServices.layer)("DesktopLinuxUrlHandler theme icons", (it) => {
-  it.effect("installs both app id spellings without creating an icon cache", () =>
-    Effect.gen(function* () {
-      const fileSystem = yield* FileSystem.FileSystem;
-      const path = yield* Path.Path;
-      const icon = new Uint8Array([137, 80, 78, 71, 1, 2, 3]);
-      const fixture = yield* themeIconFixture(icon);
-      const run: ThemeIconRun = { root: fixture.root, commands: [] };
+// quarantine: https://github.com/Errantial/t3onsteroids/issues/1 Linux icon-theme fixture
+/* oxlint-disable t3code/no-global-process-runtime -- selecting a Linux-only icon fixture */
+if (process.platform === "linux") {
+  it.layer(NodeServices.layer)("DesktopLinuxUrlHandler theme icons", (it) => {
+    it.effect("installs both app id spellings without creating an icon cache", () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const icon = new Uint8Array([137, 80, 78, 71, 1, 2, 3]);
+        const fixture = yield* themeIconFixture(icon);
+        const run: ThemeIconRun = { root: fixture.root, commands: [] };
 
-      yield* registerWithRealFileSystem(run);
-      assert.deepEqual([...(yield* fileSystem.readDirectory(fixture.appsDir))].sort(), [
-        "com.t3tools.T3Code.png",
-        "com.t3tools.t3code.png",
-      ]);
-      for (const name of ["com.t3tools.t3code", "com.t3tools.T3Code"]) {
-        const target = path.join(fixture.appsDir, `${name}.png`);
-        assert.deepEqual([...(yield* fileSystem.readFile(target))], [...icon]);
-        yield* fileSystem.utimes(target, fixture.pastSeconds, fixture.pastSeconds);
-      }
+        yield* registerWithRealFileSystem(run);
+        assert.deepEqual([...(yield* fileSystem.readDirectory(fixture.appsDir))].sort(), [
+          "com.t3tools.T3Code.png",
+          "com.t3tools.t3code.png",
+        ]);
+        for (const name of ["com.t3tools.t3code", "com.t3tools.T3Code"]) {
+          const target = path.join(fixture.appsDir, `${name}.png`);
+          assert.deepEqual([...(yield* fileSystem.readFile(target))], [...icon]);
+          yield* fileSystem.utimes(target, fixture.pastSeconds, fixture.pastSeconds);
+        }
 
-      yield* registerWithRealFileSystem(run);
-      for (const name of ["com.t3tools.t3code", "com.t3tools.T3Code"]) {
-        const info = yield* fileSystem.stat(path.join(fixture.appsDir, `${name}.png`));
-        assert.equal(Option.getOrThrow(info.mtime).getTime(), fixture.pastSeconds * 1000);
-      }
-      assert.isFalse(yield* fileSystem.exists(fixture.cachePath));
-      assert.equal(iconCacheRuns(run), 0);
-    }).pipe(Effect.scoped),
-  );
+        yield* registerWithRealFileSystem(run);
+        for (const name of ["com.t3tools.t3code", "com.t3tools.T3Code"]) {
+          const info = yield* fileSystem.stat(path.join(fixture.appsDir, `${name}.png`));
+          assert.equal(Option.getOrThrow(info.mtime).getTime(), fixture.pastSeconds * 1000);
+        }
+        assert.isFalse(yield* fileSystem.exists(fixture.cachePath));
+        assert.equal(iconCacheRuns(run), 0);
+      }).pipe(Effect.scoped),
+    );
 
-  it.effect("replaces same-length stale icons and refreshes an existing cache once", () =>
-    Effect.gen(function* () {
-      const fileSystem = yield* FileSystem.FileSystem;
-      const path = yield* Path.Path;
-      const fixture = yield* themeIconFixture(new Uint8Array([1, 2, 3]));
-      yield* fixture.seedCache;
-      const lower = path.join(fixture.appsDir, "com.t3tools.t3code.png");
-      const upper = path.join(fixture.appsDir, "com.t3tools.T3Code.png");
-      yield* fileSystem.writeFile(lower, new Uint8Array([3, 2, 1]));
-      yield* fileSystem.writeFile(upper, new Uint8Array([1, 2, 3]));
-      for (const target of [lower, upper]) {
-        yield* fileSystem.utimes(target, fixture.pastSeconds, fixture.pastSeconds);
-      }
-      const run: ThemeIconRun = {
-        root: fixture.root,
-        commands: [],
-        onIconCacheRefresh: fixture.rewriteCache,
-      };
+    it.effect("replaces same-length stale icons and refreshes an existing cache once", () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const fixture = yield* themeIconFixture(new Uint8Array([1, 2, 3]));
+        yield* fixture.seedCache;
+        const lower = path.join(fixture.appsDir, "com.t3tools.t3code.png");
+        const upper = path.join(fixture.appsDir, "com.t3tools.T3Code.png");
+        yield* fileSystem.writeFile(lower, new Uint8Array([3, 2, 1]));
+        yield* fileSystem.writeFile(upper, new Uint8Array([1, 2, 3]));
+        for (const target of [lower, upper]) {
+          yield* fileSystem.utimes(target, fixture.pastSeconds, fixture.pastSeconds);
+        }
+        const run: ThemeIconRun = {
+          root: fixture.root,
+          commands: [],
+          onIconCacheRefresh: fixture.rewriteCache,
+        };
 
-      yield* registerWithRealFileSystem(run);
-      yield* registerWithRealFileSystem(run);
+        yield* registerWithRealFileSystem(run);
+        yield* registerWithRealFileSystem(run);
 
-      assert.deepEqual([...(yield* fileSystem.readFile(lower))], [1, 2, 3]);
-      const upperInfo = yield* fileSystem.stat(upper);
-      assert.equal(Option.getOrThrow(upperInfo.mtime).getTime(), fixture.pastSeconds * 1000);
-      assert.deepEqual(
-        run.commands.filter(({ command }) => command === "gtk-update-icon-cache"),
-        [{ command: "gtk-update-icon-cache", args: ["-f", "-t", fixture.hicolorDir] }],
-      );
-    }).pipe(Effect.scoped),
-  );
+        assert.deepEqual([...(yield* fileSystem.readFile(lower))], [1, 2, 3]);
+        const upperInfo = yield* fileSystem.stat(upper);
+        assert.equal(Option.getOrThrow(upperInfo.mtime).getTime(), fixture.pastSeconds * 1000);
+        assert.deepEqual(
+          run.commands.filter(({ command }) => command === "gtk-update-icon-cache"),
+          [{ command: "gtk-update-icon-cache", args: ["-f", "-t", fixture.hicolorDir] }],
+        );
+      }).pipe(Effect.scoped),
+    );
 
-  it.effect("refreshes when this launch changed an icon even if the cache looks newer", () =>
-    Effect.gen(function* () {
-      const fileSystem = yield* FileSystem.FileSystem;
-      const path = yield* Path.Path;
-      const fixture = yield* themeIconFixture(new Uint8Array([1, 2, 3]));
-      yield* fixture.seedCache;
-      const run: ThemeIconRun = {
-        root: fixture.root,
-        commands: [],
-        onIconCacheRefresh: fixture.rewriteCache,
-      };
-      const future = fixture.pastSeconds + 10 * 365 * 24 * 60 * 60;
-      yield* fileSystem.utimes(fixture.cachePath, future, future);
+    it.effect("refreshes when this launch changed an icon even if the cache looks newer", () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const fixture = yield* themeIconFixture(new Uint8Array([1, 2, 3]));
+        yield* fixture.seedCache;
+        const run: ThemeIconRun = {
+          root: fixture.root,
+          commands: [],
+          onIconCacheRefresh: fixture.rewriteCache,
+        };
+        const future = fixture.pastSeconds + 10 * 365 * 24 * 60 * 60;
+        yield* fileSystem.utimes(fixture.cachePath, future, future);
 
-      yield* registerWithRealFileSystem(run);
+        yield* registerWithRealFileSystem(run);
 
-      assert.isTrue(yield* fileSystem.exists(path.join(fixture.appsDir, "com.t3tools.T3Code.png")));
-      assert.equal(iconCacheRuns(run), 1);
-    }).pipe(Effect.scoped),
-  );
+        assert.isTrue(
+          yield* fileSystem.exists(path.join(fixture.appsDir, "com.t3tools.T3Code.png")),
+        );
+        assert.equal(iconCacheRuns(run), 1);
+      }).pipe(Effect.scoped),
+    );
 
-  it.effect("retries a failed icon cache refresh on the next launch", () =>
-    Effect.gen(function* () {
-      const fixture = yield* themeIconFixture(new Uint8Array([1, 2, 3]));
-      yield* fixture.seedCache;
-      const failing: ThemeIconRun = { root: fixture.root, commands: [], iconCacheExitCode: 1 };
-      yield* registerWithRealFileSystem(failing);
-      assert.equal(iconCacheRuns(failing), 1);
-      assert.deepEqual(failing.commands.map(({ command }) => command).slice(1), [
-        "update-desktop-database",
-        "xdg-mime",
-      ]);
+    it.effect("retries a failed icon cache refresh on the next launch", () =>
+      Effect.gen(function* () {
+        const fixture = yield* themeIconFixture(new Uint8Array([1, 2, 3]));
+        yield* fixture.seedCache;
+        const failing: ThemeIconRun = { root: fixture.root, commands: [], iconCacheExitCode: 1 };
+        yield* registerWithRealFileSystem(failing);
+        assert.equal(iconCacheRuns(failing), 1);
+        assert.deepEqual(failing.commands.map(({ command }) => command).slice(1), [
+          "update-desktop-database",
+          "xdg-mime",
+        ]);
 
-      const recovering: ThemeIconRun = {
-        root: fixture.root,
-        commands: [],
-        onIconCacheRefresh: fixture.rewriteCache,
-      };
-      yield* registerWithRealFileSystem(recovering);
-      yield* registerWithRealFileSystem(recovering);
-      assert.equal(iconCacheRuns(recovering), 1);
-    }).pipe(Effect.scoped),
-  );
+        const recovering: ThemeIconRun = {
+          root: fixture.root,
+          commands: [],
+          onIconCacheRefresh: fixture.rewriteCache,
+        };
+        yield* registerWithRealFileSystem(recovering);
+        yield* registerWithRealFileSystem(recovering);
+        assert.equal(iconCacheRuns(recovering), 1);
+      }).pipe(Effect.scoped),
+    );
 
-  it.effect("still registers the handler when the theme icon install fails", () =>
-    Effect.gen(function* () {
-      const fixture = yield* themeIconFixture(new Uint8Array([1, 2, 3]));
-      const missingSource: ThemeIconRun = { root: fixture.root, commands: [], sourceMissing: true };
-      yield* registerWithRealFileSystem(missingSource);
-      assert.deepEqual(
-        missingSource.commands.map(({ command }) => command),
-        ["update-desktop-database", "xdg-mime"],
-      );
+    it.effect("still registers the handler when the theme icon install fails", () =>
+      Effect.gen(function* () {
+        const fixture = yield* themeIconFixture(new Uint8Array([1, 2, 3]));
+        const missingSource: ThemeIconRun = {
+          root: fixture.root,
+          commands: [],
+          sourceMissing: true,
+        };
+        yield* registerWithRealFileSystem(missingSource);
+        assert.deepEqual(
+          missingSource.commands.map(({ command }) => command),
+          ["update-desktop-database", "xdg-mime"],
+        );
 
-      yield* fixture.seedCache;
-      const missingTool: ThemeIconRun = {
-        root: fixture.root,
-        commands: [],
-        iconCacheSpawnFails: true,
-      };
-      yield* registerWithRealFileSystem(missingTool);
-      assert.deepEqual(
-        missingTool.commands.map(({ command }) => command),
-        ["gtk-update-icon-cache", "update-desktop-database", "xdg-mime"],
-      );
-    }).pipe(Effect.scoped),
-  );
-});
+        yield* fixture.seedCache;
+        const missingTool: ThemeIconRun = {
+          root: fixture.root,
+          commands: [],
+          iconCacheSpawnFails: true,
+        };
+        yield* registerWithRealFileSystem(missingTool);
+        assert.deepEqual(
+          missingTool.commands.map(({ command }) => command),
+          ["gtk-update-icon-cache", "update-desktop-database", "xdg-mime"],
+        );
+      }).pipe(Effect.scoped),
+    );
+  });
+}
