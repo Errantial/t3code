@@ -104,7 +104,9 @@ const settings = {
   customModels: [],
 } as const;
 
-describe("PiProvider", () => {
+// quarantine: https://github.com/Errantial/t3onsteroids/issues/1 Windows Pi command discovery fixture
+/* oxlint-disable t3code/no-global-process-runtime -- selecting a POSIX-only provider fixture */
+describe.skipIf(process.platform === "win32")("PiProvider", () => {
   it.effect("requires the first published Pi version with entries and settlement hooks", () =>
     Effect.gen(function* () {
       const snapshot = yield* checkPiProviderStatus(settings).pipe(
