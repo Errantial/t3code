@@ -1,3 +1,10 @@
+// @effect-diagnostics nodeBuiltinImport:off -- The port-picker tests run the remote script with real sockets.
+import * as NodeChildProcess from "node:child_process";
+import * as NodeFS from "node:fs";
+import * as NodeNet from "node:net";
+import * as NodeOS from "node:os";
+import * as NodePath from "node:path";
+
 import { assert, describe, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as NetService from "@t3tools/shared/Net";
@@ -80,6 +87,68 @@ function commandArgs(command: ChildProcess.Command): ReadonlyArray<string> {
 }
 
 const ARCHIVE = { archiveVersion: "1.2.3-preview.20260911.4" } as const;
+
+describe("ssh remote port range", () => {
+  const rangeEnd = SshTunnel.SSH_REMOTE_PORT_RANGE_START + SshTunnel.SSH_REMOTE_PORT_RANGE_SIZE;
+  const pickPort = (rememberedPort?: string) => {
+    const directory = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-ssh-pick-port-"));
+    try {
+      const portFile = NodePath.join(directory, "port");
+      if (rememberedPort !== undefined)
+        NodeFS.writeFileSync(
+          portFile,
+          `${rememberedPort}
+`,
+        );
+      const result = NodeChildProcess.spawnSync(
+        process.execPath,
+        [
+          "-",
+          portFile,
+          String(SshTunnel.SSH_REMOTE_PORT_RANGE_START),
+          String(SshTunnel.SSH_REMOTE_PORT_RANGE_SIZE),
+        ],
+        { input: SshTunnel.buildRemotePickPortScript(), encoding: "utf8" },
+      );
+      assert.equal(result.status, 0, result.stderr);
+      return Number.parseInt(result.stdout, 10);
+    } finally {
+      NodeFS.rmSync(directory, { recursive: true, force: true });
+    }
+  };
+
+  it("launches SSH servers from 3790 up, never the desktop default 3773", () => {
+    assert.isAtLeast(SshTunnel.SSH_REMOTE_PORT_RANGE_START, 3790);
+    const script = SshTunnel.buildRemoteLaunchScript(ARCHIVE);
+    assert.include(script, `pick-port "$PORT_FILE" "3790" "200"`);
+    assert.notInclude(script, "3773");
+  });
+
+  it("moves a remembered 3773 into the SSH range", () => {
+    const port = pickPort("3773");
+    assert.notEqual(port, 3773);
+    assert.isAtLeast(port, SshTunnel.SSH_REMOTE_PORT_RANGE_START);
+    assert.isBelow(port, rangeEnd);
+  });
+
+  it("keeps a remembered port inside the range and skips one that is taken", async () => {
+    const fresh = pickPort();
+    assert.isAtLeast(fresh, SshTunnel.SSH_REMOTE_PORT_RANGE_START);
+    assert.isBelow(fresh, rangeEnd);
+    assert.equal(pickPort(String(fresh)), fresh);
+
+    const taken = NodeNet.createServer();
+    await new Promise<void>((resolve) => taken.listen(fresh, "127.0.0.1", resolve));
+    try {
+      const next = pickPort(String(fresh));
+      assert.notEqual(next, fresh);
+      assert.isAtLeast(next, SshTunnel.SSH_REMOTE_PORT_RANGE_START);
+      assert.isBelow(next, rangeEnd);
+    } finally {
+      await new Promise<void>((resolve) => taken.close(() => resolve()));
+    }
+  });
+});
 
 describe("ssh tunnel scripts", () => {
   it("resolves the release a remote runtime archive is published under", () => {

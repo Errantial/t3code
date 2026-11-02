@@ -18,8 +18,14 @@ import { HttpClient } from "effect/http";
 import { ChildProcessSpawner } from "effect/process";
 
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
+import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import { CLOUD_ENDPOINT_RUNTIME_CONFIG } from "./config.ts";
 import * as ManagedEndpointRuntime from "./ManagedEndpointRuntime.ts";
+import {
+  compareOriginIdentity,
+  ENVIRONMENT_DESCRIPTOR_PATH,
+  environmentIdFromDescriptor,
+} from "./originIdentity.ts";
 
 // cloudflared finds the edge through the SRV record `_v2-origintunneld._tcp.argotunnel.com`,
 // which names these two hosts on port 7844. QUIC and HTTP/2 both use that port.
@@ -33,12 +39,19 @@ const READINESS_CHANGE_DEBOUNCE = Duration.seconds(3);
 const RECHECK_INTERVAL = Duration.minutes(5);
 
 export type EndpointProbe =
-  | { readonly kind: "status"; readonly status: number }
+  | {
+      readonly kind: "status";
+      readonly status: number;
+      /** The `environmentId` a 200 descriptor named, or `null` when it named none. */
+      readonly environmentId?: string | null;
+    }
   | { readonly kind: "dns_failed" | "timeout" | "network_error" };
 
 /** Everything one check learned. `null` means that step did not run. */
 export interface ReachabilityFacts {
   readonly managedTunnelConfigured: boolean;
+  /** This server's environment id; the public endpoint must answer as this environment. */
+  readonly environmentId?: string;
   readonly connector: ManagedEndpointRuntime.ConnectorFacts | null;
   readonly endpoint: EndpointProbe | null;
   readonly edgeReachable: boolean | null;
@@ -82,6 +95,21 @@ export function classifyReachability(
     );
   }
   const status = endpoint?.kind === "status" ? endpoint.status : null;
+  // A 200 is not enough: the tunnel's loopback origin can be another T3 environment, such as a
+  // server started inside WSL that took this machine's loopback port.
+  const answeredEnvironmentId =
+    endpoint?.kind === "status" ? (endpoint.environmentId ?? null) : null;
+  if (
+    status === 200 &&
+    facts.environmentId !== undefined &&
+    compareOriginIdentity(answeredEnvironmentId, facts.environmentId).kind === "other"
+  ) {
+    return fail(
+      "origin_unreachable",
+      `The tunnel reaches a different T3 server (environment ${answeredEnvironmentId}), not this one.`,
+      "Stop the other T3 server on this machine's loopback port (for example one started inside WSL), then restart T3 Code.",
+    );
+  }
   if (status === 200) {
     return {
       status: "reachable",
@@ -201,6 +229,7 @@ const make = Effect.gen(function* () {
   const runtime = yield* ManagedEndpointRuntime.CloudManagedEndpointRuntime;
   const secrets = yield* ServerSecretStore.ServerSecretStore;
   const httpClient = yield* HttpClient.HttpClient;
+  const environment = yield* ServerEnvironment.ServerEnvironment;
   // `order` ranks checks by start, so a slow older one cannot replace a newer result.
   const latestRef = yield* Ref.make(
     Option.none<{ readonly order: number; readonly result: EnvironmentConnectReachability }>(),
@@ -213,8 +242,20 @@ const make = Effect.gen(function* () {
   );
 
   const probeEndpoint = (hostname: string) =>
-    httpClient.get(`https://${hostname}/.well-known/t3/environment`).pipe(
-      Effect.map((response): EndpointProbe => ({ kind: "status", status: response.status })),
+    httpClient.get(`https://${hostname}${ENVIRONMENT_DESCRIPTOR_PATH}`).pipe(
+      Effect.flatMap((response) =>
+        response.status === 200
+          ? response.json.pipe(
+              Effect.map(environmentIdFromDescriptor),
+              Effect.orElseSucceed(() => null),
+              Effect.map((environmentId): EndpointProbe => ({
+                kind: "status",
+                status: 200,
+                environmentId,
+              })),
+            )
+          : Effect.succeed<EndpointProbe>({ kind: "status", status: response.status }),
+      ),
       Effect.scoped,
       Effect.timeoutOption(ENDPOINT_REQUEST_TIMEOUT),
       Effect.map(Option.getOrElse((): EndpointProbe => ({ kind: "timeout" }))),
@@ -236,6 +277,7 @@ const make = Effect.gen(function* () {
         : null;
     const facts: ReachabilityFacts = {
       managedTunnelConfigured,
+      environmentId: yield* environment.getEnvironmentId,
       connector,
       endpoint,
       edgeReachable: null,

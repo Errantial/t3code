@@ -60,6 +60,40 @@ describe("classifyReachability", () => {
     ).toMatchObject({ cause: "dns_failed" });
   });
 
+  it("reports another environment answering at the origin as origin_unreachable", () => {
+    const result = classifyReachability(
+      facts({
+        environmentId: "env-this-server",
+        endpoint: { kind: "status", status: 200, environmentId: "env-wsl-server" },
+      }),
+      checkedAt,
+    );
+    expect(result).toMatchObject({ status: "unreachable", cause: "origin_unreachable" });
+    expect(result.status === "unreachable" ? result.reason : "").toContain("env-wsl-server");
+  });
+
+  it("is reachable only when the origin answers as this environment", () => {
+    expect(
+      classifyReachability(
+        facts({
+          environmentId: "env-this-server",
+          endpoint: { kind: "status", status: 200, environmentId: "env-this-server" },
+        }),
+        checkedAt,
+      ),
+    ).toMatchObject({ status: "reachable" });
+    // A descriptor without an id cannot prove a mismatch, so it keeps the old answer.
+    expect(
+      classifyReachability(
+        facts({
+          environmentId: "env-this-server",
+          endpoint: { kind: "status", status: 200, environmentId: null },
+        }),
+        checkedAt,
+      ),
+    ).toMatchObject({ status: "reachable" });
+  });
+
   it("waits on a connector that has not connected while the edge answers", () => {
     expect(
       classifyReachability(facts({ connector: notConnected, edgeReachable: true }), checkedAt),

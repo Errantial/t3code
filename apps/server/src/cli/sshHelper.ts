@@ -43,8 +43,15 @@ const pickPort = Command.make("pick-port", {
     Effect.promise(async () => {
       const raw = NodeFS.existsSync(portFile) ? NodeFS.readFileSync(portFile, "utf8").trim() : "";
       const preferred = Number.parseInt(raw, 10);
-      const start = Number.isInteger(preferred) ? preferred : defaultPort;
-      for (let port = start; port < start + scanWindow; port += 1) {
+      // A remembered port is reused only inside the range, so an older launch on 3773 moves off it.
+      const offset =
+        Number.isInteger(preferred) &&
+        preferred >= defaultPort &&
+        preferred < defaultPort + scanWindow
+          ? preferred - defaultPort
+          : 0;
+      for (let index = 0; index < scanWindow; index += 1) {
+        const port = defaultPort + ((offset + index) % scanWindow);
         if ((await canBind(port)) && !(await answersOnLoopback(port))) {
           process.stdout.write(String(port));
           return;

@@ -650,7 +650,10 @@ describe("releaseManagedTunnelOnShutdown", () => {
         const link = yield* CloudLink.CloudLink;
         expect(yield* link.startManagedTunnelIfOriginConfirmed("http://127.0.0.1:3773")).toBe(true);
         expect(applyConfigCalls).toEqual([config]);
-        expect(requests).toEqual([]);
+        // Only the loopback identity check; the relay is not contacted.
+        expect(requests.map((request) => request.url)).toEqual([
+          "http://127.0.0.1:3773/.well-known/t3/environment",
+        ]);
       }).pipe(provideReleaseHarness({ store, applyConfigCalls, requests }));
     },
   );
@@ -706,10 +709,77 @@ describe("releaseManagedTunnelOnShutdown", () => {
           }),
         ).toBe(true);
         expect(applyConfigCalls).toEqual([config]);
-        expect(requests).toEqual([]);
+        expect(requests.map((request) => request.url)).toEqual([
+          "http://127.0.0.1:3773/.well-known/t3/environment",
+        ]);
       }).pipe(provideReleaseHarness({ store, applyConfigCalls, requests }));
     },
   );
+
+  it.effect.each([true, false])(
+    "does not publish a loopback origin that answers as another environment (confirmed: %s)",
+    (requireConfirmedOrigin) => {
+      const configJson =
+        '{"providerKind":"cloudflare_tunnel","connectorToken":"existing-token","tunnelId":"existing-tunnel"}';
+      const { store } = makeMemorySecretStore([
+        [CLOUD_ENDPOINT_RUNTIME_CONFIG, configJson],
+        [
+          CLOUD_ENDPOINT_CONFIRMED_ORIGIN,
+          `{"config":${configJson},"origin":{"localHttpHost":"127.0.0.1","localHttpPort":3773}}`,
+        ],
+      ]);
+      const applyConfigCalls: Array<unknown> = [];
+      const requests: Array<HttpClientRequest.HttpClientRequest> = [];
+
+      return Effect.gen(function* () {
+        const link = yield* CloudLink.CloudLink;
+        const error = yield* link
+          .startManagedTunnelIfOriginConfirmed("http://127.0.0.1:3773", { requireConfirmedOrigin })
+          .pipe(Effect.flip);
+        expect(error).toBeInstanceOf(CloudLink.CloudLinkOriginIdentityMismatchError);
+        expect(error).toMatchObject({ otherEnvironmentId: "env_wsl" });
+        expect(applyConfigCalls).toEqual([]);
+      }).pipe(
+        provideReleaseHarness({
+          store,
+          applyConfigCalls,
+          requests,
+          // A server inside WSL took the host's loopback port.
+          respond: () => Response.json({ environmentId: "env_wsl", label: "wsl" }),
+        }),
+      );
+    },
+  );
+
+  it.effect("publishes a loopback origin that answers as this environment", () => {
+    const config = {
+      providerKind: "cloudflare_tunnel" as const,
+      connectorToken: "existing-token",
+      tunnelId: "existing-tunnel",
+    };
+    const { store } = makeMemorySecretStore([
+      [CLOUD_ENDPOINT_RUNTIME_CONFIG, JSON.stringify(config)],
+    ]);
+    const applyConfigCalls: Array<unknown> = [];
+    const requests: Array<HttpClientRequest.HttpClientRequest> = [];
+
+    return Effect.gen(function* () {
+      const link = yield* CloudLink.CloudLink;
+      expect(
+        yield* link.startManagedTunnelIfOriginConfirmed("http://127.0.0.1:3773", {
+          requireConfirmedOrigin: false,
+        }),
+      ).toBe(true);
+      expect(applyConfigCalls).toEqual([config]);
+    }).pipe(
+      provideReleaseHarness({
+        store,
+        applyConfigCalls,
+        requests,
+        respond: () => Response.json({ environmentId: "env_123", label: "this" }),
+      }),
+    );
+  });
 
   it.effect.each(["replaced", "removed"] as const)(
     "does not activate a tunnel when its runtime config is %s during registration",

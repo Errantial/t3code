@@ -44,8 +44,15 @@ import {
   SshReadinessError,
 } from "./errors.ts";
 
-const DEFAULT_REMOTE_PORT = 3773;
-const REMOTE_PORT_SCAN_WINDOW = 200;
+/**
+ * SSH-launched servers use their own port range, never the desktop default 3773. A server started
+ * inside WSL is forwarded to the Windows host's loopback, so taking 3773 there would shadow the
+ * host's own server, and T3 Connect would serve the WSL environment instead.
+ */
+export const SSH_REMOTE_PORT_RANGE_START = 3790;
+export const SSH_REMOTE_PORT_RANGE_SIZE = 200;
+const DEFAULT_REMOTE_PORT = SSH_REMOTE_PORT_RANGE_START;
+const REMOTE_PORT_SCAN_WINDOW = SSH_REMOTE_PORT_RANGE_SIZE;
 const SSH_READY_TIMEOUT_MS = 20_000;
 const SSH_READY_PROBE_TIMEOUT_MS = 1_000;
 const TUNNEL_SHUTDOWN_TIMEOUT_MS = 2_000;
@@ -243,8 +250,11 @@ const defaultPort = Number.parseInt(process.argv[3] ?? "", 10);
 const scanWindow = Number.parseInt(process.argv[4] ?? "", 10);
 const raw = fs.existsSync(filePath) ? fs.readFileSync(filePath, "utf8").trim() : "";
 const preferred = Number.parseInt(raw, 10);
-const start = Number.isInteger(preferred) ? preferred : defaultPort;
-const end = start + scanWindow;
+// A remembered port is reused only inside the range, so a launch from an older range moves.
+const offset =
+  Number.isInteger(preferred) && preferred >= defaultPort && preferred < defaultPort + scanWindow
+    ? preferred - defaultPort
+    : 0;
 
 function canBind(port) {
   return new Promise((resolve) => {
@@ -276,7 +286,8 @@ function answersOnLoopback(port) {
 }
 
 (async () => {
-  for (let port = start; port < end; port += 1) {
+  for (let index = 0; index < scanWindow; index += 1) {
+    const port = defaultPort + ((offset + index) % scanWindow);
     const available = (await canBind(port)) && !(await answersOnLoopback(port));
     if (available) {
       process.stdout.write(String(port));
@@ -837,7 +848,13 @@ export function buildRemoteNodeEnvScript(input?: RemoteT3RunnerOptions): string 
   );
 }
 
-function buildRemoteLaunchScript(input?: RemoteT3RunnerOptions): string {
+/** @internal Exported so the port picker can be regression tested without SSH. */
+export function buildRemotePickPortScript(): string {
+  return stripTrailingNewlines(REMOTE_PICK_PORT_SCRIPT);
+}
+
+/** @internal Exported so the launch script's port range can be regression tested. */
+export function buildRemoteLaunchScript(input?: RemoteT3RunnerOptions): string {
   return applyScriptPlaceholders(REMOTE_LAUNCH_SCRIPT, {
     T3_ARCHIVE_MODE: isNodeScriptRunner(input) ? "0" : "1",
     T3_NODE_ENV_SCRIPT: buildRemoteNodeEnvScript(input),

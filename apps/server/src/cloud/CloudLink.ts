@@ -71,6 +71,7 @@ import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as AgentAwarenessRelay from "../relay/AgentAwarenessRelay.ts";
 import { makeRelayEnvironmentClient } from "../relay/relayEnvironmentClient.ts";
 import { loopbackUrlHostForAddress } from "../startupAccess.ts";
+import { compareOriginIdentity, readOriginEnvironmentId } from "./originIdentity.ts";
 import {
   type CliDesiredLinkMode,
   readCliDesiredCloudLink,
@@ -232,6 +233,18 @@ export class CloudLinkEndpointUnavailableError extends Schema.TaggedError<CloudL
     return this.reason === "runtime-not-started"
       ? "Managed endpoint runtime could not be started."
       : "Managed endpoint origin could not be confirmed.";
+  }
+}
+
+/** The loopback origin the tunnel would publish answers as a different T3 environment. */
+export class CloudLinkOriginIdentityMismatchError extends Schema.TaggedError<CloudLinkOriginIdentityMismatchError>()(
+  "CloudLinkOriginIdentityMismatchError",
+  {
+    otherEnvironmentId: Schema.String,
+  },
+) {
+  override get message(): string {
+    return `The T3 Connect origin is served by another T3 environment (${this.otherEnvironmentId}), not this server.`;
   }
 }
 
@@ -503,6 +516,7 @@ export class CloudLink extends Context.Service<
     ) => Effect.Effect<
       boolean,
       | CloudLinkEndpointUnavailableError
+      | CloudLinkOriginIdentityMismatchError
       | CloudLinkOriginInvalidError
       | ServerSecretStore.SecretStoreError
     >;
@@ -733,6 +747,17 @@ const make = Effect.gen(function* () {
           ) {
             return false;
           }
+        }
+        // Publishing the origin must publish this server. Another environment on the same
+        // loopback port (such as one started inside WSL) would fail every relay audience check.
+        const identity = compareOriginIdentity(
+          yield* readOriginEnvironmentId(httpClient, localOrigin),
+          yield* environment.getEnvironmentId,
+        );
+        if (identity.kind === "other") {
+          return yield* new CloudLinkOriginIdentityMismatchError({
+            otherEnvironmentId: identity.environmentId,
+          });
         }
         const status = yield* endpointRuntime.applyConfig(config);
         if (status.status !== "running") {
