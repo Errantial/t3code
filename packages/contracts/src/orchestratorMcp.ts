@@ -95,9 +95,8 @@ export type OrchestratorMcpTargetOptions = typeof OrchestratorMcpTargetOptions.T
 
 /**
  * An effort or reasoning level, named the same way for every provider. The
- * server writes it to the option the chosen model advertises: `effort` on
- * Claude (low, medium, high, xhigh, max, ...) or `reasoningEffort` on Codex
- * (minimal, low, medium, high, xhigh). `orchestrator_capabilities` lists the
+ * server writes it to the option the chosen model advertises (`effort` on
+ * Claude, `reasoningEffort` on Codex); `orchestrator_capabilities` lists the
  * values each model accepts.
  */
 export const OrchestratorMcpEffort = TrimmedNonEmptyString.check(Schema.isMaxLength(64)).annotate({

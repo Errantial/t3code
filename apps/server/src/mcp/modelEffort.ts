@@ -7,13 +7,11 @@ import {
 import * as Effect from "effect/Effect";
 
 /**
- * The provider option that carries an effort or reasoning level. Claude calls
- * it `effort` (low, medium, high, xhigh, max, ...); Codex calls it
- * `reasoningEffort` (minimal, low, medium, high, xhigh). Agents name a level
- * once, as `effort`, and the server writes it to the option the model
- * advertises.
+ * The provider option that carries an effort or reasoning level: `effort` on
+ * Claude, `reasoningEffort` on Codex. Agents name a level once, as `effort`,
+ * and the server writes it to the option the model advertises.
  */
-export const EFFORT_OPTION_IDS = ["effort", "reasoningEffort"] as const;
+const EFFORT_OPTION_IDS = ["effort", "reasoningEffort"] as const;
 
 export function effortOptionDescriptor(
   descriptors: ReadonlyArray<ProviderOptionDescriptor> | undefined,
