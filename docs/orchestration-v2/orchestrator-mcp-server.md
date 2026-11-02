@@ -207,6 +207,14 @@ Returns:
 Unavailable providers include model-visible constraints such as missing V2
 adapter support, disabled state, missing executable, or missing authentication.
 
+Each model also reports `effort` when it has a reasoning-level option:
+`{ optionId, values, default }`. `optionId` is the provider's own name for the
+option — `effort` on Claude (low, medium, high, xhigh, max, plus
+`ultracode`/`ultrathink` where the model offers them) and `reasoningEffort` on
+Codex (minimal, low, medium, high, xhigh) — so an agent passes a level as
+`effort` without knowing the provider's option id. A model without `effort` has
+no reasoning level to set, and the server refuses one for it.
+
 The model list is short on purpose: catalogs such as OpenCode can hold hundreds
 of models, and every call lands in the agent's context. Each provider lists
 custom, favorite, and the caller's own models, plus all current (non-legacy)
@@ -227,6 +235,8 @@ type DelegateTaskInput = {
     providerInstanceId?: string;
     driverKind?: string;
     model?: string;
+    options?: Array<{ id: string; value: string | boolean }> | Record<string, string | boolean>;
+    effort?: string;
   };
   title?: string;
   role?: "implementation" | "research" | "review" | "design" | "test" | "general";
@@ -237,6 +247,14 @@ type DelegateTaskInput = {
   interactionMode?: "inherit" | "plan" | "default";
 };
 ```
+
+`target.effort` is the reasoning level for the child. The server writes it to
+the option the chosen model advertises (`effort` or `reasoningEffort`), keeping
+any other option, and an inherited level of the same option is replaced. A
+level the model does not offer, or a model with no effort option, fails the call
+with `invalid_request` naming the allowed values; omitting `effort` leaves the
+child on the inherited or default level. `target.options` still takes the raw
+option list, and setting the effort option both ways is refused.
 
 Provider, model, runtime mode, and interaction mode inherit from the parent
 when omitted. A driver-only target inherits the parent's provider instance
@@ -338,6 +356,8 @@ type CreateThreadsInput = {
       providerInstanceId?: string;
       driverKind?: string;
       model?: string;
+      options?: Array<{ id: string; value: string | boolean }> | Record<string, string | boolean>;
+      effort?: string;
     };
     runtimeMode?: "inherit" | "approval-required" | "auto-accept-edits" | "full-access";
     interactionMode?: "inherit" | "plan" | "default";
@@ -346,10 +366,12 @@ type CreateThreadsInput = {
 };
 ```
 
-Each entry independently resolves provider, model, and modes. The new threads
-inherit the parent's project, branch, and worktree path, but they have no
-sub-agent lineage. Entries with a prompt immediately dispatch a run; entries
-without a prompt remain idle.
+Each entry independently resolves provider, model, options, and modes.
+`target.effort` sets that thread's reasoning level, resolved exactly as for
+`delegate_task`. The new threads inherit the parent's project, branch, and
+worktree path, but they have no sub-agent lineage. Entries with a prompt
+immediately dispatch a run; entries without a prompt remain idle. Each created
+thread reports its `options`, including the effort level it started with.
 
 ### `t3_thread_launch`
 
@@ -361,7 +383,9 @@ before the agent starts. Creating a worktree in the task prompt does not update
 this binding.
 
 Pass the task in `message`. Project, model, and modes inherit when omitted;
-workspace does not. `scratch: true` launches without a project, in a folder of
+workspace does not. `effort` sets the reasoning level of the chosen model, with
+the same validation as `delegate_task`; `modelSelection.options` can carry it
+instead. `scratch: true` launches without a project, in a folder of
 its own under the environment's Scratch project. For stacked PRs, use the parent branch as `baseRef` with
 `startFromOrigin: false`. The new thread may not run with broader runtime or
 interaction modes than the caller. Launch has no retry key, so inspect existing threads after a failed or lost response before
@@ -389,6 +413,9 @@ provenance. MCP-created threads and user-role messages use `createdBy: "agent"`
 and `creationSource: "mcp"`; provider output uses `creationSource: "provider"`.
 Actor and ingress are separate so agent-authored user-role messages remain
 distinguishable from human-authored messages.
+
+Thread detail, thread list items, and recent runs report the model's `options`,
+so the current effort level is visible without a separate call.
 
 Agents mention another thread by the `link` its result carries,
 `<t3-thread://v2/<environmentId>/<threadId>>`, so they never format an id or
@@ -435,8 +462,10 @@ Sends a message to any ordinary or delegated thread in the environment:
   interrupt-and-restart path.
 
 The target runtime and interaction modes may not be broader than the caller's.
-Stable command and message IDs are derived from `clientRequestId` for
-idempotent retries.
+`effort` changes the thread's reasoning level: it is validated against the
+thread's model, applied to this message's run, and recorded as the thread's
+model selection, so later turns keep it. Stable command and message IDs are
+derived from `clientRequestId` for idempotent retries.
 
 ### `t3_thread_wait`
 

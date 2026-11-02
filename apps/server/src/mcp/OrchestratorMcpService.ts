@@ -17,6 +17,7 @@ import {
   type OrchestratorMcpCapabilitiesInput,
   type OrchestratorMcpCapabilitiesResult,
   type OrchestratorMcpModelOption,
+  type OrchestratorMcpModelEffort,
   type OrchestratorMcpCreateThreadsInput,
   type OrchestratorMcpCreateThreadsResult,
   type OrchestratorMcpCreatedThread,
@@ -118,6 +119,11 @@ import {
   taskPrompt,
 } from "./delegatedTaskModes.ts";
 import { isLiveCallerShell, threadNotFound } from "./threadAccess.ts";
+import {
+  mergeOptionSelections,
+  effortOptionDescriptor,
+  resolveEffortSelection,
+} from "./modelEffort.ts";
 import * as SecretRequests from "../secrets/SecretRequests.ts";
 import * as PeerForwarding from "../peer/PeerForwarding.ts";
 import * as RemoteDelegation from "../peer/RemoteDelegation.ts";
@@ -332,6 +338,20 @@ function capabilityModelOption(descriptor: ProviderOptionDescriptor): Orchestrat
     id: descriptor.id,
     values:
       descriptor.type === "boolean" ? [false, true] : descriptor.options.map((choice) => choice.id),
+    ...(defaultValue === undefined ? {} : { default: defaultValue }),
+  };
+}
+
+/** The same option the `effort` argument writes, so an agent needs no provider option id. */
+function capabilityModelEffort(
+  descriptors: ReadonlyArray<ProviderOptionDescriptor> | undefined,
+): OrchestratorMcpModelEffort | undefined {
+  const descriptor = effortOptionDescriptor(descriptors);
+  if (descriptor === undefined || descriptor.type !== "select") return undefined;
+  const defaultValue = getProviderOptionCurrentValue(descriptor);
+  return {
+    optionId: descriptor.id,
+    values: descriptor.options.map((choice) => choice.id),
     ...(defaultValue === undefined ? {} : { default: defaultValue }),
   };
 }
@@ -767,6 +787,9 @@ function listItemFromShell(
     latestRunId: shell.latestRunId,
     providerInstanceId: shell.modelSelection.instanceId,
     model: shell.modelSelection.model,
+    ...(shell.modelSelection.options === undefined
+      ? {}
+      : { options: [...shell.modelSelection.options] }),
     runtimeMode: shell.runtimeMode,
     interactionMode: shell.interactionMode,
     linkedPullRequest: shell.linkedPullRequest ?? null,
@@ -802,6 +825,9 @@ function threadDetail(
     activeRunId: active?.id ?? null,
     providerInstanceId: projection.thread.modelSelection.instanceId,
     model: projection.thread.modelSelection.model,
+    ...(projection.thread.modelSelection.options === undefined
+      ? {}
+      : { options: [...projection.thread.modelSelection.options] }),
     runtimeMode: projection.thread.runtimeMode,
     interactionMode: projection.thread.interactionMode,
     linkedPullRequest: projection.thread.linkedPullRequest ?? null,
@@ -838,6 +864,9 @@ function threadRun(run: OrchestrationV2Run): OrchestratorMcpThreadRun {
     status: run.status,
     providerInstanceId: run.modelSelection.instanceId,
     model: run.modelSelection.model,
+    ...(run.modelSelection.options === undefined
+      ? {}
+      : { options: [...run.modelSelection.options] }),
     requestedAt: DateTime.formatIso(run.requestedAt),
     startedAt: run.startedAt === null ? null : DateTime.formatIso(run.startedAt),
     completedAt: run.completedAt === null ? null : DateTime.formatIso(run.completedAt),
@@ -1355,10 +1384,21 @@ const make = Effect.gen(function* () {
     }
 
     const requestedOptions = input.target?.options;
-    if (requestedOptions !== undefined) {
-      const descriptors = provider.models.find((candidate) => candidate.slug === model)
-        ?.capabilities?.optionDescriptors;
-      const invalid = invalidOptionSelections(requestedOptions, descriptors);
+    const descriptors = provider.models.find((candidate) => candidate.slug === model)?.capabilities
+      ?.optionDescriptors;
+    const effort = yield* resolveEffortSelection({
+      effort: input.target?.effort,
+      model,
+      instanceId,
+      descriptors,
+      ...(requestedOptions === undefined ? {} : { selections: requestedOptions }),
+    });
+    // A named effort joins the explicit options, so inherited values stay and
+    // the effort wins over an inherited level of the same option.
+    const optionsWithEffort =
+      effort === undefined ? requestedOptions : [...(requestedOptions ?? []), effort];
+    if (optionsWithEffort !== undefined) {
+      const invalid = invalidOptionSelections(optionsWithEffort, descriptors);
       if (invalid.length > 0) {
         return yield* failure(
           "invalid_request",
@@ -1370,14 +1410,14 @@ const make = Effect.gen(function* () {
     const inheritsOptions =
       instanceId === inheritedSelection.instanceId && model === inheritedSelection.model;
     let options = inheritsOptions ? inheritedSelection.options : undefined;
-    if (requestedOptions !== undefined) {
+    if (optionsWithEffort !== undefined) {
       const selections = new Map(
-        (requestedOptions.length === 0 ? [] : (options ?? [])).map((selection) => [
+        (optionsWithEffort.length === 0 ? [] : (options ?? [])).map((selection) => [
           selection.id,
           selection,
         ]),
       );
-      for (const selection of requestedOptions) {
+      for (const selection of optionsWithEffort) {
         selections.set(selection.id, selection);
       }
       options = [...selections.values()];
@@ -1392,6 +1432,40 @@ const make = Effect.gen(function* () {
     clientRequestId === undefined
       ? crypto.randomUUIDv4().pipe(Effect.orDie)
       : Effect.succeed(clientRequestId);
+
+  /**
+   * The model selection a thread's next turn runs with, when the caller names an
+   * effort. Undefined keeps the thread's selection exactly as it is.
+   */
+  const resolveThreadEffort = Effect.fn("OrchestratorMcpService.resolveThreadEffort")(function* (
+    selection: ModelSelection,
+    effort: string | undefined,
+  ): Effect.fn.Return<ModelSelection | undefined, OrchestratorMcpFailure> {
+    if (effort === undefined) return undefined;
+    const provider = (yield* loadProviders).find(
+      (candidate) => candidate.instanceId === selection.instanceId,
+    );
+    if (provider === undefined) {
+      return yield* failure(
+        "provider_unavailable",
+        `Provider instance ${selection.instanceId} is not registered.`,
+      );
+    }
+    const resolved = yield* resolveEffortSelection({
+      effort,
+      model: selection.model,
+      instanceId: selection.instanceId,
+      descriptors: provider.models.find((candidate) => candidate.slug === selection.model)
+        ?.capabilities?.optionDescriptors,
+      ...(selection.options === undefined ? {} : { selections: selection.options }),
+    });
+    if (resolved === undefined) return undefined;
+    return {
+      instanceId: selection.instanceId,
+      model: selection.model,
+      options: mergeOptionSelections(selection.options, [resolved]),
+    };
+  });
 
   const readTask = Effect.fn("OrchestratorMcpService.readTask")(function* (
     scope: McpThreadInvocationScope,
@@ -2146,12 +2220,14 @@ const make = Effect.gen(function* () {
             displayName: provider.displayName ?? null,
             models: listed.map((model) => {
               const options = model.capabilities?.optionDescriptors ?? [];
+              const effort = capabilityModelEffort(options);
               return {
                 id: model.slug,
                 ...(model.name.toLowerCase() === model.slug.toLowerCase()
                   ? {}
                   : { label: model.name }),
                 ...(options.length === 0 ? {} : { options: options.map(capabilityModelOption) }),
+                ...(effort === undefined ? {} : { effort }),
               };
             }),
             ...(omitted === 0 ? {} : { omittedModels: omitted }),
@@ -2759,6 +2835,9 @@ const make = Effect.gen(function* () {
                 creationSource: projection.thread.creationSource,
                 providerInstanceId: resolvedModelSelection.instanceId,
                 model: resolvedModelSelection.model,
+                ...(resolvedModelSelection.options === undefined
+                  ? {}
+                  : { options: [...resolvedModelSelection.options] }),
               } satisfies OrchestratorMcpCreatedThread;
             }),
           { concurrency: 1 },
@@ -2914,6 +2993,9 @@ const make = Effect.gen(function* () {
       yield* assertLiveCallerForOtherThread(scope, parent, target);
       yield* resolveRuntimeMode(limits.runtimeMode, target.thread.runtimeMode);
       yield* resolveInteractionMode(limits.interactionMode, target.thread.interactionMode);
+      // A new effort applies to this turn and, through the model selection it
+      // writes, to later turns of the thread.
+      const modelSelection = yield* resolveThreadEffort(target.thread.modelSelection, input.effort);
 
       const mode = input.mode ?? "auto";
       const key = yield* requestKey(input.clientRequestId);
@@ -2935,6 +3017,7 @@ const make = Effect.gen(function* () {
           messageId,
           text: input.message,
           attachments: [],
+          ...(modelSelection === undefined ? {} : { modelSelection }),
           mode,
           createdBy: "agent",
           creationSource: "mcp",

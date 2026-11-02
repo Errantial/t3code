@@ -93,6 +93,18 @@ export const OrchestratorMcpTargetOptions = Schema.Union([
 ]);
 export type OrchestratorMcpTargetOptions = typeof OrchestratorMcpTargetOptions.Type;
 
+/**
+ * An effort or reasoning level, named the same way for every provider. The
+ * server writes it to the option the chosen model advertises: `effort` on
+ * Claude (low, medium, high, xhigh, max, ...) or `reasoningEffort` on Codex
+ * (minimal, low, medium, high, xhigh). `orchestrator_capabilities` lists the
+ * values each model accepts.
+ */
+export const OrchestratorMcpEffort = TrimmedNonEmptyString.check(Schema.isMaxLength(64)).annotate({
+  description:
+    "Effort or reasoning level for the model, such as 'high'. Allowed values come from the model's `effort` in `orchestrator_capabilities`. Unsupported values are rejected.",
+});
+
 export const OrchestratorMcpTarget = Schema.Struct({
   providerInstanceId: Schema.optional(
     ProviderInstanceId.annotate({
@@ -109,6 +121,12 @@ export const OrchestratorMcpTarget = Schema.Struct({
     OrchestratorMcpTargetOptions.annotate({
       description:
         "Options from `orchestrator_capabilities`, such as {effort:'max'}. Given values override inherited. [] or {} clears.",
+    }),
+  ),
+  effort: Schema.optional(
+    OrchestratorMcpEffort.annotate({
+      description:
+        "Reasoning level for this model, such as 'high'. Shorthand for the model's effort option; not with `options` setting the same option.",
     }),
   ),
   environmentId: Schema.optional(
@@ -301,6 +319,7 @@ export const OrchestratorMcpSwarmMemberResult = Schema.Struct({
   status: OrchestratorMcpDelegatedTaskStatus,
   providerInstanceId: ProviderInstanceId,
   model: Schema.NullOr(Schema.String),
+  options: Schema.optional(Schema.Array(ProviderOptionSelection)),
 });
 export type OrchestratorMcpSwarmMemberResult = typeof OrchestratorMcpSwarmMemberResult.Type;
 
@@ -355,6 +374,8 @@ export const OrchestratorMcpCreatedThread = Schema.Struct({
   creationSource: OrchestrationV2CreationSource,
   providerInstanceId: ProviderInstanceId,
   model: Schema.String,
+  /** The model's options, including the effort level when one is set. */
+  options: Schema.optional(Schema.Array(ProviderOptionSelection)),
 });
 export type OrchestratorMcpCreatedThread = typeof OrchestratorMcpCreatedThread.Type;
 
@@ -423,6 +444,8 @@ export const OrchestratorMcpThreadListItem = Schema.Struct({
   latestRunId: Schema.NullOr(RunId),
   providerInstanceId: ProviderInstanceId,
   model: Schema.String,
+  /** The model's options, including the effort level when one is set. */
+  options: Schema.optional(Schema.Array(ProviderOptionSelection)),
   runtimeMode: RuntimeMode,
   interactionMode: ProviderInteractionMode,
   linkedPullRequest: Schema.NullOr(ThreadLinkedPullRequest),
@@ -494,6 +517,8 @@ export const OrchestratorMcpThreadDetail = Schema.Struct({
   activeRunId: Schema.NullOr(RunId),
   providerInstanceId: ProviderInstanceId,
   model: Schema.String,
+  /** The model's options, including the effort level when one is set. */
+  options: Schema.optional(Schema.Array(ProviderOptionSelection)),
   runtimeMode: RuntimeMode,
   interactionMode: ProviderInteractionMode,
   linkedPullRequest: Schema.NullOr(ThreadLinkedPullRequest),
@@ -522,6 +547,8 @@ export const OrchestratorMcpThreadRun = Schema.Struct({
   status: OrchestrationV2RunStatus,
   providerInstanceId: ProviderInstanceId,
   model: Schema.String,
+  /** The model's options for this run, including its effort level when one is set. */
+  options: Schema.optional(Schema.Array(ProviderOptionSelection)),
   requestedAt: IsoDateTime,
   startedAt: Schema.NullOr(IsoDateTime),
   completedAt: Schema.NullOr(IsoDateTime),
@@ -563,6 +590,12 @@ export const OrchestratorMcpThreadSendInput = Schema.Struct({
   threadId: ThreadId,
   message: OrchestratorMcpPrompt,
   mode: Schema.optional(Schema.Literals(["auto", "queue", "steer", "restart"])),
+  effort: Schema.optional(
+    OrchestratorMcpEffort.annotate({
+      description:
+        "Change the thread's reasoning level for this message and later turns. Values from the model's `effort` in `orchestrator_capabilities`. Unsupported values are rejected.",
+    }),
+  ),
   clientRequestId: Schema.optional(OrchestratorMcpClientRequestId),
 });
 export type OrchestratorMcpThreadSendInput = typeof OrchestratorMcpThreadSendInput.Type;
@@ -646,6 +679,17 @@ export const OrchestratorMcpModelOption = Schema.Struct({
 });
 export type OrchestratorMcpModelOption = typeof OrchestratorMcpModelOption.Type;
 
+/** The option that carries an effort level, so `effort` needs no per-provider option id. */
+export const OrchestratorMcpModelEffort = Schema.Struct({
+  optionId: Schema.String.annotate({
+    description:
+      "Option id the server writes for `effort`: 'effort' (Claude) or 'reasoningEffort' (Codex).",
+  }),
+  values: Schema.Array(ProviderOptionSelectionValue),
+  default: Schema.optional(ProviderOptionSelectionValue),
+});
+export type OrchestratorMcpModelEffort = typeof OrchestratorMcpModelEffort.Type;
+
 export const OrchestratorMcpProviderCapability = Schema.Struct({
   providerInstanceId: ProviderInstanceId,
   driverKind: ProviderDriverKind,
@@ -656,6 +700,8 @@ export const OrchestratorMcpProviderCapability = Schema.Struct({
       /** Omitted when it only restates the id. */
       label: Schema.optional(Schema.String),
       options: Schema.optional(Schema.Array(OrchestratorMcpModelOption)),
+      /** The model's effort levels, when it has an effort option. */
+      effort: Schema.optional(OrchestratorMcpModelEffort),
     }),
   ),
   /** Models left out of `models`: unlisted visible models, or matches past the cap with `search`. */

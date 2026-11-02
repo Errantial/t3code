@@ -50,3 +50,48 @@ it("refuses a t3_thread_update whose fields do not fit its action", () => {
     true,
   );
 });
+
+it("accepts an optional effort on thread creation and on a send", () => {
+  const createThreads = Schema.decodeUnknownExit(
+    OrchestratorToolkit.tools.create_threads.parametersSchema,
+  );
+  const delegateTask = Schema.decodeUnknownExit(
+    OrchestratorToolkit.tools.delegate_task.parametersSchema,
+  );
+  const createSwarm = Schema.decodeUnknownExit(
+    OrchestratorToolkit.tools.create_swarm.parametersSchema,
+  );
+  const send = Schema.decodeUnknownExit(OrchestratorToolkit.tools.t3_thread_send.parametersSchema);
+
+  // Each call is the JSON a client sends, so it is unknown until it decodes.
+  const withoutEffort: unknown = {
+    threads: [{ prompt: "Start.", target: { model: "claude-opus-5-5" } }],
+  };
+  const withEffort: unknown = {
+    threads: [{ prompt: "Start.", target: { model: "claude-opus-5-5", effort: "max" } }],
+  };
+  const delegated: unknown = { task: "Do the thing.", target: { effort: "xhigh" } };
+  const swarm: unknown = {
+    title: "Prior art",
+    members: [
+      {
+        key: "research-a",
+        title: "Researcher: prior art",
+        task: "Read the linked design notes and return the three strongest options.",
+        target: { effort: "high" },
+      },
+    ],
+  };
+  const sendInput: unknown = { threadId: "thread:one", message: "Keep going." };
+
+  // Omitted effort keeps today's input valid.
+  expect(Exit.isSuccess(createThreads(withoutEffort))).toBe(true);
+  expect(Exit.isSuccess(createThreads(withEffort))).toBe(true);
+  expect(Exit.isSuccess(delegateTask(delegated))).toBe(true);
+  expect(Exit.isSuccess(createSwarm(swarm))).toBe(true);
+  expect(Exit.isSuccess(send(sendInput))).toBe(true);
+  expect(Exit.isSuccess(send({ ...(sendInput as object), effort: "low" }))).toBe(true);
+  // An empty level is not an effort.
+  expect(Exit.isFailure(send({ ...(sendInput as object), effort: "" }))).toBe(true);
+  expect(Exit.isFailure(send({ ...(sendInput as object), effort: 3 }))).toBe(true);
+});

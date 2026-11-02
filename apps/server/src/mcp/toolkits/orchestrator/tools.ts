@@ -73,7 +73,7 @@ const threadMetadataDependencies = [
 
 const OrchestratorCapabilitiesTool = Tool.make("orchestrator_capabilities", {
   description:
-    "List providers, models, options, and runtime modes for `delegate_task`. Short list. `search` finds others. Any catalog model works.",
+    "List providers, models, options, and runtime modes for `delegate_task`. Short list. `search` finds others. Any catalog model works. Each model's `effort` lists the levels `effort` accepts; without it the model has no effort setting.",
   parameters: OrchestratorMcpCapabilitiesInput,
   success: OrchestratorMcpCapabilitiesResult,
   failure: OrchestratorMcpFailure,
@@ -87,7 +87,7 @@ const OrchestratorCapabilitiesTool = Tool.make("orchestrator_capabilities", {
 
 const DelegateTaskTool = Tool.make("delegate_task", {
   description:
-    "Start one child agent with only `task`. No parent history. Separate checkout or PR per child: `isolation:'worktree'`. Keep `taskId` for `task_status` and `task_cancel`.",
+    "Start one child agent with only `task`. No parent history. Separate checkout or PR per child: `isolation:'worktree'`. `target.effort` sets its reasoning level. Keep `taskId` for `task_status` and `task_cancel`.",
   parameters: OrchestratorMcpDelegateTaskInput,
   success: OrchestratorMcpDelegateTaskResult,
   failure: OrchestratorMcpFailure,
@@ -211,7 +211,7 @@ const RequestSecretTool = Tool.make("request_secret", {
 
 const CreateSwarmTool = Tool.make("create_swarm", {
   description:
-    "Needs an agent running inside a T3 thread. Launch a whole swarm of T3-owned child agents in one call: every member becomes a child thread with its own provider instance, model, options, and self-contained task prompt, and the members start in parallel. Use this when the user asks for a swarm, a team, or several agents working together. Design the roster first, then call this once; do not launch members one delegate_task call at a time. Call orchestrator_capabilities before choosing providers and models, and never invent ids or model names. Each member's `task` must carry every fact the member needs: parent conversation history is not copied. Members inherit this thread's runtime mode and checkout unless `isolation: 'worktree'` asks for a prepared separate checkout, which suits a separate branch or PR per member. Titles should name the role. A member that should lead its own sub-team gets that instruction in its own task; it can call create_swarm or delegate_task itself. The result names each childThreadId: report the roster with its roles and models to the user, then end the turn. Members run asynchronously and their completion wakes this thread, so do not wait or poll. A member that fails to launch is listed under `failed` while the rest continue.",
+    "Needs an agent running inside a T3 thread. Launch a whole swarm of T3-owned child agents in one call: every member becomes a child thread with its own provider instance, model, options, and self-contained task prompt, and the members start in parallel. Use this when the user asks for a swarm, a team, or several agents working together. Design the roster first, then call this once; do not launch members one delegate_task call at a time. Call orchestrator_capabilities before choosing providers and models, and never invent ids or model names; a member's `target.effort` sets its reasoning level. Each member's `task` must carry every fact the member needs: parent conversation history is not copied. Members inherit this thread's runtime mode and checkout unless `isolation: 'worktree'` asks for a prepared separate checkout, which suits a separate branch or PR per member. Titles should name the role. A member that should lead its own sub-team gets that instruction in its own task; it can call create_swarm or delegate_task itself. The result names each childThreadId: report the roster with its roles and models to the user, then end the turn. Members run asynchronously and their completion wakes this thread, so do not wait or poll. A member that fails to launch is listed under `failed` while the rest continue.",
   parameters: OrchestratorMcpCreateSwarmInput,
   success: OrchestratorMcpCreateSwarmResult,
   failure: OrchestratorMcpFailure,
@@ -224,7 +224,7 @@ const CreateSwarmTool = Tool.make("create_swarm", {
 
 const CreateThreadsTool = Tool.make("create_threads", {
   description:
-    "Create new top-level threads in this checkout. Not delegation. One thread or its own worktree: `t3_thread_launch`. Project, branch, and worktree inherit.",
+    "Create new top-level threads in this checkout. Not delegation. One thread or its own worktree: `t3_thread_launch`. Project, branch, and worktree inherit. `target.effort` sets a thread's reasoning level.",
   parameters: OrchestratorMcpCreateThreadsInput,
   success: OrchestratorMcpCreateThreadsResult,
   failure: OrchestratorMcpFailure,
@@ -283,7 +283,7 @@ const ThreadUpdateTool = Tool.make("t3_thread_update", {
 
 const ThreadSendTool = Tool.make("t3_thread_send", {
   description:
-    "Send a message to any thread. The target cannot run with broader modes than yours. `mode:'auto'` starts an idle thread, steers a running turn, or queues. `queue`: new turn. `steer`: mid-turn update. `restart`: interrupt and restart. A send to a finished child thread starts a fresh task and returns its `taskId`. In your reply, name it as its `link` verbatim.",
+    "Send a message to any thread. The target cannot run with broader modes than yours. `mode:'auto'` starts an idle thread, steers a running turn, or queues. `queue`: new turn. `steer`: mid-turn update. `restart`: interrupt and restart. `effort` changes the thread's reasoning level for this message and later turns. A send to a finished child thread starts a fresh task and returns its `taskId`. In your reply, name it as its `link` verbatim.",
   parameters: OrchestratorMcpThreadSendInput,
   success: OrchestratorMcpThreadSendResult,
   failure: OrchestratorMcpFailure,

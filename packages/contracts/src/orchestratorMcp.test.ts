@@ -45,6 +45,7 @@ describe("orchestrator MCP contracts", () => {
     });
 
     expect(request.target?.providerInstanceId).toBe("claudeAgent");
+    expect(request.target?.effort).toBeUndefined();
     expect(result.status).toBe("completed");
     expect(result.summary).toBe("Workspace inspected.");
     expect(result.pendingApproval).toBeNull();
@@ -63,6 +64,33 @@ describe("orchestrator MCP contracts", () => {
       decodeDelegateTaskResult({
         ...result,
         pendingApproval: { ...pendingApproval, kind: "user_input" },
+      }),
+    ).toThrow();
+  });
+
+  it("takes an effort either as a named level or inside the raw options", () => {
+    const named = decodeDelegateTaskInput({
+      task: "Think hard.",
+      target: { model: "claude-opus-5-5", effort: "max" },
+    });
+    expect(named.target?.effort).toBe("max");
+    expect(named.target?.options).toBeUndefined();
+
+    const withOptions = decodeDelegateTaskInput({
+      task: "Think hard.",
+      target: {
+        model: "gpt-5.6-sol",
+        effort: "xhigh",
+        options: { fastMode: true },
+      },
+    });
+    expect(withOptions.target?.effort).toBe("xhigh");
+    expect(withOptions.target?.options).toEqual([{ id: "fastMode", value: true }]);
+
+    expect(() =>
+      decodeDelegateTaskInput({
+        task: "Think hard.",
+        target: { model: "claude-opus-5-5", effort: " " },
       }),
     ).toThrow();
   });

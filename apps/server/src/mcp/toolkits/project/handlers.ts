@@ -23,6 +23,7 @@ import * as DateTime from "effect/DateTime";
 import { resolveNewThreadModelSelection } from "@t3tools/shared/usageLimits";
 import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import { resolveRuntimeMode } from "../../delegatedTaskModes.ts";
+import { mergeOptionSelections, resolveEffortSelection } from "../../modelEffort.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import * as McpToolAccess from "../../McpToolAccess.ts";
 import { newCommandId, readCaller, resolveProjectId, unavailable } from "../../threadAccess.ts";
@@ -202,6 +203,25 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
             message:
               "Pass modelSelection: the project has no default model. orchestrator_capabilities lists providers and models.",
           });
+        const effort = yield* resolveEffortSelection({
+          effort: input.effort,
+          model: modelSelection.model,
+          instanceId: modelSelection.instanceId,
+          descriptors: (yield* ProviderRegistry.ProviderRegistry.pipe(
+            Effect.flatMap((registry) => registry.getProviders),
+          ))
+            .find((provider) => provider.instanceId === modelSelection.instanceId)
+            ?.models.find((model) => model.slug === modelSelection.model)?.capabilities
+            ?.optionDescriptors,
+          ...(modelSelection.options === undefined ? {} : { selections: modelSelection.options }),
+        });
+        const launchedSelection =
+          effort === undefined
+            ? modelSelection
+            : {
+                ...modelSelection,
+                options: mergeOptionSelections(modelSelection.options, [effort]),
+              };
         const startedRuntimeMode =
           projectDefaults !== undefined && input.runtimeMode === undefined
             ? yield* resolveRuntimeMode(runtimeMode, projectDefaults.defaultRuntimeMode).pipe(
@@ -213,7 +233,7 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
           threadId,
           projectId,
           title: input.title,
-          modelSelection,
+          modelSelection: launchedSelection,
           runtimeMode: startedRuntimeMode,
           interactionMode,
           workspaceStrategy: input.workspaceStrategy ?? { type: "root" },

@@ -80,6 +80,7 @@ const handlers = {
               status: value.status,
               providerInstanceId: value.providerInstanceId,
               model: value.model,
+              ...(value.options === undefined ? {} : { options: value.options }),
             },
           ];
         },

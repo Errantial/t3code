@@ -20,6 +20,7 @@ import {
   ThreadId,
   type OrchestrationV2ServerCommand,
   type OrchestrationV2ThreadProjection,
+  type ProviderOptionDescriptor,
   type ServerProvider,
 } from "@t3tools/contracts";
 import { checkpointWorkspace } from "@t3tools/provider-testing/replayWorkspace";
@@ -1044,6 +1045,7 @@ describe("OrchestratorMcpService provider resolution", () => {
     readonly driver: ProviderDriverKind;
     readonly model?: string;
     readonly enabled?: boolean;
+    readonly optionDescriptors?: ReadonlyArray<ProviderOptionDescriptor>;
   }): ServerProvider => ({
     instanceId: input.instanceId,
     driver: input.driver,
@@ -1057,7 +1059,17 @@ describe("OrchestratorMcpService provider resolution", () => {
     models:
       input.model === undefined
         ? []
-        : [{ slug: input.model, name: input.model, isCustom: false, capabilities: null }],
+        : [
+            {
+              slug: input.model,
+              name: input.model,
+              isCustom: false,
+              capabilities:
+                input.optionDescriptors === undefined
+                  ? null
+                  : { optionDescriptors: input.optionDescriptors },
+            },
+          ],
     slashCommands: [],
     skills: [],
   });
@@ -1456,6 +1468,8 @@ describe("OrchestratorMcpService provider resolution", () => {
               { id: "fastMode", values: [false, true] },
               { id: "agent", values: ["build"], default: "build" },
             ],
+            // The effort option again, so `effort` needs no provider option id.
+            effort: { optionId: "effort", values: ["low", "high"], default: "high" },
           },
           { id: "gpt-4" },
           { id: "gpt-3" },
@@ -1625,6 +1639,127 @@ describe("OrchestratorMcpService provider resolution", () => {
           modelSelection: { instanceId: string; model: string };
         };
         assert.equal(request.modelSelection.instanceId, altInstanceId);
+      }).pipe(Effect.provide(layerOrchestratorService.pipe(Layer.provide(layerDependencies))));
+    }),
+  );
+
+  it.effect("writes a target effort into the delegated child's model selection", () =>
+    Effect.gen(function* () {
+      const dispatched = yield* Ref.make<ReadonlyArray<unknown>>([]);
+      const task = {
+        id: taskId,
+        threadId: parentThreadId,
+        runId: parentRunId,
+        parentNodeId,
+        origin: "app_owned",
+        createdBy: "agent",
+        driver: ProviderDriverKind.make("codex"),
+        providerInstanceId: codexInstanceId,
+        providerThreadId: null,
+        childThreadId,
+        nativeTaskRef: null,
+        prompt: "Summarize the diff.",
+        title: null,
+        model: "gpt-5.4",
+        status: "running",
+        result: null,
+        startedAt: null,
+        completedAt: null,
+      };
+      let delegated = false;
+      const layerDependencies = Layer.mergeAll(
+        NodeServices.layer,
+        Layer.mock(ThreadManagementService.ThreadManagementService)({
+          hasReceipt: () => Effect.succeed(false),
+          getThreadRecords: (threadId) =>
+            Effect.succeed(
+              threadId === parentThreadId
+                ? parentProjection(delegated ? [task] : [])
+                : childProjection,
+            ),
+          isProviderInstanceEnabledForProject: () => Effect.succeed(true),
+          assertProviderInstanceEnabled: () => Effect.void,
+          dispatch: (command) =>
+            Ref.update(dispatched, (commands) => [...commands, command]).pipe(
+              Effect.andThen(
+                Effect.sync(() => {
+                  delegated = true;
+                }),
+              ),
+              Effect.as({
+                sequence: 1,
+                storedEvents: [
+                  {
+                    sequence: 1,
+                    commandId: null,
+                    event: { type: "subagent.updated", payload: task },
+                  },
+                ],
+              } as never),
+            ),
+        }),
+        providerRegistryLayer([
+          providerSnapshot({
+            instanceId: codexInstanceId,
+            driver: ProviderDriverKind.make("codex"),
+            model: "gpt-5.4",
+            optionDescriptors: [
+              {
+                id: "reasoningEffort",
+                label: "Reasoning",
+                type: "select",
+                options: [
+                  { id: "minimal", label: "Minimal" },
+                  { id: "low", label: "Low" },
+                  { id: "medium", label: "Medium", isDefault: true },
+                  { id: "high", label: "High" },
+                  { id: "xhigh", label: "Extra High" },
+                ],
+              },
+            ],
+          }),
+        ]),
+        adapterRegistryLayer([codexInstanceId]),
+        Layer.mock(ProjectService.ProjectService)({}),
+        Layer.mock(SecretRequests.SecretRequests)({}),
+        Layer.mock(RemoteDelegation.RemoteDelegation)({}),
+        Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
+        ServerSettings.layerTest(),
+      );
+
+      yield* Effect.gen(function* () {
+        const service = yield* OrchestratorMcpService.OrchestratorMcpService;
+        const result = yield* service.delegateTask(scope, {
+          task: "Summarize the diff.",
+          target: { effort: "xhigh" },
+          mode: "async",
+          clientRequestId: "delegate-effort-1",
+        });
+        assert.equal(result.status, "running");
+        const [request] = (yield* Ref.get(dispatched)) as ReadonlyArray<{
+          modelSelection: {
+            readonly instanceId: string;
+            readonly model: string;
+            readonly options?: ReadonlyArray<{ readonly id: string; readonly value: unknown }>;
+          };
+        }>;
+        assert.equal(request?.modelSelection.instanceId, codexInstanceId);
+        assert.deepEqual(request?.modelSelection.options, [
+          { id: "reasoningEffort", value: "xhigh" },
+        ]);
+
+        // A level this model does not offer names the ones it does.
+        const refused = yield* service
+          .delegateTask(scope, {
+            task: "Summarize the diff.",
+            target: { effort: "max" },
+            mode: "async",
+            clientRequestId: "delegate-effort-2",
+          })
+          .pipe(Effect.flip);
+        assert.equal(refused.code, "invalid_request");
+        assert.include(refused.message, "Allowed: minimal, low, medium, high, xhigh.");
+        assert.equal((yield* Ref.get(dispatched)).length, 1);
       }).pipe(Effect.provide(layerOrchestratorService.pipe(Layer.provide(layerDependencies))));
     }),
   );

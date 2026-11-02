@@ -142,6 +142,45 @@ it.effect("launches each swarm member as an async delegated child", () =>
   }),
 );
 
+it.effect("passes each member's effort through to its delegated task", () =>
+  Effect.gen(function* () {
+    const calls = yield* Ref.make<ReadonlyArray<OrchestratorMcpDelegateTaskInput>>([]);
+    const { toolkit, layerDependencies } = yield* makeToolkit((_scope, input) =>
+      Ref.updateAndGet(calls, (current) => [...current, input]).pipe(
+        Effect.map((current) => delegatedResult(input, current.length - 1)),
+      ),
+    );
+
+    const batches = yield* toolkit
+      .handle("create_swarm", {
+        title: "Release hardening",
+        members: [
+          {
+            key: "research",
+            title: "Researcher: prior art",
+            task: "Read the release notes and list the risky areas.",
+            target: { providerInstanceId: codexInstanceId, model: "gpt-5.4", effort: "xhigh" },
+          },
+          {
+            key: "reviewer",
+            title: "Reviewer: failure modes",
+            task: "Stress-test the plan and name the failure modes.",
+          },
+        ],
+      })
+      .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(layerDependencies));
+
+    expect(batches.at(-1)?.result).toMatchObject({ failed: [] });
+    const sent = yield* Ref.get(calls);
+    expect(sent.map((input) => input.target?.effort)).toEqual(["xhigh", undefined]);
+    // The provider instance and model the member named travel with it.
+    expect(sent[0]?.target).toMatchObject({
+      providerInstanceId: codexInstanceId,
+      model: "gpt-5.4",
+    });
+  }),
+);
+
 it.effect("keeps the rest of the swarm when one member fails to launch", () =>
   Effect.gen(function* () {
     let index = 0;
