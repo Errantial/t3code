@@ -20,21 +20,29 @@ const client: McpInvocationContext.McpInvocationScope = {
 
 const readBare = (existing: ReadonlyArray<ThreadId>) =>
   readThread(bareId).pipe(
-    Effect.flip,
     Effect.provideService(McpInvocationContext.McpInvocationContext, client),
     Effect.provide(
       Layer.mock(ThreadManagement.ThreadManagementService)({
         getThreadShell: (threadId) =>
           Effect.succeed(existing.includes(threadId) ? liveThreadShell(threadId) : null),
+        getProjectThreadRecords: () => Effect.succeed({} as never),
       }),
     ),
   );
 
-it.effect("points a bare uuid at the mcp: thread it belongs to", () =>
+it.effect("resolves a bare uuid to the mcp: thread it belongs to", () =>
   Effect.gen(function* () {
-    const error = yield* readBare([ThreadId.make(`mcp:${bareId}`)]);
+    const result = yield* readBare([ThreadId.make(`mcp:${bareId}`)]);
+
+    expect(result.projection).toBeDefined();
+    expect(result.caller).toBeUndefined();
+  }),
+);
+
+it.effect("returns thread_not_found for an id that matches nothing", () =>
+  Effect.gen(function* () {
+    const error = yield* readBare([]).pipe(Effect.flip);
 
     expect(error.code).toBe("thread_not_found");
-    expect(error.message).toBe(`The thread was not found. Did you mean \`mcp:${bareId}\`?`);
   }),
 );

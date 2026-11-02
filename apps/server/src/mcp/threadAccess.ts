@@ -16,6 +16,7 @@ import type { OrchestratorV2Error } from "../orchestration-v2/Orchestrator.ts";
 import * as ThreadManagement from "../orchestration-v2/ThreadManagementService.ts";
 import { resolveInteractionMode, resolveRuntimeMode } from "./delegatedTaskModes.ts";
 import * as McpInvocationContext from "./McpInvocationContext.ts";
+import { resolveThreadShell, type ThreadRefMode } from "./threadRefResolver.ts";
 
 /**
  * Threads an agent starts over MCP are `mcp:<uuid>`, and agents often paste the
@@ -180,13 +181,11 @@ const resolveThreadId = (context: Caller, threadId: ThreadId | undefined) =>
 
 export const readThread = Effect.fn("mcp.readThread")(function* <
   K extends ProjectionRecordField = never,
->(threadId?: ThreadId, fields: ReadonlyArray<K> = []) {
+>(threadId?: ThreadId, fields: ReadonlyArray<K> = [], mode: ThreadRefMode = "read") {
   const context = yield* readCaller();
-  const targetId = yield* resolveThreadId(context, threadId);
-  const shell = yield* context.threads.getThreadShell(targetId).pipe(Effect.mapError(unavailable));
-  if (shell === null || shell.deletedAt !== null) {
-    return yield* threadNotFound(context.threads, targetId, "The thread was not found.");
-  }
+  const requestedId = yield* resolveThreadId(context, threadId);
+  const { shell } = yield* resolveThreadShell(context.threads, requestedId, mode);
+  const targetId = shell.id;
   const projection = yield* context.threads
     .getProjectThreadRecords({ projectId: shell.projectId, threadId: targetId }, fields, {
       turnItemTypes: ["user_input_request"],
