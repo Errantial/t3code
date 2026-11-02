@@ -145,6 +145,48 @@ describe("native ChatGPT browser release source", () => {
     }
   });
 
+  it("finds the Windows installer payload when a service runs the packaged executable", async () => {
+    // A background service runs `T3 Code (Beta).exe` in node mode without the desktop's
+    // resources-directory variable; the payload sits in `resources/chatgpt-browser`.
+    const fixture = await fixtureRoot();
+    const install = NodePath.join(fixture.root, "install");
+    const packaged = NodePath.join(install, "resources", "chatgpt-browser");
+    const packagedProvider = NodePath.join(packaged, "provider");
+    const packagedChromium = NodePath.join(packaged, "chromium", "chromium-1223");
+    try {
+      await NodeFS.promises.cp(fixture.provider, packagedProvider, { recursive: true });
+      await NodeFS.promises.cp(fixture.chromium, packagedChromium, { recursive: true });
+      const release = await resolveNativeChatGptBrowserReleaseSource({
+        platform: "win32",
+        architecture: "x64",
+        executablePath: NodePath.join(install, "T3 Code (Beta).exe"),
+        environment: {},
+      });
+      expect(release.browserSourceDirectory).toBe(packagedChromium);
+      expect(release.providerSourceDirectory).toBe(packagedProvider);
+      expect(release.browserExecutableRelativePath).toBe("chrome-win64/chrome.exe");
+    } finally {
+      await NodeFS.promises.rm(fixture.root, { recursive: true, force: true });
+    }
+  });
+
+  it("still reports an unavailable runtime when no packaged payload is beside the executable", async () => {
+    const fixture = await fixtureRoot();
+    try {
+      await expect(
+        resolveNativeChatGptBrowserReleaseSource({
+          platform: "win32",
+          architecture: "x64",
+          executablePath: NodePath.join(fixture.root, "missing", "T3 Code (Beta).exe"),
+          providerAssetsDirectory: fixture.provider,
+          environment: { PLAYWRIGHT_BROWSERS_PATH: NodePath.join(fixture.root, "no-playwright") },
+        }),
+      ).rejects.toThrow("Managed Chromium source is unavailable");
+    } finally {
+      await NodeFS.promises.rm(fixture.root, { recursive: true, force: true });
+    }
+  });
+
   it("rejects headless-shell even when explicitly configured", async () => {
     const fixture = await fixtureRoot();
     try {

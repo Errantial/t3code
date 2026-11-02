@@ -26,6 +26,8 @@ export interface NativeChatGptBrowserReleaseSourceOptions {
   readonly chromiumDirectory?: string;
   readonly chromiumRevision?: string;
   readonly providerAssetsDirectory?: string;
+  /** Defaults to `process.execPath`; used to find the payload shipped beside a packaged app. */
+  readonly executablePath?: string;
 }
 
 interface ExtensionManifest {
@@ -144,6 +146,29 @@ async function resolveChromium(
   return { directory, revision, executable };
 }
 
+async function isPackagedResourcesRoot(root: string): Promise<boolean> {
+  return (
+    (await directoryExists(NodePath.join(root, "provider"))) &&
+    (await directoryExists(NodePath.join(root, "chromium", CHATGPT_BROWSER_CHROMIUM_VERSION)))
+  );
+}
+
+/**
+ * The desktop app passes the payload path through RESOURCES_ROOT_ENV. A server started some
+ * other way, such as a background service running the packaged executable in node mode, has no
+ * such variable, so look beside the executable and in its Electron `resources` directory.
+ */
+async function findPackagedResourcesRoot(executablePath: string): Promise<string | null> {
+  const executableDirectory = NodePath.dirname(executablePath);
+  for (const root of [
+    NodePath.join(executableDirectory, "chatgpt-browser"),
+    NodePath.join(executableDirectory, "resources", "chatgpt-browser"),
+  ]) {
+    if (await isPackagedResourcesRoot(root)) return root;
+  }
+  return null;
+}
+
 export async function resolveNativeChatGptBrowserReleaseSource(
   options: NativeChatGptBrowserReleaseSourceOptions = {},
 ): Promise<ChatGptBrowserManagedReleaseSource> {
@@ -157,15 +182,9 @@ export async function resolveNativeChatGptBrowserReleaseSource(
     throw new Error(`Unsupported managed ChatGPT browser host: ${platform}/${architecture}`);
 
   const configuredResourcesRoot = environment[RESOURCES_ROOT_ENV];
-  const siblingResourcesRoot = NodePath.join(NodePath.dirname(process.execPath), "chatgpt-browser");
   const packagedResourcesRoot = configuredResourcesRoot
     ? NodePath.resolve(configuredResourcesRoot)
-    : (await directoryExists(NodePath.join(siblingResourcesRoot, "provider"))) &&
-        (await directoryExists(
-          NodePath.join(siblingResourcesRoot, "chromium", CHATGPT_BROWSER_CHROMIUM_VERSION),
-        ))
-      ? siblingResourcesRoot
-      : null;
+    : await findPackagedResourcesRoot(options.executablePath ?? process.execPath);
   const providerAssetsDirectory = NodePath.resolve(
     options.providerAssetsDirectory ??
       (packagedResourcesRoot
