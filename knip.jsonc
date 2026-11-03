@@ -32,6 +32,7 @@
         "mobile-native-client.ts",
         "setup-worktree.ts",
         "sign-macos.ts",
+        "thread-projection-check.mjs",
         "smoke-desktop-app.ts",
         "verify-windows-desktop-artifact.ts",
       ],
