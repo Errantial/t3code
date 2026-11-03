@@ -8,10 +8,11 @@ import * as Effect from "effect/Effect";
 
 /**
  * The provider option that carries an effort or reasoning level: `effort` on
- * Claude, `reasoningEffort` on Codex. Agents name a level once, as `effort`,
- * and the server writes it to the option the model advertises.
+ * Claude, `reasoningEffort` on Codex, `thinking` on Pi/Grok. Agents name a level
+ * once, as `effort`, and the server writes it to the option the model
+ * advertises.
  */
-const EFFORT_OPTION_IDS = ["effort", "reasoningEffort"] as const;
+const EFFORT_OPTION_IDS = ["effort", "reasoningEffort", "thinking"] as const;
 
 export function effortOptionDescriptor(
   descriptors: ReadonlyArray<ProviderOptionDescriptor> | undefined,

@@ -14,6 +14,7 @@ import {
 
 const claudeInstanceId = ProviderInstanceId.make("claude");
 const codexInstanceId = ProviderInstanceId.make("codex");
+const piInstanceId = ProviderInstanceId.make("pi");
 
 /** Claude names the option `effort` and stops at `max`. */
 const claudeDescriptors: ReadonlyArray<ProviderOptionDescriptor> = [
@@ -48,6 +49,22 @@ const codexDescriptors: ReadonlyArray<ProviderOptionDescriptor> = [
   },
 ];
 
+/** Pi/Grok name the option `thinking`; Cursor's `thinking` is a boolean toggle. */
+const piDescriptors: ReadonlyArray<ProviderOptionDescriptor> = [
+  {
+    id: "thinking",
+    label: "Thinking",
+    type: "select",
+    options: [
+      { id: "low", label: "Low" },
+      { id: "high", label: "High" },
+    ],
+  },
+];
+const cursorThinkingDescriptors: ReadonlyArray<ProviderOptionDescriptor> = [
+  { id: "thinking", label: "Thinking", type: "boolean" },
+];
+
 const resolve = (input: {
   readonly effort: string | undefined;
   readonly model?: string;
@@ -80,6 +97,13 @@ describe("modelEffort", () => {
           descriptors: codexDescriptors,
         }),
       ).toEqual({ id: "reasoningEffort", value: "xhigh" });
+      expect(
+        yield* resolve({
+          effort: "high",
+          instanceId: piInstanceId,
+          descriptors: piDescriptors,
+        }),
+      ).toEqual({ id: "thinking", value: "high" });
     }),
   );
 
@@ -135,9 +159,22 @@ describe("modelEffort", () => {
     }),
   );
 
+  it.effect("refuses a boolean thinking toggle, which is not an effort list", () =>
+    Effect.gen(function* () {
+      const failure = yield* resolve({
+        effort: "high",
+        instanceId: ProviderInstanceId.make("cursor"),
+        descriptors: cursorThinkingDescriptors,
+      }).pipe(Effect.flip);
+      expect(failure.code).toBe("invalid_request");
+      expect(failure.message).toContain("is not a list of effort levels");
+    }),
+  );
+
   it("finds the effort option under either provider id", () => {
     expect(effortOptionDescriptor(claudeDescriptors)?.id).toBe("effort");
     expect(effortOptionDescriptor(codexDescriptors)?.id).toBe("reasoningEffort");
+    expect(effortOptionDescriptor(piDescriptors)?.id).toBe("thinking");
     expect(effortOptionDescriptor([])).toBeUndefined();
     expect(effortOptionDescriptor(undefined)).toBeUndefined();
   });
