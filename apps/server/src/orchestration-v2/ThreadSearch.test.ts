@@ -251,6 +251,7 @@ it.layer(layerTest)("ThreadSearch", (it) => {
       const project = ProjectId.make("project:search-flags");
       const active = ThreadId.make("thread:flags-active");
       const archived = ThreadId.make("thread:flags-archived");
+      const subagent = ThreadId.make("thread:flags-subagent");
       yield* createProject(project);
       yield* Effect.forEach(
         [
@@ -258,6 +259,8 @@ it.layer(layerTest)("ThreadSearch", (it) => {
           message(active, "flags-active", "user", "needle active"),
           thread(archived, project, { archivedAt: at(1) }),
           message(archived, "flags-archived", "user", "needle archived"),
+          thread(subagent, project, { subagentOf: active }),
+          message(subagent, "flags-subagent", "user", "needle subagent"),
         ],
         projections.apply,
         { discard: true },
@@ -279,6 +282,16 @@ it.layer(layerTest)("ThreadSearch", (it) => {
       assert.deepEqual(
         withArchived.matches.map((match) => match.threadId).toSorted(),
         [active, archived].toSorted(),
+      );
+      const withAll = yield* search.searchThreads({
+        query: "needle",
+        projectId: project,
+        includeArchived: true,
+        includeSubagents: true,
+      });
+      assert.deepEqual(
+        withAll.matches.map((match) => match.threadId).toSorted(),
+        [active, archived, subagent].toSorted(),
       );
     }),
   );

@@ -457,7 +457,10 @@ export const make = Effect.gen(function* () {
         const index = yield* sql`
           SELECT 1 FROM sqlite_master WHERE name = 'orchestration_v2_message_search'
         `;
-        const messageSearch = buildMessageSearch(input.query, index.length > 0);
+        const messageSearch = buildMessageSearch(
+          input.query,
+          index.length > 0 && !input.includeSubagents,
+        );
         return messageSearch === null
           ? []
           : yield* searchRows({
@@ -477,7 +480,6 @@ export const make = Effect.gen(function* () {
     const hitCount = (threadId: ThreadId) => hitCounts.get(threadId) ?? 1;
     const matchMessage = messageMatcher(input.query);
     for (const row of rows) {
-      if (!input.includeSubagents && row.relationshipToParent === "subagent") continue;
       const text = row.text.replace(MARKDOWN_LINK, "$1");
       const match = matchMessage(text);
       if (match === null) continue;
