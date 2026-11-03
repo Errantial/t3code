@@ -195,8 +195,11 @@ const ThreadSearchTool = Tool.make("t3_thread_search", {
     "Search active threads by title, branch, PR, project, then message text. Skips subagent threads. `projectId`: one project, else yours, else all outside a thread. Not exhaustive.",
   parameters: Schema.Struct({
     environmentId: OrchestratorMcpEnvironmentTarget,
+    environments: Schema.optional(Schema.Literals(["local", "all"])),
     ...OrchestrationSearchThreadsInput.fields,
     projectId: Schema.optional(ProjectId),
+    includeSubagents: Schema.optional(Schema.Boolean),
+    includeArchived: Schema.optional(Schema.Boolean),
   }),
   success: Schema.Struct({
     matches: Schema.Array(
@@ -210,6 +213,16 @@ const ThreadSearchTool = Tool.make("t3_thread_search", {
         snippet: Schema.optional(OrchestrationThreadSearchMatch.fields.snippet),
         messageCreatedAt: Schema.optional(OrchestrationThreadSearchMatch.fields.messageCreatedAt),
       }),
+    ),
+    environments: Schema.optional(
+      Schema.Array(
+        Schema.Struct({
+          environmentId: EnvironmentId,
+          label: Schema.String,
+          status: Schema.Literals(["ok", "unreachable", "capability_missing", "access_denied"]),
+          capabilities: Schema.Literals(["v1", "legacy"]),
+        }),
+      ),
     ),
   }),
   dependencies: [...commandTool.dependencies, ThreadSearch.ThreadSearch],

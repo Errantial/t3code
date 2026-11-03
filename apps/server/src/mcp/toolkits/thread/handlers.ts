@@ -8,6 +8,10 @@ import {
   type OrchestrationV2Command,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
+import type * as Tool from "effect/ai/Tool";
+import type { OrchestratorMcpEnvironmentLink } from "@t3tools/contracts";
+import * as PeerForwarding from "../../../peer/PeerForwarding.ts";
 import { modelSelectionCommandType } from "@t3tools/shared/model";
 
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
@@ -91,6 +95,12 @@ const required = <A>(value: A | undefined, name: string) =>
         }),
       )
     : Effect.succeed(value);
+
+type PeerSearchReport = {
+  readonly link: OrchestratorMcpEnvironmentLink;
+  readonly status: "ok" | "unreachable" | "access_denied";
+  readonly matches: Tool.Success<typeof ThreadToolkit.tools.t3_thread_search>["matches"];
+};
 const writesThread = <P extends { readonly threadId?: ThreadId | undefined }, A, E, R>(
   handle: (params: P) => Effect.Effect<A, E, R>,
 ) => McpToolAccess.writesThreads((params: P) => [params.threadId], handle);
@@ -128,15 +138,65 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
       const { caller } = yield* readCaller();
       const scope = yield* McpInvocationContext.McpInvocationContext;
       const threadSearch = yield* ThreadSearch.ThreadSearch;
+      const { environmentId: _environmentId, environments, ...searchInput } = input;
+      void _environmentId;
       const { matches } = yield* threadSearch
-        .searchThreads({ ...input, projectId: input.projectId ?? caller?.projectId })
+        .searchThreads({ ...searchInput, projectId: input.projectId ?? caller?.projectId })
         .pipe(Effect.mapError(unavailable));
+      const local = matches.map((match) => ({
+        ...match,
+        environmentId: scope.environmentId,
+        link: McpInvocationContext.threadLinkFor(scope, match.threadId),
+      }));
+      if (environments !== "all") return { matches: local };
+
+      const forwarding = yield* Effect.serviceOption(PeerForwarding.PeerForwarding);
+      if (Option.isNone(forwarding))
+        return yield* new OrchestratorMcpFailure({
+          code: "orchestration_error",
+          message: "This environment cannot reach linked environments.",
+        });
+      const { links } = yield* forwarding.value.links(scope);
+      const reachable = links.filter((link) => link.status === "reachable");
+      const reports = yield* Effect.forEach(
+        reachable,
+        (link): Effect.Effect<PeerSearchReport> =>
+          forwarding.value
+            .call(scope, ThreadToolkit.tools.t3_thread_search, link.environmentId, {
+              ...searchInput,
+              projectId: undefined,
+            })
+            .pipe(
+              Effect.map((result) => ({ link, status: "ok" as const, matches: result.matches })),
+              Effect.catch((error) =>
+                Effect.succeed({
+                  link,
+                  status:
+                    error.code === "capability_denied"
+                      ? ("access_denied" as const)
+                      : ("unreachable" as const),
+                  matches: [],
+                }),
+              ),
+            ),
+        { concurrency: 4 },
+      );
       return {
-        matches: matches.map((match) => ({
-          ...match,
-          environmentId: scope.environmentId,
-          link: McpInvocationContext.threadLinkFor(scope, match.threadId),
-        })),
+        matches: [...local, ...reports.flatMap((report) => report.matches)],
+        environments: [
+          {
+            environmentId: scope.environmentId,
+            label: "This environment",
+            status: "ok" as const,
+            capabilities: "v1" as const,
+          },
+          ...reports.map((report) => ({
+            environmentId: report.link.environmentId,
+            label: report.link.label,
+            status: report.status,
+            capabilities: "v1" as const,
+          })),
+        ],
       };
     }),
   ),

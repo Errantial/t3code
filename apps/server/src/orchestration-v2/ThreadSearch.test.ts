@@ -148,7 +148,7 @@ it.layer(layerTest)("ThreadSearch", (it) => {
       for (const match of ['"needle"', null]) {
         const plan = yield* sql<{
           readonly detail: string;
-        }>`EXPLAIN QUERY PLAN ${ThreadSearch.messageHitsQuery(sql, { match, substrings: "[]", projectId: null, excludedThreadIds: "[]" })}`;
+        }>`EXPLAIN QUERY PLAN ${ThreadSearch.messageHitsQuery(sql, { match, substrings: "[]", projectId: null, excludedThreadIds: "[]", includeSubagents: false, includeArchived: false })}`;
         assert.isFalse(
           plan.some((row) => row.detail.includes("TEMP B-TREE")),
           plan.map((row) => row.detail).join("\n"),
@@ -241,6 +241,45 @@ it.layer(layerTest)("ThreadSearch", (it) => {
       yield* projections.apply(message(threadId, "sync", "assistant", "edited reply"));
       assert.deepEqual(yield* threadIds("finished"), []);
       assert.deepEqual(yield* threadIds("edited"), [threadId]);
+    }),
+  );
+
+  it.effect("includes archived threads when asked", () =>
+    Effect.gen(function* () {
+      const projections = yield* ProjectionStore.ProjectionStoreV2;
+      const search = yield* ThreadSearch.ThreadSearch;
+      const project = ProjectId.make("project:search-flags");
+      const active = ThreadId.make("thread:flags-active");
+      const archived = ThreadId.make("thread:flags-archived");
+      yield* createProject(project);
+      yield* Effect.forEach(
+        [
+          thread(active, project),
+          message(active, "flags-active", "user", "needle active"),
+          thread(archived, project, { archivedAt: at(1) }),
+          message(archived, "flags-archived", "user", "needle archived"),
+        ],
+        projections.apply,
+        { discard: true },
+      );
+
+      const defaults = yield* search.searchThreads({
+        query: "needle",
+        projectId: project,
+      });
+      assert.deepEqual(
+        defaults.matches.map((match) => match.threadId),
+        [active],
+      );
+      const withArchived = yield* search.searchThreads({
+        query: "needle",
+        projectId: project,
+        includeArchived: true,
+      });
+      assert.deepEqual(
+        withArchived.matches.map((match) => match.threadId).toSorted(),
+        [active, archived].toSorted(),
+      );
     }),
   );
 

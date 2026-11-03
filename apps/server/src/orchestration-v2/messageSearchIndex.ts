@@ -6,7 +6,11 @@ import type * as SqlClient from "effect/sql/SqlClient";
  * their finished answer on every streamed chunk.
  * Migration triggers, backfill, rebuild and scans share this predicate; `row` may be `new`.
  */
-export const indexedMessageCondition = (sql: SqlClient.SqlClient, row = "messages") =>
+export const indexedMessageCondition = (
+  sql: SqlClient.SqlClient,
+  row = "messages",
+  includeSubagents = false,
+) =>
   sql.literal(`
   ${row}.streaming = 0
   AND (
@@ -16,11 +20,15 @@ export const indexedMessageCondition = (sql: SqlClient.SqlClient, row = "message
       AND COALESCE(json_extract(${row}.payload_json, '$.createdBy'), 'user') = 'user'
     )
   )
-  AND NOT EXISTS (
+  ${
+    includeSubagents
+      ? ""
+      : `AND NOT EXISTS (
     SELECT 1 FROM orchestration_v2_projection_threads AS subagent_threads
     WHERE subagent_threads.thread_id = ${row}.thread_id
       AND json_extract(subagent_threads.payload_json, '$.lineage.relationshipToParent') = 'subagent'
-  )
+  )`
+  }
 `);
 
 /**
