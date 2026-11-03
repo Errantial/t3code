@@ -171,6 +171,25 @@ describe("modelEffort", () => {
     }),
   );
 
+  it.effect("refuses an unsupported provider option such as OpenCode variant", () =>
+    Effect.gen(function* () {
+      const failure = yield* resolve({
+        effort: "high",
+        instanceId: ProviderInstanceId.make("opencode"),
+        descriptors: [
+          {
+            id: "variant",
+            label: "Variant",
+            type: "select",
+            options: [{ id: "high", label: "High" }],
+          },
+        ],
+      }).pipe(Effect.flip);
+      expect(failure.code).toBe("invalid_request");
+      expect(failure.message).toContain("has no effort setting");
+    }),
+  );
+
   it("finds the effort option under either provider id", () => {
     expect(effortOptionDescriptor(claudeDescriptors)?.id).toBe("effort");
     expect(effortOptionDescriptor(codexDescriptors)?.id).toBe("reasoningEffort");
