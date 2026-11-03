@@ -165,11 +165,8 @@ export const messageHitsQuery = (
     WITH eligible AS MATERIALIZED (
       SELECT threads.thread_id, threads.project_id
       FROM orchestration_v2_projection_threads AS threads
-      INNER JOIN projection_projects AS projects
-        ON projects.project_id = threads.project_id
       WHERE threads.deleted_at IS NULL
         AND threads.archived_at IS NULL
-        AND projects.deleted_at IS NULL
         AND (${projectId} IS NULL OR threads.project_id = ${projectId})
         AND threads.thread_id NOT IN (SELECT value FROM json_each(${excludedThreadIds}))
         AND json_extract(threads.payload_json, '$.lineage.relationshipToParent')
@@ -321,14 +318,13 @@ export const make = Effect.gen(function* () {
     execute: ({ projectId }) => sql`
       SELECT
         threads.payload_json AS thread,
-        projects.title AS "projectTitle",
+        COALESCE(projects.title, '') AS "projectTitle",
         ${latestUserMessageAt(sql)} AS "latestUserMessageAt"
       FROM orchestration_v2_projection_threads AS threads
-      INNER JOIN projection_projects AS projects
+      LEFT JOIN projection_projects AS projects
         ON projects.project_id = threads.project_id
       WHERE threads.deleted_at IS NULL
         AND threads.archived_at IS NULL
-        AND projects.deleted_at IS NULL
         AND json_extract(threads.payload_json, '$.lineage.relationshipToParent')
           IS NOT 'subagent'
         AND (${projectId} IS NULL OR threads.project_id = ${projectId})
@@ -351,14 +347,13 @@ export const make = Effect.gen(function* () {
         json_extract(threads.payload_json, '$.branchPullRequest') AS "branchPullRequest",
         json_extract(threads.payload_json, '$.opens') AS opens,
         json_extract(threads.payload_json, '$.createdAt') AS "createdAt",
-        projects.title AS "projectTitle",
+        COALESCE(projects.title, '') AS "projectTitle",
         ${latestUserMessageAt(sql)} AS "latestUserMessageAt"
       FROM orchestration_v2_projection_threads AS threads
-      INNER JOIN projection_projects AS projects
+      LEFT JOIN projection_projects AS projects
         ON projects.project_id = threads.project_id
       WHERE threads.deleted_at IS NULL
         AND json_extract(threads.payload_json, '$.archivedAt') IS NULL
-        AND projects.deleted_at IS NULL
         AND json_extract(threads.payload_json, '$.lineage.relationshipToParent')
           IS NOT 'subagent'
         AND json_extract(threads.payload_json, '$.settledOverride') = 'settled'

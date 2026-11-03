@@ -16,7 +16,7 @@ import * as Layer from "effect/Layer";
 
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
 import type { McpInvocationScope } from "./McpInvocationContext.ts";
-import { threadNotFound } from "./threadAccess.ts";
+import { resolveThreadShell } from "./threadRefResolver.ts";
 
 export class ThreadMetadataMcpService extends Context.Service<
   ThreadMetadataMcpService,
@@ -131,26 +131,15 @@ const make = Effect.gen(function* () {
         "Pass threadId: this MCP client is not running inside a T3 thread.",
       );
     }
-    const shell = yield* threadManagement
-      .getThreadShell(threadId)
-      .pipe(
-        Effect.mapError((error) =>
-          failure(
-            "orchestration_error",
-            `Unable to locate thread ${threadId}: ${errorMessage(error)}`,
-          ),
-        ),
-      );
-    if (shell === null || shell.deletedAt !== null) {
-      return yield* threadNotFound(threadManagement, threadId, `Thread ${threadId} was not found.`);
-    }
+    const resolved = yield* resolveThreadShell(threadManagement, threadId, "mutate");
+    const targetThreadId = resolved.shell.id;
     const requestKey =
       input.clientRequestId === undefined
         ? yield* crypto.randomUUIDv4().pipe(Effect.orDie)
         : input.clientRequestId;
     const updateCommandId = commandId({
       scope,
-      threadId,
+      threadId: targetThreadId,
       action: input.action,
       requestKey,
     });
@@ -158,7 +147,7 @@ const make = Effect.gen(function* () {
       .dispatch(
         metadataCommand({
           commandId: updateCommandId,
-          threadId,
+          threadId: targetThreadId,
           update: input,
         }),
       )
@@ -166,7 +155,7 @@ const make = Effect.gen(function* () {
         Effect.mapError((error) =>
           failure(
             "orchestration_error",
-            `Unable to ${input.action} for thread ${threadId}: ${errorMessage(error)}`,
+            `Unable to ${input.action} for thread ${targetThreadId}: ${errorMessage(error)}`,
           ),
         ),
       );

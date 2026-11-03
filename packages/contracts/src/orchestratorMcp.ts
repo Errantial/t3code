@@ -409,6 +409,7 @@ export const OrchestratorMcpEnvironmentTarget = Schema.optional(
 
 export const OrchestratorMcpThreadListInput = Schema.Struct({
   environmentId: OrchestratorMcpEnvironmentTarget,
+  environments: Schema.optional(Schema.Literals(["local", "all"])),
   projectId: OrchestratorMcpProjectTarget,
   allProjects: Schema.optional(Schema.Boolean),
   statuses: Schema.optional(
@@ -435,6 +436,7 @@ export type OrchestratorMcpThreadPullRequest = typeof OrchestratorMcpThreadPullR
 export const OrchestratorMcpThreadListItem = Schema.Struct({
   threadId: ThreadId,
   projectId: ProjectId,
+  environmentId: Schema.optional(EnvironmentId),
   title: Schema.String,
   link: Schema.optional(Schema.String),
   createdBy: OrchestrationV2Actor,
@@ -468,6 +470,31 @@ export const OrchestratorMcpThreadListResult = Schema.Struct({
   threads: Schema.Array(OrchestratorMcpThreadListItem),
   nextCursor: Schema.NullOr(NonNegativeInt),
   total: NonNegativeInt,
+  scope: Schema.optional(
+    Schema.Struct({
+      projectId: Schema.NullOr(ProjectId),
+      environments: Schema.optional(Schema.Literals(["local", "all"])),
+      includeSubagents: Schema.Boolean,
+      filtersApplied: Schema.Array(Schema.String),
+    }),
+  ),
+  environments: Schema.optional(
+    Schema.Array(
+      Schema.Struct({
+        environmentId: EnvironmentId,
+        label: Schema.String,
+        status: Schema.Literals(["ok", "unreachable", "capability_missing", "access_denied"]),
+        capabilities: Schema.Literals(["v1", "legacy"]),
+      }),
+    ),
+  ),
+  hint: Schema.optional(
+    Schema.Struct({
+      otherProjects: NonNegativeInt,
+      subagents: NonNegativeInt,
+      inactive: NonNegativeInt,
+    }),
+  ),
 });
 export type OrchestratorMcpThreadListResult = typeof OrchestratorMcpThreadListResult.Type;
 

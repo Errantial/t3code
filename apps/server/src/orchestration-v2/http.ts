@@ -22,6 +22,7 @@ import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import { traceLocalHandlerWork } from "../cloud/traceRelayRequest.ts";
 import * as OrchestrationEventStore from "../persistence/OrchestrationEventStore.ts";
 import * as ProjectEnrichmentService from "../project/ProjectEnrichmentService.ts";
+import { resolveThreadShell } from "../mcp/threadRefResolver.ts";
 import {
   buildBoundedThreadProjection,
   decodeThreadHistoryCursor,
@@ -101,6 +102,26 @@ export const layer = HttpApiBuilder.group(
       },
     );
 
+    const resolveThreadReadId = Effect.fn("http.orchestration.resolveThreadReadId")(function* (
+      threadId: Parameters<typeof threadManagement.getThreadSnapshot>[0],
+    ) {
+      return yield* resolveThreadShell(threadManagement, threadId, "read").pipe(
+        Effect.map(({ shell }) => shell.id),
+        Effect.catchTags({
+          OrchestratorMcpFailure: (error) => {
+            switch (error.code) {
+              case "thread_not_found":
+                return failEnvironmentNotFound("thread_not_found");
+              case "thread_id_ambiguous":
+                return failEnvironmentInvalidRequest("thread_id_ambiguous");
+              default:
+                return failEnvironmentInvalidRequest("invalid_thread_id");
+            }
+          },
+        }),
+      );
+    });
+
     const loadThreadSnapshot = Effect.fn("http.orchestration.loadThreadSnapshot")(function* (
       threadId: Parameters<typeof threadManagement.getThreadSnapshot>[0],
       failureReason:
@@ -108,7 +129,8 @@ export const layer = HttpApiBuilder.group(
         | "orchestration_thread_bounded_snapshot_failed"
         | "orchestration_thread_history_failed",
     ) {
-      return yield* threadManagement.getThreadSnapshot(threadId).pipe(
+      const resolvedId = yield* resolveThreadReadId(threadId);
+      return yield* threadManagement.getThreadSnapshot(resolvedId).pipe(
         Effect.map((snapshot) => ({
           ...snapshot,
           projection: projectThreadProjectionForWire(snapshot.projection),
@@ -135,8 +157,9 @@ export const layer = HttpApiBuilder.group(
         >[1]["anchorThreadId"],
         deferWork = false,
       ) {
+        const resolvedId = yield* resolveThreadReadId(threadId);
         return yield* threadManagement
-          .getThreadSnapshotWindow(threadId, {
+          .getThreadSnapshotWindow(resolvedId, {
             rowLimit: THREAD_HISTORY_SNAPSHOT_ROW_LIMIT,
             deferWork,
             userTurnLimit:

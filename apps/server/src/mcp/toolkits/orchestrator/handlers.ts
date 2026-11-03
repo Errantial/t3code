@@ -1,10 +1,13 @@
 import {
   OrchestratorMcpFailure,
+  type OrchestratorMcpEnvironmentLink,
   type OrchestratorMcpSwarmMemberFailure,
   type OrchestratorMcpSwarmMemberResult,
+  type OrchestratorMcpThreadListResult,
 } from "@t3tools/contracts";
 import { OrchestratorToolkit } from "./tools.ts";
 import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
 
 import * as PeerForwarding from "../../../peer/PeerForwarding.ts";
 import * as PeerLinkRequests from "../../../peer/PeerLinkRequests.ts";
@@ -14,6 +17,12 @@ import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import * as McpToolAccess from "../../McpToolAccess.ts";
 import * as OrchestratorMcpService from "../../OrchestratorMcpService.ts";
 import * as ThreadMetadataMcpService from "../../ThreadMetadataMcpService.ts";
+
+type PeerListReport = {
+  readonly link: OrchestratorMcpEnvironmentLink;
+  readonly status: "ok" | "unreachable" | "access_denied" | "capability_missing";
+  readonly result: OrchestratorMcpThreadListResult | null;
+};
 
 const handlers = {
   orchestrator_capabilities: McpToolAccess.reads((input) =>
@@ -216,7 +225,86 @@ const handlers = {
     Effect.gen(function* () {
       const scope = yield* McpInvocationContext.McpInvocationContext;
       const service = yield* OrchestratorMcpService.OrchestratorMcpService;
-      return yield* service.listThreads(scope, input);
+      const local = yield* service.listThreads(
+        scope,
+        input.environments === "all"
+          ? { ...input, environments: "local", allProjects: true, projectId: undefined }
+          : input,
+      );
+      if (input.environments !== "all") return local;
+
+      const forwarding = yield* Effect.serviceOption(PeerForwarding.PeerForwarding);
+      if (Option.isNone(forwarding))
+        return yield* new OrchestratorMcpFailure({
+          code: "orchestration_error",
+          message: "This environment cannot reach linked environments.",
+        });
+      const { links } = yield* forwarding.value.links(scope);
+      const reachable = links.filter((link) => link.status === "reachable");
+      const { environmentId: _environment, environments: _environments, ...base } = input;
+      void _environment;
+      void _environments;
+      const reports = yield* Effect.forEach(
+        reachable,
+        (link): Effect.Effect<PeerListReport> =>
+          forwarding.value
+            .call(scope, OrchestratorToolkit.tools.t3_thread_list, link.environmentId, {
+              ...base,
+              allProjects: true,
+              projectId: undefined,
+            })
+            .pipe(
+              Effect.map((result) => ({ link, status: "ok" as const, result })),
+              Effect.catch((error) =>
+                Effect.succeed({
+                  link,
+                  status:
+                    error.code === "capability_denied"
+                      ? ("access_denied" as const)
+                      : ("unreachable" as const),
+                  result: null,
+                }),
+              ),
+            ),
+        { concurrency: 4 },
+      );
+
+      const threads = [
+        ...local.threads,
+        ...reports.flatMap((report) => report.result?.threads ?? []),
+      ]
+        .toSorted((left, right) => Date.parse(right.updatedAt) - Date.parse(left.updatedAt))
+        .slice(0, input.limit ?? 50);
+      const total = reports.reduce(
+        (count, report) => count + (report.result?.total ?? 0),
+        local.total,
+      );
+      return {
+        ...local,
+        projectId: null,
+        threads,
+        total,
+        nextCursor: null,
+        scope: {
+          ...(local.scope ?? { includeSubagents: true, filtersApplied: [] }),
+          projectId: null,
+          environments: "all" as const,
+        },
+        environments: [
+          {
+            environmentId: scope.environmentId,
+            label: "This environment",
+            status: "ok" as const,
+            capabilities: "v1" as const,
+          },
+          ...reports.map((report) => ({
+            environmentId: report.link.environmentId,
+            label: report.link.label,
+            status: report.status,
+            capabilities: "v1" as const,
+          })),
+        ],
+      };
     }),
   ),
   t3_thread_read: McpToolAccess.reads((input) =>

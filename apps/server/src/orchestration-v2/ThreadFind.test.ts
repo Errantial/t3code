@@ -822,4 +822,16 @@ describe("V2 history materialization", () => {
       assert.deepEqual(sizes, [1, 1, 75, 3]);
     }).pipe(Effect.provide(layerTest)),
   );
+
+  it.effect("finds a thread whose project row was deleted", () =>
+    Effect.gen(function* () {
+      const projection = yield* setup;
+      const sql = yield* SqlClient.SqlClient;
+      yield* putItems([item("orphan", 1, "needle")]);
+      yield* sql`UPDATE projection_projects SET deleted_at = ${DateTime.formatIso(at(3))} WHERE project_id = ${projectId}`;
+      const found = yield* projection.searchThread({ threadId, query: "needle" });
+      assert.equal(found.totalMatches, 1);
+      assert.equal(found.match?.entryId, "orphan");
+    }).pipe(Effect.provide(layerTest)),
+  );
 });

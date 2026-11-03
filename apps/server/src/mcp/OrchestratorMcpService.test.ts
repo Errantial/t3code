@@ -2782,7 +2782,21 @@ describe("OrchestratorMcpService thread lookup", () => {
           Layer.mock(ThreadManagementService.ThreadManagementService)({
             getThreadShell: (threadId) =>
               Effect.succeed(shells.find((shell) => shell.id === threadId) ?? null),
-            sendToThread: () => Ref.update(sent, (count) => count + 1).pipe(Effect.as({} as never)),
+            getShellSnapshot: (options) =>
+              Effect.succeed({
+                schemaVersion: 1,
+                snapshotSequence: 0,
+                threads: options?.location === "archive" ? [] : [...shells],
+                archivedThreads: options?.location === "archive" ? [...shells] : [],
+              } as never),
+            sendToThread: () =>
+              Ref.update(sent, (count) => count + 1).pipe(
+                Effect.as({
+                  run: { id: "run-1", status: "completed" },
+                  delivery: "immediate",
+                } as never),
+              ),
+            getProjectThreadRecords: () => Effect.succeed({ thread: shells[0], runs: [] } as never),
           }),
           ServerSettings.layerTest(),
           Layer.mock(ProviderRegistry.ProviderRegistry)({ getProviders: Effect.succeed([]) }),
@@ -2809,32 +2823,48 @@ describe("OrchestratorMcpService thread lookup", () => {
       }).pipe(Effect.provide(service(shells, sent)));
     });
 
-  it.effect("points a bare uuid at the mcp: thread it belongs to", () =>
+  it.effect("sends to the mcp: thread for a bare uuid", () =>
     Effect.gen(function* () {
-      const { read, send, sends } = yield* failuresFor([launched]);
-      for (const error of [read, send]) {
-        assert.equal(error.code, "thread_not_found");
-        assert.include(error.message, `mcp:${bareId}`);
-      }
-      assert.equal(sends, 0);
+      const sent = yield* Ref.make(0);
+      const result = yield* Effect.gen(function* () {
+        const mcp = yield* OrchestratorMcpService.OrchestratorMcpService;
+        return yield* mcp.sendToThread(client, { threadId: bareId, message: "hello" });
+      }).pipe(Effect.provide(service([launched], sent)));
+
+      assert.equal(result.threadId, launched.id);
+      assert.equal(yield* Ref.get(sent), 1);
     }),
   );
 
-  it.effect("keeps the plain message for an id that matches nothing", () =>
+  it.effect("refuses a prefix for a send", () =>
+    Effect.gen(function* () {
+      const sent = yield* Ref.make(0);
+      const prefix = ThreadId.make(launched.id.slice(4, 12));
+      const error = yield* Effect.gen(function* () {
+        const mcp = yield* OrchestratorMcpService.OrchestratorMcpService;
+        return yield* mcp
+          .sendToThread(client, { threadId: prefix, message: "hello" })
+          .pipe(Effect.flip);
+      }).pipe(Effect.provide(service([launched], sent)));
+
+      assert.equal(error.code, "thread_id_prefix_not_allowed");
+      assert.equal(yield* Ref.get(sent), 0);
+    }),
+  );
+
+  it.effect("keeps thread_not_found for an id that matches nothing", () =>
     Effect.gen(function* () {
       const { read, send } = yield* failuresFor([]);
       assert.equal(read.code, "thread_not_found");
-      assert.equal(read.message, `Thread ${bareId} is no longer available.`);
       assert.equal(send.code, "thread_not_found");
-      assert.equal(send.message, `Thread ${bareId} was not found.`);
     }),
   );
 
-  it.effect("does not name an mcp: thread that was deleted", () =>
+  it.effect("does not resolve an mcp: thread that was deleted", () =>
     Effect.gen(function* () {
       const { read, send } = yield* failuresFor([deletedLaunched]);
-      assert.equal(read.message, `Thread ${bareId} is no longer available.`);
-      assert.equal(send.message, `Thread ${bareId} was not found.`);
+      assert.equal(read.code, "thread_not_found");
+      assert.equal(send.code, "thread_not_found");
     }),
   );
 });
@@ -2858,6 +2888,14 @@ describe("OrchestratorMcpService thread list", () => {
     shell("thread:a-snoozed", "project:a", true),
     shell("thread:a-awake", "project:a", false),
     shell("thread:b-snoozed", "project:b", true),
+    {
+      ...shell("thread:b-subagent", "project:b", false),
+      lineage: {
+        ...liveThreadShell(ThreadId.make("thread:b-subagent")).lineage,
+        parentThreadId: ThreadId.make("thread:a-awake"),
+        relationshipToParent: "subagent" as const,
+      },
+    },
   ];
   const service = layerOrchestratorService.pipe(
     Layer.provide(
@@ -2893,6 +2931,8 @@ describe("OrchestratorMcpService thread list", () => {
         snoozed: true,
       });
       assert.equal(listed.projectId, null);
+      assert.equal(listed.scope?.includeSubagents, true);
+      assert.equal(listed.threads[0]?.environmentId, client.environmentId);
       assert.deepStrictEqual(
         listed.threads.map((thread) => [thread.threadId, thread.projectId]),
         [
@@ -2900,6 +2940,23 @@ describe("OrchestratorMcpService thread list", () => {
           ["thread:b-snoozed", "project:b"],
         ],
       );
+    }).pipe(Effect.provide(service)),
+  );
+
+  it.effect("explains an empty scoped list with counts only", () =>
+    Effect.gen(function* () {
+      const mcp = yield* OrchestratorMcpService.OrchestratorMcpService;
+      const listed = yield* mcp.listThreads(client, {
+        projectId: ProjectId.make("project:c"),
+        includeSubagents: false,
+      });
+      assert.equal(listed.total, 0);
+      assert.deepStrictEqual(listed.scope?.filtersApplied, ["project"]);
+      assert.deepStrictEqual(listed.hint, {
+        otherProjects: 4,
+        subagents: 1,
+        inactive: 0,
+      });
     }).pipe(Effect.provide(service)),
   );
 });

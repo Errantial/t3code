@@ -211,6 +211,7 @@ it.layer(layerTest)("ThreadSearch", (it) => {
         [
           [assistantOnly, "assistant", "needle in an answer", "assistant-only"],
           [both, "user", "newer needle question", "both-user-new"],
+          [ThreadId.make("thread:orphaned"), "user", "needle orphaned", "orphaned"],
         ],
       );
       assert.lengthOf((yield* search.search({ query: "needle", limit: 1 })).matches, 1);

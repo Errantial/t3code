@@ -357,7 +357,7 @@ const handlers = {
       if (remote !== undefined) {
         return yield* service.call(scope, InstructionToolkit.tools.save_thread, remote, input);
       }
-      const { threads, projection } = yield* readThread(input.threadId);
+      const { threads, projection } = yield* readThread(input.threadId, [], "mutate");
       const command = {
         type: "thread.save",
         commandId: yield* newCommandId(),
@@ -374,7 +374,7 @@ const handlers = {
       if (remote !== undefined) {
         return yield* service.call(scope, InstructionToolkit.tools.unsave_thread, remote, input);
       }
-      const { threads, projection } = yield* readThread(input.threadId);
+      const { threads, projection } = yield* readThread(input.threadId, [], "mutate");
       const command = {
         type: "thread.unsave",
         commandId: yield* newCommandId(),

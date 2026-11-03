@@ -1,4 +1,5 @@
 import {
+  EnvironmentId,
   OrchestratorMcpEnvironmentTarget,
   ScheduledTaskId,
   ScheduledTask,
@@ -202,6 +203,7 @@ const ThreadSearchTool = Tool.make("t3_thread_search", {
       Schema.Struct({
         threadId: OrchestrationThreadSearchMatch.fields.threadId,
         projectId: OrchestrationThreadSearchMatch.fields.projectId,
+        environmentId: Schema.optional(EnvironmentId),
         title: Schema.String,
         link: Schema.optional(Schema.String),
         source: Schema.Literals(["title", "user", "assistant"]),

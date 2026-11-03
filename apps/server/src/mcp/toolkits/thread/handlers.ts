@@ -43,7 +43,7 @@ const dispatch = Effect.fn("mcp.dispatchThreadCommand")(function* (
   threadId: ThreadId | undefined,
   command: (common: { commandId: CommandId; threadId: ThreadId }) => OrchestrationV2Command,
 ) {
-  const { threads, projection } = yield* readThread(threadId);
+  const { threads, projection } = yield* readThread(threadId, [], "mutate");
   const result = yield* threads
     .dispatch(command({ commandId: yield* newCommandId(), threadId: projection.thread.id }))
     .pipe(Effect.mapError(dispatchFailure));
@@ -53,8 +53,13 @@ const dispatch = Effect.fn("mcp.dispatchThreadCommand")(function* (
 const readQuestion = Effect.fn("mcp.readQuestion")(function* (input: {
   threadId?: ThreadId | undefined;
   requestId: RuntimeRequestId;
+  mode?: "read" | "mutate";
 }) {
-  const context = yield* readThread(input.threadId, ["runtimeRequests", "turnItems"]);
+  const context = yield* readThread(
+    input.threadId,
+    ["runtimeRequests", "turnItems"],
+    input.mode ?? "read",
+  );
   const request = context.projection.runtimeRequests.find(
     (request) => request.id === input.requestId && request.kind === "user_input",
   );
@@ -129,6 +134,7 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
       return {
         matches: matches.map((match) => ({
           ...match,
+          environmentId: scope.environmentId,
           link: McpInvocationContext.threadLinkFor(scope, match.threadId),
         })),
       };
@@ -156,11 +162,11 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
       (input) =>
         Effect.gen(function* () {
           const sourcePoint = input.sourcePoint ?? { type: "latest_stable" as const };
-          const { threads, projection } = yield* readThread(input.threadId);
+          const { threads, projection } = yield* readThread(input.threadId, [], "mutate");
           const commandId = yield* newCommandId();
           if (input.action === "merge_back") {
             const targetThreadId = yield* required(input.targetThreadId, "targetThreadId");
-            yield* readThread(targetThreadId);
+            yield* readThread(targetThreadId, [], "mutate");
             const result = yield* threads
               .dispatch({
                 type: "thread.merge_back",
@@ -212,7 +218,7 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
         const {
           threads,
           projection: { thread },
-        } = yield* readThread(input.threadId);
+        } = yield* readThread(input.threadId, [], "mutate");
         const type = modelSelectionCommandType(thread.providerInstanceId, modelSelection);
         const result = yield* threads
           .dispatch({ type, threadId: thread.id, commandId: yield* newCommandId(), modelSelection })
@@ -245,6 +251,7 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
         const { threads, projection } = yield* readQuestion({
           threadId: input.threadId,
           requestId,
+          mode: "mutate",
         });
         const result = yield* threads
           .dispatch({
@@ -329,7 +336,7 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
   ),
   t3_thread_organize: writesThread((input) =>
     Effect.gen(function* () {
-      const { threads, projection, caller } = yield* readThread(input.threadId);
+      const { threads, projection, caller } = yield* readThread(input.threadId, [], "mutate");
       const common = { commandId: yield* newCommandId(), threadId: projection.thread.id };
       if (input.action === "settle") {
         return yield* threads
