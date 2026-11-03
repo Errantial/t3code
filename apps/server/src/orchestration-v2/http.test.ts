@@ -294,3 +294,50 @@ it.effect("leaves older settled threads out of the HTTP shell only when asked", 
     expect(cut.olderSettled?.counts).toEqual([{ projectId: thread.projectId, count: 1 }]);
   }),
 );
+
+it.effect("resolves a unique thread id prefix on the snapshot route", () =>
+  Effect.gen(function* () {
+    const { eventSink, handler } = yield* serveOrchestrationHttp(() => true);
+    const prefixId = ThreadId.make("abcdef12-1111-2222-3333-444455556666");
+    const otherId = ThreadId.make("abcdef12-aaaa-bbbb-cccc-ddddeeeeffff");
+    yield* eventSink.write({
+      events: [
+        {
+          id: EventId.make("create-prefix"),
+          type: "thread.created" as const,
+          threadId: prefixId,
+          occurredAt: now,
+          payload: { ...thread, id: prefixId },
+        },
+      ],
+    });
+    const read = (threadId: string) =>
+      Effect.promise(() =>
+        handler(
+          new Request(`http://localhost/api/orchestration/threads/${threadId}`, {
+            headers: { [ORCHESTRATION_PROTOCOL_HEADER]: ORCHESTRATION_PROTOCOL_VERSION_TEXT },
+          }),
+        ),
+      );
+    const unique = yield* read("abcdef12");
+    expect(unique.status).toBe(200);
+    const body = (yield* Effect.promise(() => unique.json())) as {
+      readonly projection: { readonly thread: { readonly id: string } };
+    };
+    expect(body.projection.thread.id).toBe(prefixId);
+
+    yield* eventSink.write({
+      events: [
+        {
+          id: EventId.make("create-prefix-other"),
+          type: "thread.created" as const,
+          threadId: otherId,
+          occurredAt: now,
+          payload: { ...thread, id: otherId },
+        },
+      ],
+    });
+    const ambiguous = yield* read("abcdef12");
+    expect(ambiguous.status).toBe(400);
+  }),
+);
