@@ -1219,6 +1219,17 @@ export const subscribeOrchestrationV2Shell = Effect.fn("ws.orchestrationV2.subsc
   },
 );
 
+export const resolveThreadProjectionId = Effect.fn("ws.resolveThreadProjectionId")(function* (
+  threads: Pick<
+    ThreadManagementService.ThreadManagementService["Service"],
+    "getThreadShell" | "getShellSnapshot"
+  >,
+  threadId: ThreadId,
+) {
+  const { shell } = yield* resolveThreadShell(threads, threadId, "read");
+  return shell.id;
+});
+
 export const layerWsRpc = (
   currentSession: EnvironmentAuth.AuthenticatedSession,
   clientAnalyticsProps: Readonly<Record<string, unknown>>,
@@ -2004,8 +2015,7 @@ export const layerWsRpc = (
           Effect.annotateCurrentSpan({ "orchestration_v2.thread_id": input.threadId }).pipe(
             Effect.andThen(
               // Bound compatibility snapshots so pre-pagination clients cannot materialize unlimited transcripts.
-              resolveThreadShell(threadManagement, input.threadId, "read").pipe(
-                Effect.map(({ shell }) => shell.id),
+              resolveThreadProjectionId(threadManagement, input.threadId).pipe(
                 Effect.flatMap((threadId) =>
                   threadManagement.getThreadSnapshotWindow(threadId, {
                     rowLimit: THREAD_HISTORY_SNAPSHOT_ROW_LIMIT,
