@@ -858,6 +858,30 @@ export const OrchestrationV2RemoteTaskChild = Schema.Struct({
 });
 export type OrchestrationV2RemoteTaskChild = typeof OrchestrationV2RemoteTaskChild.Type;
 
+/**
+ * When a delegated task's completion wakes its parent. `held` (swarm members) plans no wake
+ * until the server releases the task with `delegated_task.wake-policy`.
+ */
+export const OrchestrationV2DelegatedCompletionWake = Schema.Literals([
+  "always",
+  "settled_only",
+  "held",
+]);
+export type OrchestrationV2DelegatedCompletionWake =
+  typeof OrchestrationV2DelegatedCompletionWake.Type;
+
+const DELEGATED_COMPLETION_DETAIL_MAX_BYTES = 16_000;
+const utf8 = new TextEncoder();
+
+/** Wake text that replaces a released task's result, at most 16,000 UTF-8 bytes. */
+export const OrchestrationV2DelegatedCompletionDetail = Schema.String.check(
+  Schema.makeFilter((value) =>
+    utf8.encode(value).length <= DELEGATED_COMPLETION_DETAIL_MAX_BYTES
+      ? true
+      : `completionDetail must be at most ${DELEGATED_COMPLETION_DETAIL_MAX_BYTES} UTF-8 bytes.`,
+  ),
+);
+
 export const OrchestrationV2Subagent = Schema.Struct({
   id: NodeId,
   threadId: ThreadId,
@@ -875,7 +899,8 @@ export const OrchestrationV2Subagent = Schema.Struct({
   title: Schema.NullOr(Schema.String),
   model: Schema.NullOr(Schema.String),
   modelSelection: Schema.optional(ModelSelection),
-  completionWake: Schema.optional(Schema.Literals(["always", "settled_only"])),
+  completionWake: Schema.optional(OrchestrationV2DelegatedCompletionWake),
+  completionDetail: Schema.optional(OrchestrationV2DelegatedCompletionDetail),
   completionDelivery: Schema.optional(OrchestrationV2DelegatedCompletionTaskDelivery),
   status: Schema.Literals([
     "idle",
@@ -3290,7 +3315,7 @@ export const OrchestrationV2Command = Schema.Union([
     interactionMode: ProviderInteractionMode,
     workspaceStrategy: Schema.optional(OrchestrationV2ThreadLaunchWorkspaceStrategy),
     // Defaults to settled_only; fire-and-forget wakes require always.
-    completionWake: Schema.optional(Schema.Literals(["always", "settled_only"])),
+    completionWake: Schema.optional(OrchestrationV2DelegatedCompletionWake),
     /**
      * Server-only: admits a swarm member against the swarm's anchor run, which may have ended.
      * Client commands have it stripped (`withCreationProvenance`).
@@ -3303,7 +3328,8 @@ export const OrchestrationV2Command = Schema.Union([
     commandId: CommandId,
     parentThreadId: ThreadId,
     taskId: NodeId,
-    completionWake: Schema.Literals(["always", "settled_only"]),
+    completionWake: OrchestrationV2DelegatedCompletionWake,
+    completionDetail: Schema.optional(OrchestrationV2DelegatedCompletionDetail),
   }),
   Schema.Struct({
     type: Schema.Literal("delegated_task.completion-delivery.acknowledge"),
@@ -3413,7 +3439,7 @@ const OrchestrationV2InternalCommand = Schema.Union([
     driver: ProviderDriverKind,
     modelSelection: ModelSelection,
     remoteChild: OrchestrationV2RemoteTaskChild,
-    completionWake: Schema.optional(Schema.Literals(["always", "settled_only"])),
+    completionWake: Schema.optional(OrchestrationV2DelegatedCompletionWake),
   }),
   /**
    * Completes a delegated task that ran in a linked environment, with what its

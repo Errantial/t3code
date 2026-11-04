@@ -931,6 +931,34 @@ it.layer(layerTest)("swarm admission after the anchor run (SW-A0)", (it) => {
     }),
   );
 
+  it.effect("wake-policy refuses held and completionDetail until swarm release lands", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const { threadId, anchor } = yield* seedArchitect("held-refused");
+      const member = yield* admit({ threadId, anchor, swarmId: undefined, key: "held" });
+      for (const [name, change] of [
+        ["held", { completionWake: "held" as const }],
+        ["detail", { completionWake: "settled_only" as const, completionDetail: "digest" }],
+      ] as const) {
+        const exit = yield* orchestrator
+          .dispatch({
+            type: "delegated_task.wake-policy",
+            commandId: CommandId.make(`command:held-refused:${name}`),
+            parentThreadId: threadId,
+            taskId: member.taskId,
+            ...change,
+          })
+          .pipe(Effect.exit);
+        assert.isTrue(Exit.isFailure(exit), name);
+        assert.include(String(Exit.isFailure(exit) ? exit.cause : ""), "not supported");
+      }
+      const task = (yield* orchestrator.getThreadProjection(threadId)).subagents.find(
+        (row) => row.id === member.taskId,
+      );
+      assert.equal(task?.completionWake, "always");
+    }),
+  );
+
   it.effect("Q8: thread.stop disarms a member's armed usage-limit continuation", () =>
     Effect.gen(function* () {
       const orchestrator = yield* Orchestrator.OrchestratorV2;

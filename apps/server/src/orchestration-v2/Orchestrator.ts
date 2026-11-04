@@ -8134,6 +8134,14 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     command: Extract<OrchestrationV2Command, { readonly type: "delegated_task.wake-policy" }>,
     events: Ref.Ref<Array<OrchestrationV2DomainEvent>>,
   ) {
+    // The contract carries them for swarm release; until the orchestrator honors them, refuse.
+    if (command.completionWake === "held" || command.completionDetail !== undefined) {
+      return yield* new OrchestratorDispatchError({
+        commandId: command.commandId,
+        commandType: command.type,
+        cause: "Held wakes and completion details are not supported by this server yet.",
+      });
+    }
     const parentProjection = yield* projectionStore
       .getThreadRecords(command.parentThreadId, ["subagents", "runs", "messages", "providerTurns"])
       .pipe(
