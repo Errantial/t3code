@@ -66,6 +66,7 @@ import {
   type ProviderSessionId,
   RunId,
   RuntimeMode,
+  type SwarmId,
   ThreadLinkedPullRequest,
   ThreadId,
   TurnItemId,
@@ -544,6 +545,7 @@ function commandThreadId(command: OrchestrationV2ServerCommand): ThreadId {
       return command.parentThreadId;
     case "secret_request.record":
     case "link_request.record":
+    case "swarm.anchor":
       return command.threadId;
     case "thread.fork":
     case "thread.merge_back":
@@ -2422,6 +2424,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       disposition: nextDisposition,
       nextGeneration: cohort?.nextGeneration ?? 1,
       delivery: null,
+      ...(cohort?.swarmIds === undefined ? {} : { swarmIds: cohort.swarmIds }),
     } as const;
     yield* emitEvent({
       type: "run.updated",
@@ -7197,6 +7200,110 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     yield* Ref.update(effects, (existing) => [...existing, pendingEffect]);
   });
 
+  /**
+   * A swarm member may be admitted after its architect's turn ended, but only against the run
+   * that anchors its swarm, while that run's cohort is open and no Stop has reached it or any
+   * later run of the thread. Runs under the parent lock, so a concurrent Stop cannot race it.
+   */
+  const assertSwarmAdmission = Effect.fnUntraced(function* (
+    command: Extract<OrchestrationV2Command, { readonly type: "delegated_task.request" }>,
+    swarmId: SwarmId,
+    parent: Pick<OrchestrationV2ThreadProjection, "thread" | "runs">,
+    anchor: OrchestrationV2Run,
+  ) {
+    const refuse = (cause: string) =>
+      new OrchestratorDispatchError({
+        commandId: command.commandId,
+        commandType: command.type,
+        cause,
+      });
+    // Client commands lose swarmAdmission and are stamped createdBy "user" before dispatch.
+    if (command.createdBy !== "agent" || command.creationSource !== "server") {
+      return yield* refuse("Swarm admissions are created by the server.");
+    }
+    if (parent.thread.archivedAt !== null || parent.thread.deletedAt !== null) {
+      return yield* refuse(`Parent thread ${command.parentThreadId} is not active.`);
+    }
+    const cohort = anchor.delegatedCompletion;
+    if (cohort?.swarmIds?.includes(swarmId) !== true) {
+      return yield* refuse(`Run ${anchor.id} is not the anchor of swarm ${swarmId}.`);
+    }
+    if (cohort.disposition !== "open") {
+      return yield* refuse(`The anchor run of swarm ${swarmId} no longer admits members.`);
+    }
+    // thread.stop marks the run it interrupts, so a Stop during a later turn never reaches
+    // the anchor itself.
+    const { turnItems } = yield* projectionStore
+      .getThreadRecords(command.parentThreadId, ["turnItems"], {
+        turnItemTypes: ["run_interrupt_request"],
+        turnItemRunIds: parent.runs
+          .filter((run) => run.ordinal >= anchor.ordinal)
+          .map((run) => run.id),
+      })
+      .pipe(mapDispatchError(command));
+    if (turnItems.length > 0) {
+      return yield* refuse(`A Stop reached the architect of swarm ${swarmId}.`);
+    }
+  });
+
+  const dispatchSwarmAnchor = Effect.fn("orchestrationV2.dispatch.swarmAnchor")(function* (
+    command: Extract<OrchestrationV2InternalCommand, { readonly type: "swarm.anchor" }>,
+    events: Ref.Ref<Array<OrchestrationV2DomainEvent>>,
+  ) {
+    const refuse = (cause: string) =>
+      new OrchestratorDispatchError({
+        commandId: command.commandId,
+        commandType: command.type,
+        cause,
+      });
+    const projection = yield* projectionStore
+      .getThreadRecords(command.threadId, ["runs"])
+      .pipe(
+        Effect.mapError(
+          (cause) => new OrchestratorProjectionError({ threadId: command.threadId, cause }),
+        ),
+      );
+    const run = projection.runs.find((candidate) => candidate.id === command.runId);
+    if (
+      projection.thread.archivedAt !== null ||
+      projection.thread.deletedAt !== null ||
+      run === undefined ||
+      run.rootNodeId === null ||
+      !isBlockingRun(run)
+    ) {
+      return yield* refuse(`Run ${command.runId} is not active.`);
+    }
+    if (yield* stopReachedRun(command, command.threadId, run.id)) {
+      return yield* refuse(`Run ${command.runId} is stopping.`);
+    }
+    const cohort = run.delegatedCompletion ?? {
+      disposition: "open" as const,
+      nextGeneration: 1,
+      delivery: null,
+    };
+    if (cohort.disposition !== "open") {
+      return yield* refuse(`Run ${command.runId} no longer admits delegated tasks.`);
+    }
+    yield* emit(
+      events,
+      command,
+    )({
+      type: "run.updated",
+      threadId: command.threadId,
+      runId: run.id,
+      nodeId: run.rootNodeId,
+      providerInstanceId: run.providerInstanceId,
+      occurredAt: yield* DateTime.now,
+      payload: {
+        ...run,
+        delegatedCompletion: {
+          ...cohort,
+          swarmIds: Array.from(new Set([...(cohort.swarmIds ?? []), command.swarmId])),
+        },
+      },
+    });
+  });
+
   const dispatchDelegatedTaskRequest = Effect.fn("orchestrationV2.dispatch.delegatedTaskRequest")(
     function* (
       command: Extract<OrchestrationV2Command, { readonly type: "delegated_task.request" }>,
@@ -7224,14 +7331,24 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       const parentRun = parentProjection.runs.find(
         (candidate) => candidate.id === command.parentRunId,
       );
-      if (parentRun === undefined || !isBlockingRun(parentRun)) {
+      if (
+        parentRun === undefined ||
+        (command.swarmAdmission === undefined && !isBlockingRun(parentRun))
+      ) {
         return yield* new OrchestratorDispatchError({
           commandId: command.commandId,
           commandType: command.type,
           cause: `Parent run ${command.parentRunId} is not active.`,
         });
       }
-      if (yield* stopReachedRun(command, command.parentThreadId, parentRun.id)) {
+      if (command.swarmAdmission !== undefined) {
+        yield* assertSwarmAdmission(
+          command,
+          command.swarmAdmission.swarmId,
+          parentProjection,
+          parentRun,
+        );
+      } else if (yield* stopReachedRun(command, command.parentThreadId, parentRun.id)) {
         return yield* new OrchestratorDispatchError({
           commandId: command.commandId,
           commandType: command.type,
@@ -11777,6 +11894,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       }),
     );
     const nextCohort = {
+      // An anchored swarm keeps its swarmIds when its first delivery opens.
+      ...cohort,
       disposition: "open" as const,
       nextGeneration: generation + 1,
       delivery: {
@@ -12811,6 +12930,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         break;
       case "secret_request.record":
         yield* dispatchSecretRequestRecord(command, events);
+        break;
+      case "swarm.anchor":
+        yield* dispatchSwarmAnchor(command, events);
         break;
       case "link_request.record":
         yield* dispatchLinkRequestRecord(command, events, effects);

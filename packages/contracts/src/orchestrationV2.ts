@@ -37,6 +37,7 @@ import {
   RunId,
   RuntimeRequestId,
   ScheduledTaskId,
+  SwarmId,
   ThreadId,
   TrimmedNonEmptyString,
   TurnItemId,
@@ -622,6 +623,8 @@ export const OrchestrationV2DelegatedCompletionCohort = Schema.Struct({
   disposition: Schema.Literals(["open", "stopped", "disposed"]),
   nextGeneration: PositiveInt,
   delivery: Schema.NullOr(OrchestrationV2DelegatedCompletionDelivery),
+  /** Swarms anchored on this run (`swarm.anchor`); only they may admit members after it ends. */
+  swarmIds: Schema.optional(Schema.Array(SwarmId)),
 });
 export type OrchestrationV2DelegatedCompletionCohort =
   typeof OrchestrationV2DelegatedCompletionCohort.Type;
@@ -3288,6 +3291,11 @@ export const OrchestrationV2Command = Schema.Union([
     workspaceStrategy: Schema.optional(OrchestrationV2ThreadLaunchWorkspaceStrategy),
     // Defaults to settled_only; fire-and-forget wakes require always.
     completionWake: Schema.optional(Schema.Literals(["always", "settled_only"])),
+    /**
+     * Server-only: admits a swarm member against the swarm's anchor run, which may have ended.
+     * Client commands have it stripped (`withCreationProvenance`).
+     */
+    swarmAdmission: Schema.optional(Schema.Struct({ swarmId: SwarmId })),
     createdAt: Schema.optional(Schema.DateTimeUtc),
   }),
   Schema.Struct({
@@ -3331,6 +3339,14 @@ export type OrchestrationV2Command = typeof OrchestrationV2Command.Type;
 
 // Excluded from dispatchCommand so only the server can send these.
 const OrchestrationV2InternalCommand = Schema.Union([
+  /** Records a swarm on the architect's live run, so later admissions can name it as anchor. */
+  Schema.Struct({
+    type: Schema.Literal("swarm.anchor"),
+    commandId: CommandId,
+    threadId: ThreadId,
+    runId: RunId,
+    swarmId: SwarmId,
+  }),
   // Guest share commands the server issues after checking T3 Connect and the guest token.
   Schema.Struct({
     type: Schema.Literal("thread.guest-share.open"),
