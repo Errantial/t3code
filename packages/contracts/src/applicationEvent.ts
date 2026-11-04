@@ -5,6 +5,7 @@ import {
   ClientSurface,
   CommandId,
   EventId,
+  EnvironmentId,
   IsoDateTime,
   NonNegativeInt,
   ProjectId,
@@ -37,6 +38,7 @@ export const ApplicationProjectCreatedPayload = Schema.Struct({
   projectId: ProjectId,
   title: TrimmedNonEmptyString,
   workspaceRoot: TrimmedNonEmptyString,
+  environmentRoots: Schema.optional(Schema.Record(EnvironmentId, TrimmedNonEmptyString)),
   repositoryIdentity: Schema.optional(Schema.NullOr(RepositoryIdentity)),
   defaultModelSelection: Schema.NullOr(ModelSelection),
   defaultThreadEnvMode: Schema.optional(Schema.NullOr(ThreadEnvMode)),
@@ -52,6 +54,7 @@ export const ApplicationProjectMetaUpdatedPayload = Schema.Struct({
   projectId: ProjectId,
   title: Schema.optional(TrimmedNonEmptyString),
   workspaceRoot: Schema.optional(TrimmedNonEmptyString),
+  environmentRoots: Schema.optional(Schema.Record(EnvironmentId, TrimmedNonEmptyString)),
   repositoryIdentity: Schema.optional(Schema.NullOr(RepositoryIdentity)),
   defaultModelSelection: Schema.optional(Schema.NullOr(ModelSelection)),
   // Absent = leave unchanged; null = clear the override.

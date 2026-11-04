@@ -1,5 +1,6 @@
 import {
   type EnvironmentId,
+  type ProjectId,
   OrchestratorMcpFailure,
   OrchestratorMcpCapabilitiesResult,
   type OrchestratorMcpEnvironmentLinksResult,
@@ -16,6 +17,7 @@ import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Hex from "effect/encoding/Hex";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import type * as Tool from "effect/ai/Tool";
 
@@ -23,6 +25,8 @@ import { assertNotLinked } from "../mcp/linkOrigin.ts";
 import * as McpInvocationContext from "../mcp/McpInvocationContext.ts";
 import { readCaller, unavailable } from "../mcp/threadAccess.ts";
 import * as ThreadManagement from "../orchestration-v2/ThreadManagementService.ts";
+import * as ProjectService from "../project/ProjectService.ts";
+import * as RepositoryIdentityResolver from "../project/RepositoryIdentityResolver.ts";
 import * as PeerLinks from "./PeerLinks.ts";
 import * as PeerMcpClient from "./PeerMcpClient.ts";
 
@@ -119,6 +123,8 @@ const make = Effect.gen(function* () {
   const links = yield* PeerLinks.PeerLinks;
   const crypto = yield* Crypto.Crypto;
   const threads = yield* ThreadManagement.ThreadManagementService;
+  const projects = yield* ProjectService.ProjectService;
+  const repositoryIdentities = yield* RepositoryIdentityResolver.RepositoryIdentityResolver;
 
   /**
    * The caller's own limits, which travel with every forwarded call: the peer sees only the
@@ -144,6 +150,52 @@ const make = Effect.gen(function* () {
       Effect.map((digest) => `fwd:${Hex.encode(digest)}`),
       Effect.orDie,
     );
+
+  /**
+   * A launch that names a project here but no explicit repository key travels
+   * as that project's canonical repository key, never as a local id. An id the
+   * peer owns is left alone; the peer refuses repository keys it cannot match.
+   */
+  const placeLaunch = Effect.fn("PeerForwarding.placeLaunch")(function* (
+    scope: Scope,
+    params: unknown,
+  ) {
+    // A caller without orchestration access is refused by the normal path;
+    // do not touch project services before that check.
+    if (!scope.capabilities.has("orchestration")) return params;
+    const input = params as {
+      readonly projectId?: ProjectId;
+      readonly repositoryKey?: string;
+      readonly scratch?: boolean;
+    };
+    if (input.repositoryKey !== undefined) {
+      return { ...input, projectId: undefined };
+    }
+    if (input.scratch === true) return input;
+    let projectId = input.projectId;
+    if (projectId === undefined && scope.thread !== undefined) {
+      const shell = yield* threads
+        .getThreadShell(scope.thread.threadId)
+        .pipe(Effect.catchCause(() => Effect.succeed(null)));
+      projectId = shell?.projectId;
+    }
+    if (projectId === undefined) return input;
+    const found = yield* projects
+      .getById(projectId)
+      .pipe(Effect.catchCause(() => Effect.succeedNone));
+    if (Option.isNone(found)) return input;
+    const key = (yield* repositoryIdentities
+      .resolve(found.value.workspaceRoot)
+      .pipe(Effect.catchCause(() => Effect.void)))?.canonicalKey;
+    if (key === undefined) {
+      return yield* new OrchestratorMcpFailure({
+        code: "repository_identity_missing",
+        message: "This project has no repository identity to match on the target. Pass projectId.",
+      });
+    }
+    const { projectId: _projectId, ...rest } = input;
+    return { ...rest, repositoryKey: key };
+  });
 
   /** Tool and contract schemas are plain data: they encode and decode without services. */
   const forward = Effect.fn("PeerForwarding.forward")(function* <A>(
@@ -240,21 +292,17 @@ const make = Effect.gen(function* () {
     Effect.flatMap((enabled) => (enabled ? Effect.void : Effect.fail(linkedEnvironmentsOff))),
   );
 
-  const call: PeerForwarding["Service"]["call"] = (scope, tool, environmentId, params) => {
-    const forwarded: Effect.Effect<
-      Tool.Success<typeof tool>,
-      OrchestratorMcpFailure
-    > = tool.name === "t3_thread_wait"
-      ? (waitForThread(
-          scope,
-          environmentId,
-          params as OrchestratorMcpThreadWaitInput,
-        ) as Effect.Effect<Tool.Success<typeof tool>, OrchestratorMcpFailure>)
-      : forward(scope, tool.name, tool.parametersSchema, tool.successSchema, environmentId, params);
-    return Effect.andThen(
+  const call: PeerForwarding["Service"]["call"] = (scope, tool, environmentId, params) =>
+    Effect.andThen(
       requireEnabled,
       Effect.gen(function* () {
-        if (carriesEffort(params)) {
+        const placed =
+          tool.name === "t3_thread_launch" ? yield* placeLaunch(scope, params) : params;
+        const placedRepositoryKey =
+          typeof (placed as { readonly repositoryKey?: unknown }).repositoryKey === "string"
+            ? (placed as { readonly repositoryKey: string }).repositoryKey
+            : undefined;
+        if (carriesEffort(params) || placedRepositoryKey !== undefined) {
           const limits = yield* callerLimits(scope);
           const capabilities = yield* peers.call({
             environmentId,
@@ -263,17 +311,38 @@ const make = Effect.gen(function* () {
             limits,
             success: OrchestratorMcpCapabilitiesResult,
           });
-          if (capabilities.contracts?.includes("effort-v1") !== true) {
+          if (carriesEffort(params) && capabilities.contracts?.includes("effort-v1") !== true) {
             return yield* new OrchestratorMcpFailure({
               code: "target_capability_missing",
               message: `The linked environment ${environmentId} does not support effort; update it to a build with the effort-v1 contract or retry without effort.`,
             });
           }
+          if (
+            placedRepositoryKey !== undefined &&
+            capabilities.contracts?.includes("thread-placement-v1") !== true
+          ) {
+            return yield* new OrchestratorMcpFailure({
+              code: "target_capability_missing",
+              message: `The linked environment ${environmentId} cannot place a thread by repository key. Update it to a build with the thread-placement-v1 contract, or pass projectId from t3_project_list there.`,
+            });
+          }
         }
-        return yield* forwarded;
+        return yield* tool.name === "t3_thread_wait"
+          ? (waitForThread(
+              scope,
+              environmentId,
+              placed as OrchestratorMcpThreadWaitInput,
+            ) as Effect.Effect<Tool.Success<typeof tool>, OrchestratorMcpFailure>)
+          : (forward(
+              scope,
+              tool.name,
+              tool.parametersSchema,
+              tool.successSchema,
+              environmentId,
+              placed,
+            ) as Effect.Effect<Tool.Success<typeof tool>, OrchestratorMcpFailure>);
       }),
     );
-  };
 
   /**
    * The next step for an agent whose machine is not linked: without it, an

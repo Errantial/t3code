@@ -4,6 +4,7 @@ import {
   ThreadId,
   OrchestratorMcpFailure,
   ProjectId,
+  type Project as ProjectContract,
 } from "@t3tools/contracts";
 import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
@@ -15,6 +16,8 @@ import * as ThreadMessageIntake from "../../../orchestration-v2/ThreadMessageInt
 import * as Claims from "../../../orchestration-v2/AttachmentClaims.ts";
 import * as Project from "../../../project/ProjectService.ts";
 import * as ManagedProjectFolders from "../../../project/ManagedProjectFolders.ts";
+import * as ServerEnvironment from "../../../environment/ServerEnvironment.ts";
+import * as PeerLinks from "../../../peer/PeerLinks.ts";
 import * as Repositories from "../../../sourceControl/SourceControlRepositoryService.ts";
 import * as GitVcsDriver from "../../../vcs/GitVcsDriver.ts";
 import * as ServerSettings from "../../../serverSettings.ts";
@@ -27,6 +30,7 @@ import { mergeOptionSelections, resolveEffortSelection } from "../../modelEffort
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import * as McpToolAccess from "../../McpToolAccess.ts";
 import { newCommandId, readCaller, resolveProjectId, unavailable } from "../../threadAccess.ts";
+import { matchRepositoryKey } from "../../../peer/RemoteProjectResolver.ts";
 import { ProjectToolkit } from "./tools.ts";
 
 function projectFailure(error: Project.ProjectServiceError) {
@@ -76,6 +80,38 @@ const access = Effect.gen(function* () {
   yield* readCaller();
   return yield* Project.ProjectService;
 });
+
+/** Match a caller's repository key against this environment's own projects. */
+export const resolveRepositoryProject = Effect.fn("mcp.resolveRepositoryProject")(function* (
+  environmentId: string,
+  repositoryKey: string,
+) {
+  const projects = yield* Project.ProjectService;
+  const all: Array<ProjectContract> = [];
+  let cursor = 0;
+  while (true) {
+    const page = yield* projects
+      .listPage({ cursor, limit: 100 })
+      .pipe(Effect.mapError(unavailable));
+    all.push(...page.projects);
+    if (page.nextCursor === null) break;
+    cursor = page.nextCursor;
+  }
+  const match = matchRepositoryKey(all, repositoryKey);
+  if (match.kind === "one") return match.project.id;
+  if (match.kind === "none") {
+    return yield* new OrchestratorMcpFailure({
+      code: "project_not_found_in_environment",
+      message: `No project in ${environmentId} has repository ${repositoryKey}. Register or clone it there, then pass that projectId.`,
+    });
+  }
+  return yield* new OrchestratorMcpFailure({
+    code: "project_ambiguous_in_environment",
+    message: `Several projects in ${environmentId} have repository ${repositoryKey}: ${match.candidates
+      .map((project) => `${project.title} (${project.id})`)
+      .join(", ")}. Pass one of those projectIds.`,
+  });
+});
 export const layer = McpToolAccess.toLayer(ProjectToolkit, {
   t3_thread_launch: McpToolAccess.startsThreads(
     (input) => input,
@@ -108,19 +144,37 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
             message:
               "scratch:true picks its own project and folder; omit projectId and workspaceStrategy.",
           });
+        const repositoryKey = input.repositoryKey;
+        if (repositoryKey !== undefined) {
+          if (input.projectId !== undefined || input.scratch === true) {
+            return yield* new OrchestratorMcpFailure({
+              code: "invalid_request",
+              message: "repositoryKey places the thread by repository; omit projectId and scratch.",
+            });
+          }
+          if (scope.client?.linked !== true) {
+            return yield* new OrchestratorMcpFailure({
+              code: "invalid_request",
+              message:
+                "repositoryKey needs a linked environment. Name environmentId there, or pass projectId here.",
+            });
+          }
+        }
         const projectId =
-          input.scratch === true
-            ? (yield* ManagedProjectFolders.ManagedProjectFolders.pipe(
-                Effect.flatMap((folders) => folders.ensureScratchProject),
-                Effect.mapError(
-                  (error) =>
-                    new OrchestratorMcpFailure({
-                      code: "orchestration_error",
-                      message: error.message,
-                    }),
-                ),
-              )).projectId
-            : yield* resolveProjectId(context, input.projectId);
+          repositoryKey !== undefined
+            ? yield* resolveRepositoryProject(String(scope.environmentId), repositoryKey)
+            : input.scratch === true
+              ? (yield* ManagedProjectFolders.ManagedProjectFolders.pipe(
+                  Effect.flatMap((folders) => folders.ensureScratchProject),
+                  Effect.mapError(
+                    (error) =>
+                      new OrchestratorMcpFailure({
+                        code: "orchestration_error",
+                        message: error.message,
+                      }),
+                  ),
+                )).projectId
+              : yield* resolveProjectId(context, input.projectId);
         const readProject = Project.ProjectService.pipe(
           Effect.flatMap((projects) => projects.getById(projectId)),
           Effect.mapError(unavailable),
@@ -275,6 +329,7 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
           threadId: thread.id,
           link: McpInvocationContext.threadLinkFor(scope, thread.id),
           projectId: thread.projectId,
+          environmentId: scope.environmentId,
           modelSelection: thread.modelSelection,
           runId: run?.id ?? null,
           status: run?.status ?? null,
@@ -352,6 +407,21 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
     // registered workspace is still refused.
     { linkedCallers: "allowed" },
   ),
+  get_project_environment_roots: McpToolAccess.reads((input) =>
+    Effect.gen(function* () {
+      const projects = yield* Project.ProjectService;
+      const project = yield* projects
+        .getById(input.projectId)
+        .pipe(Effect.mapError(unavailable), Effect.map(Option.getOrUndefined));
+      if (project === undefined) {
+        return yield* new OrchestratorMcpFailure({
+          code: "invalid_request",
+          message: "The project was not found.",
+        });
+      }
+      return { projectId: project.id, environmentRoots: project.environmentRoots ?? {} };
+    }),
+  ),
   t3_project_update: McpToolAccess.writesEnvironment((input) =>
     Effect.gen(function* () {
       const projects = yield* Project.ProjectService;
@@ -359,6 +429,55 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
         .update({ ...input, commandId: yield* newCommandId() })
         .pipe(Effect.mapError(projectFailure));
     }),
+  ),
+  set_project_environment_root: McpToolAccess.writesEnvironment((input, check) =>
+    check.pipe(
+      Effect.andThen(
+        Effect.gen(function* () {
+          const projects = yield* Project.ProjectService;
+          const links = yield* PeerLinks.PeerLinks;
+          const environment = yield* ServerEnvironment.ServerEnvironment;
+          const localId = yield* environment.getEnvironmentId;
+          if (String(input.environmentId) === String(localId)) {
+            return yield* new OrchestratorMcpFailure({
+              code: "invalid_request",
+              message:
+                "This machine's own root is the project workspaceRoot; name a linked environment.",
+            });
+          }
+          const link = yield* links.get(input.environmentId).pipe(Effect.mapError(unavailable));
+          if (Option.isNone(link)) {
+            return yield* new OrchestratorMcpFailure({
+              code: "target_unlinked",
+              message: "That environment is not linked here. Link it in Connections first.",
+            });
+          }
+          const project = yield* projects
+            .getById(input.projectId)
+            .pipe(Effect.mapError(unavailable), Effect.map(Option.getOrUndefined));
+          if (project === undefined) {
+            return yield* new OrchestratorMcpFailure({
+              code: "invalid_request",
+              message: "The project was not found.",
+            });
+          }
+          const roots = { ...project.environmentRoots };
+          if (input.root === null) delete roots[input.environmentId];
+          else roots[input.environmentId] = input.root;
+          const updated = yield* projects
+            .update({
+              projectId: input.projectId,
+              environmentRoots: roots,
+              commandId: yield* newCommandId(),
+            })
+            .pipe(Effect.mapError(projectFailure));
+          return {
+            projectId: updated.id,
+            environmentRoots: updated.environmentRoots ?? {},
+          };
+        }),
+      ),
+    ),
   ),
   t3_project_delete: McpToolAccess.writesEnvironment((input) =>
     Effect.gen(function* () {

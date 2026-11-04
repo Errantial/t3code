@@ -17,6 +17,7 @@ import { expect, it } from "@effect/vitest";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
 import { McpSchema, McpServer } from "effect/ai";
 
@@ -28,7 +29,9 @@ import * as ManagedProjectFolders from "../project/ManagedProjectFolders.ts";
 import * as SourceControlRepositoryService from "../sourceControl/SourceControlRepositoryService.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import * as ProviderAdapterRegistry from "../orchestration-v2/ProviderAdapterRegistry.ts";
+import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as ProjectService from "../project/ProjectService.ts";
+import * as RepositoryIdentityResolver from "../project/RepositoryIdentityResolver.ts";
 import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
 import * as ScheduledTaskService from "../scheduledTasks/ScheduledTaskService.ts";
 import * as SecretRequests from "../secrets/SecretRequests.ts";
@@ -42,6 +45,7 @@ import * as PeerLinks from "./PeerLinks.ts";
 import * as PeerLinkRequests from "./PeerLinkRequests.ts";
 import * as PeerMcpClient from "./PeerMcpClient.ts";
 import { OrchestratorToolkit } from "../mcp/toolkits/orchestrator/tools.ts";
+import { ProjectToolkit } from "../mcp/toolkits/project/tools.ts";
 import { descriptorOf, layerLinkingEnvironment, linkTo, servePeer } from "./PeerLinks.testkit.ts";
 
 const laptop = descriptorOf("environment-laptop", "Laptop");
@@ -169,6 +173,30 @@ const boxProjects = (seen: Ref.Ref<Seen>) =>
   Layer.merge(
     Layer.mock(ProjectService.ProjectService)({
       getById: () => Effect.succeedNone,
+      listPage: () =>
+        Effect.succeed({
+          projects: [
+            {
+              id: boxProject,
+              title: "Box project",
+              workspaceRoot: "/work/box",
+              repositoryIdentity: {
+                canonicalKey: "github.com/acme/app",
+                locator: {
+                  source: "git-remote",
+                  remoteName: "origin",
+                  remoteUrl: "https://github.com/acme/app",
+                },
+              },
+              defaultModelSelection: null,
+              scripts: [],
+              createdAt: "2026-10-18T00:00:00.000Z",
+              updatedAt: "2026-10-18T00:00:00.000Z",
+              deletedAt: null,
+            },
+          ],
+          nextCursor: null,
+        }),
       create: (input) =>
         Ref.update(seen, (current) => ({
           ...current,
@@ -236,6 +264,11 @@ const serveBox = (seen: Ref.Ref<Seen>, linkSession: Ref.Ref<string>) =>
       Layer.provide(Layer.mock(RemoteDelegation.RemoteDelegation)({})),
       Layer.provide(Layer.mock(PeerLinkRequests.PeerLinkRequests)({})),
       Layer.provide(Layer.mock(PeerLinks.PeerLinks)({})),
+      Layer.provide(
+        Layer.mock(ServerEnvironment.ServerEnvironment)({
+          getEnvironmentId: Effect.succeed(laptop.environmentId),
+        }),
+      ),
     ),
   );
 
@@ -310,6 +343,10 @@ const makeLaptop = Effect.gen(function* () {
         Layer.mock(ProviderAdapterRegistry.ProviderAdapterRegistryV2)({}),
         Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
         Layer.mock(ProjectService.ProjectService)({}),
+        Layer.mock(RepositoryIdentityResolver.RepositoryIdentityResolver)({}),
+        Layer.mock(ServerEnvironment.ServerEnvironment)({
+          getEnvironmentId: Effect.succeed(laptop.environmentId),
+        }),
         Layer.mock(SecretRequests.SecretRequests)({}),
         ServerSettings.layerTest(),
         Layer.mock(RemoteDelegation.RemoteDelegation)({}),
@@ -355,7 +392,12 @@ const makeLaptop = Effect.gen(function* () {
 
 const failureOf = (result: McpSchema.CallToolResult) => {
   const text = result.content[0];
-  return result.isError === true && text?.type === "text" ? JSON.parse(text.text) : undefined;
+  if (result.isError !== true || text?.type !== "text") return undefined;
+  try {
+    return JSON.parse(text.text);
+  } catch {
+    return { code: "plain", text: text.text };
+  }
 };
 
 it.effect("an agent here works on a linked environment's threads within its own modes", () =>
@@ -721,6 +763,8 @@ it.effect("refuses effort before forwarding when the peer lacks effort-v1", () =
       },
     }),
     Layer.mock(PeerLinks.PeerLinks)({ enabled: Effect.succeed(true) }),
+    Layer.mock(ProjectService.ProjectService)({}),
+    Layer.mock(RepositoryIdentityResolver.RepositoryIdentityResolver)({}),
     Layer.mock(ThreadManagement.ThreadManagementService)({
       getThreadShell: (threadId) =>
         Effect.succeed(liveThreadShell(threadId, { runtimeMode: "full-access" })),
@@ -737,6 +781,134 @@ it.effect("refuses effort before forwarding when the peer lacks effort-v1", () =
       .pipe(Effect.flip);
     expect(error.code).toBe("target_capability_missing");
     expect(calls).toEqual(["orchestrator_capabilities"]);
+  }).pipe(
+    Effect.provide(
+      PeerForwarding.layer.pipe(Layer.provide(dependencies), Layer.provide(NodeCrypto.layer)),
+    ),
+  );
+});
+
+it.effect(
+  "refuses repository placement before forwarding when the peer lacks thread-placement-v1",
+  () => {
+    const environmentId = EnvironmentId.make("environment-old-placement-peer");
+    const callerThreadId = ThreadId.make("thread:old-placement-caller");
+    const scope = {
+      environmentId: EnvironmentId.make("environment-old-placement-caller"),
+      requestNamespace: "client:old-placement",
+      thread: {
+        threadId: callerThreadId,
+        providerSessionId: "session:old-placement",
+        providerInstanceId: ProviderInstanceId.make("codex"),
+      },
+      client: { sessionId: "old-placement", label: "Claude Code", access: "full-access" },
+      capabilities: new Set(["orchestration"]),
+      issuedAt: 1,
+    } as unknown as McpInvocationContext.McpInvocationScope;
+    const calls: string[] = [];
+    const dependencies = Layer.mergeAll(
+      Layer.mock(PeerMcpClient.PeerMcpClient)({
+        call: (input) => {
+          calls.push(input.tool);
+          return input.tool === "orchestrator_capabilities"
+            ? Effect.succeed({ contracts: ["effort-v1"] } as never)
+            : Effect.fail(
+                new OrchestratorMcpFailure({
+                  code: "orchestration_error",
+                  message: "must not forward",
+                }),
+              );
+        },
+      }),
+      Layer.mock(PeerLinks.PeerLinks)({ enabled: Effect.succeed(true) }),
+      Layer.mock(ProjectService.ProjectService)({}),
+      Layer.mock(RepositoryIdentityResolver.RepositoryIdentityResolver)({}),
+      Layer.mock(ThreadManagement.ThreadManagementService)({
+        getThreadShell: (threadId) =>
+          Effect.succeed(liveThreadShell(threadId, { runtimeMode: "full-access" })),
+      }),
+    );
+    return Effect.gen(function* () {
+      const forwarding = yield* PeerForwarding.PeerForwarding;
+      const error = yield* forwarding
+        .call(scope, ProjectToolkit.tools.t3_thread_launch, environmentId, {
+          environmentId,
+          repositoryKey: "github.com/acme/app",
+          title: "Place me",
+        })
+        .pipe(Effect.flip);
+      expect(error.code).toBe("target_capability_missing");
+      expect(calls).toEqual(["orchestrator_capabilities"]);
+    }).pipe(
+      Effect.provide(
+        PeerForwarding.layer.pipe(Layer.provide(dependencies), Layer.provide(NodeCrypto.layer)),
+      ),
+    );
+  },
+);
+
+it.effect("places a launch by the caller project's repository key", () => {
+  const environmentId = EnvironmentId.make("environment-placement-peer");
+  const callerThreadId = ThreadId.make("thread:placement-caller");
+  const localProjectId = ProjectId.make("project:placement-local");
+  const scope = {
+    environmentId: EnvironmentId.make("environment-placement-caller"),
+    requestNamespace: "client:placement",
+    thread: {
+      threadId: callerThreadId,
+      providerSessionId: "session:placement",
+      providerInstanceId: ProviderInstanceId.make("codex"),
+    },
+    client: undefined,
+    capabilities: new Set(["orchestration"]),
+    issuedAt: 1,
+  } as unknown as McpInvocationContext.McpInvocationScope;
+  const forwarded: Array<Record<string, unknown>> = [];
+  const dependencies = Layer.mergeAll(
+    Layer.mock(PeerMcpClient.PeerMcpClient)({
+      call: (input: { readonly tool: string; readonly arguments: Record<string, unknown> }) => {
+        if (input.tool === "orchestrator_capabilities") {
+          return Effect.succeed({ contracts: ["thread-placement-v1"] } as never);
+        }
+        forwarded.push(input.arguments);
+        return Effect.succeed({
+          threadId: ThreadId.make("thread:placed"),
+          projectId: ProjectId.make("project:peer"),
+          modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5" },
+          runId: null,
+          status: null,
+        } as never);
+      },
+    }),
+    Layer.mock(PeerLinks.PeerLinks)({ enabled: Effect.succeed(true) }),
+    Layer.mock(ProjectService.ProjectService)({
+      getById: () =>
+        Effect.succeed(
+          Option.some({
+            projectId: localProjectId,
+            workspaceRoot: "/work/caller",
+          }) as never,
+        ),
+    }),
+    Layer.mock(RepositoryIdentityResolver.RepositoryIdentityResolver)({
+      resolve: () => Effect.succeed({ canonicalKey: "github.com/acme/app" } as never),
+    }),
+    Layer.mock(ThreadManagement.ThreadManagementService)({
+      getThreadShell: (threadId) =>
+        Effect.succeed(liveThreadShell(threadId, { runtimeMode: "full-access" })),
+    }),
+  );
+  return Effect.gen(function* () {
+    const forwarding = yield* PeerForwarding.PeerForwarding;
+    yield* forwarding.call(scope, ProjectToolkit.tools.t3_thread_launch, environmentId, {
+      environmentId,
+      projectId: localProjectId,
+      title: "Place by repository",
+      message: "Work there.",
+    });
+    expect(forwarded).toHaveLength(1);
+    expect(forwarded[0]).toMatchObject({ repositoryKey: "github.com/acme/app" });
+    expect(forwarded[0]).not.toHaveProperty("projectId");
   }).pipe(
     Effect.provide(
       PeerForwarding.layer.pipe(Layer.provide(dependencies), Layer.provide(NodeCrypto.layer)),
