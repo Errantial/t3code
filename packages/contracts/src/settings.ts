@@ -20,6 +20,7 @@ import {
   TrimmedString,
 } from "./baseSchemas.ts";
 import { UsageLimitSourceId } from "./usageLimitSourceId.ts";
+import { PeerExecGrant } from "./peerExec.ts";
 import { EnvironmentMachineKind, ThreadEnvMode, WorktreeSubmodules } from "./environment.ts";
 import { KeybindingShortcut } from "./keybindings.ts";
 import {
@@ -1230,6 +1231,21 @@ export const ServerSettings = Schema.Struct({
    * and tasks on another machine; tasks already running there finish.
    */
   linkedEnvironmentsEnabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+  /**
+   * Labs: fleet execution. Off hides `t3_shell` and `t3_fs_read` and refuses
+   * `peer-exec-v1` calls here.
+   */
+  executionTargetsEnabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+  /**
+   * What a linked environment may run here, separate from orchestration access.
+   * Set only on the machine being executed on. Defaults to off.
+   */
+  peerExecGrant: PeerExecGrant.pipe(Schema.withDecodingDefault(Effect.succeed("off"))),
+  /**
+   * Extra directories a linked environment may execute in and read, beyond the
+   * workspace roots of this machine's registered projects.
+   */
+  peerExecRoots: Schema.Array(Schema.String).pipe(Schema.withDecodingDefault(Effect.succeed([]))),
   sidebarAutoSettleKeepPullRequests: Schema.Boolean.pipe(
     Schema.withDecodingDefault(Effect.succeed(false)),
   ),
@@ -1580,6 +1596,9 @@ export const ServerSettingsPatch = Schema.Struct({
   snoozePresets: Schema.optionalKey(SnoozePresetSettings),
   guestSharingEnabled: Schema.optionalKey(Schema.Boolean),
   linkedEnvironmentsEnabled: Schema.optionalKey(Schema.Boolean),
+  executionTargetsEnabled: Schema.optionalKey(Schema.Boolean),
+  peerExecGrant: Schema.optionalKey(PeerExecGrant),
+  peerExecRoots: Schema.optionalKey(Schema.Array(Schema.String)),
   backgroundActivity: Schema.optionalKey(
     Schema.Struct({
       schemaVersion: Schema.optionalKey(Schema.Literal(1)),

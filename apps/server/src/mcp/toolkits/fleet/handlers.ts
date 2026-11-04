@@ -1,19 +1,30 @@
+// @effect-diagnostics effectFnOpportunity:off
 import {
   type EnvironmentId,
   FleetStatusResult,
   FleetUpdateError,
   FleetUpdateResult,
   type FleetUpdateMachineResult,
-  type PeerLinkSummary,
+  OrchestratorMcpCapabilitiesResult,
   OrchestratorMcpFailure,
+  PEER_EXEC_CONTRACT,
+  PeerExecResult,
+  PeerFsReadResult,
+  type PeerLinkSummary,
+  type T3FsReadInput,
+  type T3ShellInput,
 } from "@t3tools/contracts";
+import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
 
 import * as FleetUpdates from "../../../fleetUpdate/FleetUpdates.ts";
+import * as ServerEnvironment from "../../../environment/ServerEnvironment.ts";
+import * as PeerExec from "../../../peer/PeerExec.ts";
 import * as PeerLinks from "../../../peer/PeerLinks.ts";
 import * as PeerMcpClient from "../../../peer/PeerMcpClient.ts";
+import * as ServerSettings from "../../../serverSettings.ts";
 import * as McpToolAccess from "../../McpToolAccess.ts";
-import { readCaller } from "../../threadAccess.ts";
+import { type CallerLimits, readCaller } from "../../threadAccess.ts";
 import { FleetToolkit } from "./tools.ts";
 
 const orchestrationFailure = (message: string) =>
@@ -224,7 +235,174 @@ const fleetUpdate = Effect.fn("FleetToolkit.update")(function* (input: {
   return { release, dryRun, results };
 });
 
+const executionFailure = (
+  code: ConstructorParameters<typeof OrchestratorMcpFailure>[0]["code"],
+  message: string,
+) => new OrchestratorMcpFailure({ code, message });
+
+const requireExecutionTargets = Effect.gen(function* () {
+  const settings = yield* ServerSettings.ServerSettingsService;
+  const current = yield* settings.getSettings.pipe(
+    Effect.mapError(() => executionFailure("orchestration_error", "Unable to read settings.")),
+  );
+  if (!current.executionTargetsEnabled) {
+    return yield* executionFailure(
+      "capability_denied",
+      "Execution targets are off on this machine. Turn them on in Settings > Labs.",
+    );
+  }
+});
+
+const requireThreadCaller = Effect.gen(function* () {
+  const caller = yield* readCaller();
+  if (caller.scope.client?.linked === true) {
+    return yield* executionFailure(
+      "capability_denied",
+      "This tool acts for a thread here, not for a linked environment.",
+    );
+  }
+  return caller;
+});
+
+const unreachable = (error: OrchestratorMcpFailure) =>
+  error.code === "orchestration_error" && error.message.includes("stopped answering")
+    ? executionFailure("target_unreachable", error.message)
+    : error;
+
+const probePeer = Effect.fn("FleetToolkit.probePeer")(function* (
+  environmentId: EnvironmentId,
+  limits: CallerLimits,
+) {
+  const client = yield* PeerMcpClient.PeerMcpClient;
+  const capabilities = yield* client
+    .call({
+      environmentId,
+      tool: "orchestrator_capabilities",
+      arguments: {},
+      limits,
+      success: OrchestratorMcpCapabilitiesResult,
+    })
+    .pipe(Effect.mapError(unreachable));
+  if (capabilities.contracts?.includes(PEER_EXEC_CONTRACT) !== true) {
+    return yield* executionFailure(
+      "target_capability_missing",
+      `The linked environment ${environmentId} cannot run commands for this build. Update it to a release with ${PEER_EXEC_CONTRACT}.`,
+    );
+  }
+  return capabilities;
+});
+
+const homeEnvironmentId = Effect.gen(function* () {
+  const environment = yield* ServerEnvironment.ServerEnvironment;
+  return yield* environment.getEnvironmentId;
+});
+
+const shell = Effect.fn("FleetToolkit.shell")(function* (input: T3ShellInput) {
+  yield* requireExecutionTargets;
+  const caller = yield* requireThreadCaller;
+  const crypto = yield* Crypto.Crypto;
+  const execId = input.execId ?? (yield* crypto.randomUUIDv4().pipe(Effect.orDie));
+  const environmentId = yield* homeEnvironmentId;
+  if (input.target === "home") {
+    if (caller.limits.runtimeMode === "approval-required") {
+      return yield* executionFailure(
+        "remote_approval_required",
+        "This thread is in approval-required mode. Approve the change or switch it to auto before running commands.",
+      );
+    }
+    const cwd = input.cwd;
+    if (cwd === undefined) {
+      return yield* executionFailure(
+        "invalid_request",
+        "Name cwd for a command run outside a thread with a workspace.",
+      );
+    }
+    const exec = yield* PeerExec.PeerExec;
+    const result = yield* exec.run({
+      execId,
+      argv: input.argv,
+      cwd,
+      ...(input.env === undefined ? {} : { env: input.env }),
+      ...(input.timeoutMs === undefined ? {} : { timeoutMs: input.timeoutMs }),
+      ...(input.maxOutputBytes === undefined ? {} : { maxOutputBytes: input.maxOutputBytes }),
+    });
+    return { targetId: "home" as const, environmentId, ...result };
+  }
+
+  const capabilities = yield* probePeer(input.target, caller.limits);
+  if (capabilities.remoteExecution === "off" || capabilities.remoteExecution === undefined) {
+    return yield* executionFailure(
+      "remote_approval_required",
+      `The linked environment ${input.target} has remote execution off. Set it in that machine's Connections.`,
+    );
+  }
+  if (input.cwd === undefined) {
+    return yield* executionFailure(
+      "invalid_request",
+      "Name cwd for a linked target; this build does not guess its workspace.",
+    );
+  }
+  const client = yield* PeerMcpClient.PeerMcpClient;
+  const result = yield* client
+    .call({
+      environmentId: input.target,
+      tool: "peer_exec",
+      arguments: {
+        execId,
+        argv: input.argv,
+        cwd: input.cwd,
+        ...(input.env === undefined ? {} : { env: input.env }),
+        ...(input.timeoutMs === undefined ? {} : { timeoutMs: input.timeoutMs }),
+        ...(input.maxOutputBytes === undefined ? {} : { maxOutputBytes: input.maxOutputBytes }),
+      },
+      limits: caller.limits,
+      success: PeerExecResult,
+    })
+    .pipe(Effect.mapError(unreachable));
+  return { targetId: String(input.target), environmentId: input.target, ...result };
+});
+
+const fsRead = Effect.fn("FleetToolkit.fsRead")(function* (input: T3FsReadInput) {
+  yield* requireExecutionTargets;
+  const caller = yield* requireThreadCaller;
+  const environmentId = yield* homeEnvironmentId;
+  if (input.target === "home") {
+    const exec = yield* PeerExec.PeerExec;
+    const result = yield* exec.readFile({
+      path: input.path,
+      ...(input.offset === undefined ? {} : { offset: input.offset }),
+      ...(input.limit === undefined ? {} : { limit: input.limit }),
+    });
+    return { targetId: "home" as const, environmentId, ...result };
+  }
+
+  const capabilities = yield* probePeer(input.target, caller.limits);
+  if (capabilities.remoteExecution === "off" || capabilities.remoteExecution === undefined) {
+    return yield* executionFailure(
+      "remote_approval_required",
+      `The linked environment ${input.target} has remote execution off. Set it in that machine's Connections.`,
+    );
+  }
+  const client = yield* PeerMcpClient.PeerMcpClient;
+  const result: PeerFsReadResult = yield* client
+    .call({
+      environmentId: input.target,
+      tool: "peer_fs_read",
+      arguments: {
+        path: input.path,
+        ...(input.offset === undefined ? {} : { offset: input.offset }),
+        ...(input.limit === undefined ? {} : { limit: input.limit }),
+      },
+      limits: caller.limits,
+      success: PeerFsReadResult,
+    })
+    .pipe(Effect.mapError(unreachable));
+  return { targetId: String(input.target), environmentId: input.target, ...result };
+});
+
 export const layer = McpToolAccess.toLayer(FleetToolkit, {
+  t3_shell: McpToolAccess.actsAsCaller((input) => shell(input)),
+  t3_fs_read: McpToolAccess.readsAsCaller((input) => fsRead(input)),
   fleet_update_status: McpToolAccess.reads(fleetUpdateStatus),
   fleet_update: McpToolAccess.writesEnvironment(
     (input, check) => check.pipe(Effect.andThen(fleetUpdate(input))),

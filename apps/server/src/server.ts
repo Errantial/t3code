@@ -70,6 +70,8 @@ import * as TerminalManager from "./terminal/Manager.ts";
 import * as McpHttpServer from "./mcp/McpHttpServer.ts";
 import * as ProviderMcpRelay from "./mcp/ProviderMcpRelay.ts";
 import * as PeerForwarding from "./peer/PeerForwarding.ts";
+import * as PeerExec from "./peer/PeerExec.ts";
+import * as PeerExecReceipts from "./peer/PeerExecReceipts.ts";
 import * as RemoteDelegation from "./peer/RemoteDelegation.ts";
 import * as PeerLinkRequests from "./peer/PeerLinkRequests.ts";
 import * as PeerLinks from "./peer/PeerLinks.ts";
@@ -779,6 +781,13 @@ const layerMakeRoutes = Layer.mergeAll(
     ),
   ),
   Layer.provide(PreviewAutomationBroker.layer),
+  // Target-local execution for linked environments, in-process at home too.
+  Layer.provide(
+    PeerExec.layer.pipe(
+      Layer.provide(PeerExecReceipts.layer),
+      Layer.provide(RuntimeLayer.layerProjectService),
+    ),
+  ),
   Layer.provide(ServerSelfUpdate.layer.pipe(Layer.provide(layerDesktopAppUpdate))),
   Layer.provide(layerCommandReadiness),
   Layer.provide(ServerHttp.layerBrowserApiCors),

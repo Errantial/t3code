@@ -3,6 +3,7 @@ import * as Schema from "effect/Schema";
 import * as SchemaTransformation from "effect/SchemaTransformation";
 
 import { AuthMcpClientAccess } from "./auth.ts";
+import { PeerExecGrant } from "./peerExec.ts";
 import {
   ContextTransferId,
   EnvironmentId,
@@ -779,6 +780,8 @@ export const OrchestratorMcpCapabilitiesResult = Schema.Struct({
     maxBatchThreads: Schema.Number,
   }),
   contracts: Schema.optional(Schema.Array(Schema.String)),
+  /** What this link may run here. Absent on older peers; then only orchestration is offered. */
+  remoteExecution: Schema.optional(PeerExecGrant),
 });
 export type OrchestratorMcpCapabilitiesResult = typeof OrchestratorMcpCapabilitiesResult.Type;
 
@@ -1008,6 +1011,15 @@ export class OrchestratorMcpFailure extends Schema.TaggedError<OrchestratorMcpFa
       "thread_credential_required",
       "target_required",
       "target_capability_missing",
+      "target_path_outside_roots",
+      "target_path_not_found",
+      "target_busy",
+      "target_unreachable",
+      "target_unlinked",
+      "remote_approval_required",
+      "exec_id_conflict",
+      "exec_state_unknown",
+      "exec_receipt_capacity",
     ]),
     message: Schema.String,
   },

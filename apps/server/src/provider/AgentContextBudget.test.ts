@@ -26,6 +26,7 @@ import { ThreadManagementService } from "../orchestration-v2/ThreadManagementSer
 import { ThreadSearch } from "../orchestration-v2/ThreadSearch.ts";
 import { PeerForwarding } from "../peer/PeerForwarding.ts";
 import { PeerLinkRequests } from "../peer/PeerLinkRequests.ts";
+import { PeerExec } from "../peer/PeerExec.ts";
 import { PeerLinks } from "../peer/PeerLinks.ts";
 import { PeerMcpClient } from "../peer/PeerMcpClient.ts";
 import { RemoteDelegation } from "../peer/RemoteDelegation.ts";
@@ -58,6 +59,7 @@ const toolHandlerServices = Layer.mergeAll(
   Layer.mock(PeerForwarding)({}),
   Layer.mock(PeerLinkRequests)({}),
   Layer.mock(PeerLinks)({}),
+  Layer.mock(PeerExec)({}),
   Layer.mock(PeerMcpClient)({}),
   Layer.mock(PreviewAutomationBroker)({}),
   Layer.mock(PreviewBrowser)({}),

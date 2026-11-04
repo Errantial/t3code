@@ -77,6 +77,7 @@ import Migration0070 from "./Migrations/070_PeerLinks.ts";
 import Migration0071 from "./Migrations/071_PeerLinkFence.ts";
 import Migration0072 from "./Migrations/072_WaitingLinkRequestIndex.ts";
 import Migration0073 from "./Migrations/073_ChatGptBrowserProviderOperations.ts";
+import Migration0074 from "./Migrations/074_PeerExecReceipts.ts";
 
 const migrationEntries = [
   [1, "OrchestrationEvents", Migration0001],
@@ -156,6 +157,7 @@ const migrationEntries = [
   // It now trails main's sequence; reconcileChatGptBrowserForkMigration moves
   // databases written by that build to this id.
   [73, "ChatGptBrowserProviderOperations", Migration0073],
+  [74, "PeerExecReceipts", Migration0074],
 ] as const;
 
 export const migrationManifest = migrationEntries.map(([id, name]) => [id, name] as const);

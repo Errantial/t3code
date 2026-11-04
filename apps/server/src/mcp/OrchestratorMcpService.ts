@@ -16,6 +16,7 @@ import {
   OrchestratorMcpFailure,
   type OrchestratorMcpCapabilitiesInput,
   type OrchestratorMcpCapabilitiesResult,
+  PEER_EXEC_CONTRACT,
   type OrchestratorMcpModelOption,
   type OrchestratorMcpModelEffort,
   type OrchestratorMcpCreateThreadsInput,
@@ -2241,7 +2242,13 @@ const make = Effect.gen(function* () {
           scheduledTasks: true,
           maxBatchThreads: 20,
         },
-        contracts: ["effort-v1", "thread-ref-v1", "thread-list-scope-v1"],
+        contracts: [
+          "effort-v1",
+          "thread-ref-v1",
+          "thread-list-scope-v1",
+          ...(settings.executionTargetsEnabled ? [PEER_EXEC_CONTRACT] : []),
+        ],
+        ...(settings.executionTargetsEnabled ? { remoteExecution: settings.peerExecGrant } : {}),
       };
     }),
     delegateTask: Effect.fn("OrchestratorMcpService.delegateTask")(function* (callerScope, input) {

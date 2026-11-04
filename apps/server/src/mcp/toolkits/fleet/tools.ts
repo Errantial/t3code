@@ -6,8 +6,13 @@ import {
   FleetUpdateReport,
   FleetUpdateResult,
   OrchestratorMcpFailure,
+  T3FsReadInput,
+  T3FsReadResult,
+  T3ShellInput,
+  T3ShellResult,
   TrimmedNonEmptyString,
 } from "@t3tools/contracts";
+import * as Crypto from "effect/Crypto";
 import * as Schema from "effect/Schema";
 import { Tool, Toolkit } from "effect/ai";
 import { HttpClient } from "effect/http";
@@ -16,6 +21,8 @@ import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import * as ServerSelfUpdate from "../../../cloud/selfUpdate.ts";
 import * as ServerEnvironment from "../../../environment/ServerEnvironment.ts";
 import * as ThreadManagement from "../../../orchestration-v2/ThreadManagementService.ts";
+import * as PeerExec from "../../../peer/PeerExec.ts";
+import * as ServerSettings from "../../../serverSettings.ts";
 import * as PeerLinks from "../../../peer/PeerLinks.ts";
 import * as PeerMcpClient from "../../../peer/PeerMcpClient.ts";
 
@@ -23,12 +30,15 @@ const base = {
   failure: OrchestratorMcpFailure,
   failureMode: "return" as const,
   dependencies: [
+    Crypto.Crypto,
     McpInvocationContext.McpInvocationContext,
+    PeerExec.PeerExec,
     PeerLinks.PeerLinks,
     PeerMcpClient.PeerMcpClient,
     ServerEnvironment.ServerEnvironment,
     ServerSelfUpdate.ServerSelfUpdate,
     HttpClient.HttpClient,
+    ServerSettings.ServerSettingsService,
     ThreadManagement.ThreadManagementService,
   ],
 };
@@ -103,4 +113,18 @@ export const FleetToolkit = Toolkit.make(
   FleetUpdateTool,
   ServerFleetStatusTool,
   ServerFleetUpdateTool,
+  Tool.make("t3_shell", {
+    ...base,
+    description:
+      'Run a command on the calling thread\'s machine ("home") or a linked environment. `argv` is spawned directly with no shell wrapper; name a shell in argv to use one. Requires `target` in this build. Retry a lost reply with the same execId; it never runs twice.',
+    parameters: T3ShellInput,
+    success: T3ShellResult,
+  }).annotate(Tool.Destructive, true),
+  Tool.make("t3_fs_read", {
+    ...base,
+    description:
+      "Read a file on the calling thread's machine (\"home\") or a linked environment, inside that machine's allowed roots. Requires `target` in this build.",
+    parameters: T3FsReadInput,
+    success: T3FsReadResult,
+  }).annotate(Tool.Readonly, true),
 );
