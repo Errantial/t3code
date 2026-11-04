@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test"
 import {
   createInboxReturnTracker,
   isThreadWorking,
+  resolveInboxSection,
   sortInboxThreadsByReturn,
   sortWorkingThreadsBySend,
 } from "./threadInbox.ts";
@@ -117,6 +118,54 @@ describe("createInboxReturnTracker", () => {
     expect(tracker.isWorking(thread("a", false))).toBe(false);
     expect(tracker.returnedAt(thread("a", false))).toBe(10_000);
     expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("holds a pinned thread through the exit grace only when pinned threads sit in the inbox", () => {
+    const pinned = (working: boolean) => ({
+      ...thread("a", working),
+      pinnedAt: "2026-06-01T00:00:01Z",
+    });
+    // Today's behavior without the overhaul: the pin ends the grace at once.
+    const classic = createInboxReturnTracker();
+    classic.observe([pinned(true)]);
+    classic.observe([pinned(false)]);
+    expect(classic.isWorking(pinned(false))).toBe(false);
+    expect(classic.returnedAt(pinned(false))).toBe(10_000);
+
+    const overhaul = createInboxReturnTracker();
+    overhaul.observe([pinned(true)], { pinnedInInbox: true });
+    overhaul.observe([pinned(false)], { pinnedInInbox: true });
+    expect(overhaul.isWorking(pinned(false))).toBe(true);
+    vi.advanceTimersByTime(1_999);
+    expect(overhaul.isWorking(pinned(false))).toBe(true);
+    vi.advanceTimersByTime(1);
+    expect(overhaul.isWorking(pinned(false))).toBe(false);
+    expect(overhaul.returnedAt(pinned(false))).toBe(12_000);
+  });
+
+  it("still ends the grace when a thread is pinned or unpinned during it", () => {
+    const tracker = createInboxReturnTracker();
+    tracker.observe([thread("a", true)], { pinnedInInbox: true });
+    tracker.observe([thread("a", false)], { pinnedInInbox: true });
+    tracker.observe([{ ...thread("a", false), pinnedAt: "2026-06-01T00:00:01Z" }], {
+      pinnedInInbox: true,
+    });
+    expect(tracker.isWorking(thread("a", false))).toBe(false);
+    expect(tracker.returnedAt(thread("a", false))).toBe(10_000);
+  });
+
+  it("rebuilds its result when the option changes between calls", () => {
+    const pinned = (working: boolean) => ({
+      ...thread("a", working),
+      pinnedAt: "2026-06-01T00:00:01Z",
+    });
+    const tracker = createInboxReturnTracker();
+    tracker.observe([pinned(true)], { pinnedInInbox: true });
+    const held = tracker.observe([pinned(false)], { pinnedInInbox: true });
+    expect(held.isWorking(pinned(false))).toBe(true);
+    const released = tracker.observe([pinned(false)], { pinnedInInbox: false });
+    expect(released.isWorking(pinned(false))).toBe(false);
+    expect(released.returnedAt(pinned(false))).toBe(10_000);
   });
 
   it.each(["interrupted", "cancelled", "rolled_back"] as const)(
@@ -239,5 +288,20 @@ describe("sortWorkingThreadsBySend", () => {
     expect(
       sortWorkingThreadsBySend([launched, sentFirst, sentLast]).map((thread) => thread.id),
     ).toEqual(["sent-last", "sent-first", "launched"]);
+  });
+});
+
+describe("resolveInboxSection", () => {
+  it.each([
+    { snoozed: true, settled: true, pinned: true, pinOverhaul: false, expected: "snoozed" },
+    { snoozed: true, settled: false, pinned: true, pinOverhaul: true, expected: "snoozed" },
+    { snoozed: false, settled: true, pinned: true, pinOverhaul: false, expected: "settled" },
+    { snoozed: false, settled: true, pinned: true, pinOverhaul: true, expected: "settled" },
+    { snoozed: false, settled: false, pinned: true, pinOverhaul: false, expected: "pinned" },
+    { snoozed: false, settled: false, pinned: true, pinOverhaul: true, expected: "inbox" },
+    { snoozed: false, settled: false, pinned: false, pinOverhaul: false, expected: "inbox" },
+    { snoozed: false, settled: false, pinned: false, pinOverhaul: true, expected: "inbox" },
+  ] as const)("resolves $expected", ({ expected, ...input }) => {
+    expect(resolveInboxSection(input)).toBe(expected);
   });
 });
