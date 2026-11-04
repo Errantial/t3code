@@ -2298,10 +2298,109 @@ describe("OrchestratorMcpService provider resolution", () => {
               assert.deepEqual(request.modelSelection, parentModelSelection, testCase.name);
             } else {
               assert.equal(request.modelSelection.model, "codex-alt-model", testCase.name);
+              assert.equal(request.modelSelection.options, undefined, testCase.name);
             }
           }).pipe(Effect.provide(layerOrchestratorService.pipe(Layer.provide(layerDependencies))));
         }
       }),
+  );
+
+  it.effect("persists an effort on send and leaves the next send unchanged", () =>
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("thread:effort-send");
+      const base = liveThreadShell(threadId);
+      const selection = yield* Ref.make({
+        instanceId: codexInstanceId,
+        model: "gpt-5.4",
+      });
+      const sends = yield* Ref.make<
+        ReadonlyArray<{
+          readonly modelSelection?: {
+            readonly options?: ReadonlyArray<{ readonly id: string; readonly value: unknown }>;
+          };
+        }>
+      >([]);
+      const layerDependencies = Layer.mergeAll(
+        NodeServices.layer,
+        Layer.mock(ThreadManagementService.ThreadManagementService)({
+          getThreadShell: () =>
+            Ref.get(selection).pipe(
+              Effect.map((modelSelection) => ({ ...base, modelSelection }) as never),
+            ),
+          getProjectThreadRecords: () =>
+            Ref.get(selection).pipe(
+              Effect.map(
+                (modelSelection) => ({ thread: { ...base, modelSelection }, runs: [] }) as never,
+              ),
+            ),
+          sendToThread: (input) =>
+            Ref.update(sends, (current) => [...current, input]).pipe(
+              Effect.andThen(
+                input.modelSelection === undefined
+                  ? Effect.void
+                  : Ref.set(selection, input.modelSelection as never),
+              ),
+              Effect.as({
+                run: { id: "run-1", status: "completed" },
+                delivery: "immediate",
+              } as never),
+            ),
+        }),
+        providerRegistryLayer([
+          providerSnapshot({
+            instanceId: codexInstanceId,
+            driver: ProviderDriverKind.make("codex"),
+            model: "gpt-5.4",
+            optionDescriptors: [
+              {
+                id: "reasoningEffort",
+                label: "Reasoning",
+                type: "select",
+                options: [
+                  { id: "low", label: "Low" },
+                  { id: "high", label: "High" },
+                ],
+              },
+            ],
+          }),
+        ]),
+        adapterRegistryLayer([codexInstanceId]),
+        Layer.mock(ProjectService.ProjectService)({}),
+        Layer.mock(SecretRequests.SecretRequests)({}),
+        Layer.mock(RemoteDelegation.RemoteDelegation)({}),
+        Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
+        ServerSettings.layerTest(),
+      );
+      const client: McpInvocationScope = {
+        environmentId: EnvironmentId.make("environment:effort-send"),
+        requestNamespace: "client:effort-send",
+        thread: undefined,
+        client: { sessionId: "effort-send", label: "Claude Code", access: "full-access" },
+        capabilities: new Set(["orchestration"]),
+        issuedAt: 1,
+      };
+
+      yield* Effect.gen(function* () {
+        const service = yield* OrchestratorMcpService.OrchestratorMcpService;
+        yield* service.sendToThread(client, {
+          threadId,
+          message: "one",
+          effort: "high",
+          clientRequestId: "effort-send-1",
+        });
+        yield* service.sendToThread(client, {
+          threadId,
+          message: "two",
+          clientRequestId: "effort-send-2",
+        });
+        const captured = yield* Ref.get(sends);
+        assert.equal(captured.length, 2);
+        assert.deepEqual(captured[0]?.modelSelection?.options, [
+          { id: "reasoningEffort", value: "high" },
+        ]);
+        assert.equal(captured[1]?.modelSelection, undefined);
+      }).pipe(Effect.provide(layerOrchestratorService.pipe(Layer.provide(layerDependencies))));
+    }),
   );
 
   describe("scheduled tasks at modes above the caller's", () => {
