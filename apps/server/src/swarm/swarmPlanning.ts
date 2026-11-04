@@ -213,8 +213,12 @@ export const planAdmissions = (input: {
       .toSorted((left, right) => left.ordinal - right.ordinal);
     const swarmCap = Math.min(input.caps.global, swarm.maxConcurrent ?? input.caps.global);
     for (const member of queued) {
-      if (globalActive >= input.caps.global || (perSwarm.get(swarm.swarmId) ?? 0) >= swarmCap) {
+      if (globalActive >= input.caps.global) {
         queueReasons.set(memberRef(member), "global_cap");
+        continue;
+      }
+      if ((perSwarm.get(swarm.swarmId) ?? 0) >= swarmCap) {
+        queueReasons.set(memberRef(member), "swarm_cap");
         continue;
       }
       const instanceId = member.providerInstanceId;

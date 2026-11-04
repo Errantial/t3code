@@ -95,7 +95,7 @@ describe("planAdmissions", () => {
       now,
     });
     expect(keys(plan.admit)).toEqual(["swarm:a/m0", "swarm:b/m0"]);
-    expect(plan.queueReasons.get(memberRef(member(swarmA, 1)))).toBe("global_cap");
+    expect(plan.queueReasons.get(memberRef(member(swarmA, 1)))).toBe("swarm_cap");
   });
 
   it("does not let a full or paused instance block later members", () => {

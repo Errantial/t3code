@@ -67,6 +67,22 @@ export type SwarmPauseClass = typeof SwarmPauseClass.Type;
 export const SwarmStatus = Schema.Literals(["active", "completed", "cancelled", "detached"]);
 export type SwarmStatus = typeof SwarmStatus.Type;
 
+/**
+ * Why a member is queued. `queueReason` carries the kind, with `:<instanceId>` for
+ * `instance_cap`, `:<instanceId>:<until>` for `instance_paused`, and `:<at>` for `retry_after`.
+ */
+export const SwarmQueueReasonKind = Schema.Literals([
+  "global_cap",
+  "swarm_cap", // the swarm's own maxConcurrent
+  "instance_cap",
+  "instance_paused",
+  "any_of_unavailable",
+  "retry_after",
+  "budget",
+  "next_architect_turn",
+]);
+export type SwarmQueueReasonKind = typeof SwarmQueueReasonKind.Type;
+
 export const SwarmWakePolicy = Schema.Literals(["group", "failure", "batch"]);
 export type SwarmWakePolicy = typeof SwarmWakePolicy.Type;
 
