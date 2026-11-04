@@ -88,7 +88,10 @@ export type SwarmVerify = typeof SwarmVerify.Type;
 export const SwarmMemberTarget = Schema.Struct({
   ...OrchestratorMcpTarget.fields,
   anyOf: Schema.optional(
-    Schema.Array(ProviderInstanceId).check(Schema.isMinLength(2), Schema.isMaxLength(8)),
+    Schema.Array(ProviderInstanceId).check(Schema.isMinLength(2), Schema.isMaxLength(8)).annotate({
+      description:
+        "2-8 instances of one driver; the member runs on the least busy. Needs `model`; no providerInstanceId.",
+    }),
   ),
 });
 export type SwarmMemberTarget = typeof SwarmMemberTarget.Type;
@@ -100,11 +103,21 @@ const SwarmOwnsPaths = Schema.Array(TrimmedNonEmptyString).check(Schema.isMaxLen
 const SwarmMemberSettings = {
   role: Schema.optional(OrchestratorMcpTaskRole),
   target: Schema.optional(SwarmMemberTarget),
-  isolation: Schema.optional(Schema.Literals(["shared", "worktree"])),
+  isolation: Schema.optional(
+    Schema.Literals(["shared", "worktree"]).annotate({
+      description: "'worktree': own checkout from your commit. Two shared writers are refused.",
+    }),
+  ),
   runtimeMode: Schema.optional(OrchestratorMcpRuntimeMode),
-  interactionMode: Schema.optional(OrchestratorMcpInteractionMode),
+  interactionMode: Schema.optional(
+    OrchestratorMcpInteractionMode.annotate({ description: "'plan' members do not edit." }),
+  ),
   doneCriteria: Schema.optional(TrimmedNonEmptyString.check(Schema.isMaxLength(2_000))),
-  verify: Schema.optional(SwarmVerify),
+  verify: Schema.optional(
+    SwarmVerify.annotate({
+      description: "Command run in the member's checkout after it ends; a failure retries it.",
+    }),
+  ),
   maxTurns: Schema.optional(IntRange(1, 50)),
   maxWallClockMs: Schema.optional(IntRange(60_000, 86_400_000)),
   allowNestedSwarm: Schema.optional(Schema.Boolean),
@@ -115,7 +128,9 @@ export const SwarmMemberInput = Schema.Struct({
   title: OrchestratorMcpSwarmMemberInput.fields.title,
   task: OrchestratorMcpSwarmMemberInput.fields.task,
   ...SwarmMemberSettings,
-  ownsPaths: Schema.optional(SwarmOwnsPaths),
+  ownsPaths: Schema.optional(
+    SwarmOwnsPaths.annotate({ description: "Repo-relative paths this member may edit." }),
+  ),
 });
 export type SwarmMemberInput = typeof SwarmMemberInput.Type;
 
@@ -135,7 +150,9 @@ export const SwarmMapRow = Schema.Struct({
 export type SwarmMapRow = typeof SwarmMapRow.Type;
 
 export const SwarmMap = Schema.Struct({
-  task: OrchestratorMcpSwarmMemberInput.fields.task, // template
+  task: OrchestratorMcpSwarmMemberInput.fields.task.annotate({
+    description: "Template; {{name}} is filled from each row's vars, {{key}} is the row key.",
+  }),
   title: OrchestratorMcpTitle, // template
   ...SwarmMemberSettings,
   rows: Schema.Array(SwarmMapRow).check(
@@ -154,15 +171,38 @@ const SwarmMembers = Schema.Array(SwarmMemberInput).check(
 // checked by the handler, which names the field (invalid_request).
 export const SwarmCreateInput = Schema.Struct({
   title: OrchestratorMcpTitle,
-  members: Schema.optional(SwarmMembers),
-  map: Schema.optional(SwarmMap),
-  sharedContext: Schema.optional(Schema.String.check(Schema.isMaxLength(16_384))),
-  dataShape: Schema.optional(Schema.String.check(Schema.isMaxLength(2_000))),
-  wakePolicy: Schema.optional(SwarmWakePolicy), // default "group"
+  members: Schema.optional(
+    SwarmMembers.annotate({
+      description: "Up to 12 members. Give exactly one of members and map.",
+    }),
+  ),
+  map: Schema.optional(
+    SwarmMap.annotate({ description: "One template, up to 48 rows; each row becomes a member." }),
+  ),
+  sharedContext: Schema.optional(
+    Schema.String.check(Schema.isMaxLength(16_384)).annotate({
+      description: "Context every member gets once, instead of repeating it in each task.",
+    }),
+  ),
+  dataShape: Schema.optional(
+    Schema.String.check(Schema.isMaxLength(2_000)).annotate({
+      description: "Shape of the JSON `data` each member returns.",
+    }),
+  ),
+  wakePolicy: Schema.optional(
+    SwarmWakePolicy.annotate({
+      description:
+        "When results wake you: 'group' (default) as each finishes, 'failure' failures now and the rest at the end, 'batch' in groups.",
+    }),
+  ),
   wakeBatch: Schema.optional(SwarmWakeBatch),
   maxConcurrent: Schema.optional(IntRange(1, 48)), // can only lower the server caps
   maxTotalTurns: Schema.optional(IntRange(1, 2_400)), // can only lower the server setting
-  allowSharedWriters: Schema.optional(Schema.Boolean),
+  allowSharedWriters: Schema.optional(
+    Schema.Boolean.annotate({
+      description: "Allow several shared-checkout writers; each needs ownsPaths.",
+    }),
+  ),
   verify: Schema.optional(SwarmVerify), // default for members without their own
   clientRequestId: Schema.optional(OrchestratorMcpClientRequestId),
 });
@@ -226,7 +266,11 @@ export const SwarmCollectInput = Schema.Struct({
   swarmId: SwarmId,
   since: Schema.optional(TrimmedNonEmptyString.check(Schema.isMaxLength(512))), // a nextCursor
   keys: Schema.optional(SwarmMemberKeys),
-  fields: Schema.optional(Schema.Array(SwarmEnvelopeField).check(Schema.isMinLength(1))),
+  fields: Schema.optional(
+    Schema.Array(SwarmEnvelopeField)
+      .check(Schema.isMinLength(1))
+      .annotate({ description: "Envelope fields to return; status always comes." }),
+  ),
   maxBytes: Schema.optional(IntRange(4_096, 32_768)), // default 16_384
 });
 export type SwarmCollectInput = typeof SwarmCollectInput.Type;
@@ -368,3 +412,25 @@ export const SwarmCollectResult = Schema.Struct({
   nextCursor: Schema.NullOr(Schema.String),
 });
 export type SwarmCollectResult = typeof SwarmCollectResult.Type;
+
+/** `swarm_status` with `view: "members"`: one page of members, summaries only. */
+export const SwarmStatusMembersPage = Schema.Struct({
+  swarmId: SwarmId,
+  status: SwarmStatus,
+  members: Schema.Array(SwarmMemberResult),
+  total: NonNegativeInt,
+  nextOffset: Schema.NullOr(NonNegativeInt),
+});
+export type SwarmStatusMembersPage = typeof SwarmStatusMembersPage.Type;
+
+export const SwarmStatusResult = Schema.Union([SwarmStatusDigest, SwarmStatusMembersPage]);
+export type SwarmStatusResult = typeof SwarmStatusResult.Type;
+
+export const SwarmFollowupResult = Schema.Struct({
+  swarmId: SwarmId,
+  key: SwarmMemberKey,
+  followup: NonNegativeInt,
+  childThreadId: ThreadId,
+  status: SwarmMemberStatus,
+});
+export type SwarmFollowupResult = typeof SwarmFollowupResult.Type;

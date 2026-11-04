@@ -76,3 +76,47 @@ it("drops input strings outside the schema's literals, since rejected calls are 
     handoffSettings("t3_thread_launch", { workspaceStrategy: { type: "/home/me/secret" } }, {}),
   ).toEqual({ targetChosen: false, workspace: "root" });
 });
+
+it("reports swarm_create settings with the expanded member count and closed values only", () => {
+  expect(
+    handoffSettings(
+      "swarm_create",
+      {
+        title: "Audit",
+        map: {
+          task: "Audit {{key}}.",
+          title: "{{key}}",
+          target: { anyOf: ["a", "b"], model: "m" },
+          verify: { argv: ["pnpm", "test"] },
+          rows: [{ key: "x" }, { key: "y" }, { key: "z" }],
+        },
+        sharedContext: "secret context",
+        wakePolicy: "/home/me/secret",
+      },
+      undefined,
+    ),
+  ).toEqual({
+    batchSize: 3,
+    targetChosen: true,
+    wakePolicy: "group",
+    hasVerify: true,
+    shape: "map",
+    hasSharedContext: true,
+    hasAnyOf: true,
+  });
+  expect(
+    handoffSettings(
+      "swarm_create",
+      { title: "Pair", members: [{ key: "a" }, { key: "b", target: {} }], wakePolicy: "batch" },
+      undefined,
+    ),
+  ).toEqual({
+    batchSize: 2,
+    targetChosen: true,
+    wakePolicy: "batch",
+    hasVerify: false,
+    shape: "members",
+    hasSharedContext: false,
+    hasAnyOf: false,
+  });
+});

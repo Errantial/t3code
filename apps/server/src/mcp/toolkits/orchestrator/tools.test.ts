@@ -1,7 +1,10 @@
 import { expect, it } from "@effect/vitest";
 import * as Exit from "effect/Exit";
 import * as Schema from "effect/Schema";
-import { Tool } from "effect/ai";
+import * as Context from "effect/Context";
+import { McpSchema, Tool } from "effect/ai";
+
+import * as McpInvocationContext from "../../McpInvocationContext.ts";
 
 import { OrchestratorToolkit } from "./tools.ts";
 
@@ -38,6 +41,15 @@ it("accepts a create_swarm roster and keeps member limits in the schema", () => 
       }),
     ),
   ).toBe(false);
+});
+
+it("hides the legacy create_swarm while Swarm v2 is on", () => {
+  expect(
+    Context.getOrUndefined(
+      OrchestratorToolkit.tools.create_swarm.annotations,
+      McpSchema.EnabledWhen,
+    ),
+  ).toBe(McpInvocationContext.hiddenWhileSwarmV2On);
 });
 
 it("refuses a t3_thread_update whose fields do not fit its action", () => {

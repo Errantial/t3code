@@ -220,7 +220,9 @@ const CreateSwarmTool = Tool.make("create_swarm", {
 })
   .annotate(Tool.Title, "Launch a swarm of agents")
   .annotate(Tool.Destructive, true)
-  .annotate(Tool.OpenWorld, true);
+  .annotate(Tool.OpenWorld, true)
+  // Swarm v2's swarm_create replaces it while the Labs setting is on.
+  .annotate(McpSchema.EnabledWhen, McpInvocationContext.hiddenWhileSwarmV2On);
 
 const CreateThreadsTool = Tool.make("create_threads", {
   description:

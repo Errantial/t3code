@@ -9,6 +9,10 @@ export type T3McpToolSummaryAction =
   | "capabilities"
   | "delegate"
   | "swarm"
+  | "swarm-status"
+  | "swarm-cancel"
+  | "swarm-collect"
+  | "swarm-followup"
   | "task-status"
   | "task-cancel"
   | "schedule-run"
@@ -131,6 +135,19 @@ const T3_MCP_TOOLS: Readonly<Record<string, T3McpToolDefinition>> = {
   ),
   delegate_task: tool(["Delegate", "Delegating", "Delegated", "a child task"], "delegate"),
   create_swarm: tool(["Launch", "Launching", "Launched", "a swarm of agents"], "swarm"),
+  swarm_create: tool(["Launch", "Launching", "Launched", "a swarm of agents"], "swarm"),
+  swarm_add_members: tool(["Add", "Adding", "Added", "swarm members"], "swarm"),
+  swarm_retry: tool(["Retry", "Retrying", "Retried", "swarm members"], "swarm"),
+  swarm_status: tool(["Check", "Checking", "Checked", "a swarm"], "swarm-status"),
+  swarm_cancel: tool(
+    ["Cancel", "Canceling", "Requested cancellation of", "swarm members"],
+    "swarm-cancel",
+  ),
+  swarm_collect: tool(["Read", "Reading", "Read", "swarm results"], "swarm-collect"),
+  swarm_followup: tool(
+    ["Follow up with", "Following up with", "Followed up with", "a swarm member"],
+    "swarm-followup",
+  ),
   task_status: tool(["Get", "Getting", "Got", "delegated task status"], "task-status"),
   task_cancel: tool(
     ["Cancel", "Canceling", "Requested cancellation of", "a delegated task"],

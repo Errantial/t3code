@@ -1,11 +1,12 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { expect, it } from "@effect/vitest";
-import { ProviderInstanceId } from "@t3tools/contracts";
+import { EnvironmentId, ProviderInstanceId } from "@t3tools/contracts";
 import { McpProviderSessions } from "@t3tools/provider-core/server/McpProviderSessions";
+import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import { FetchHttpClient } from "effect/http";
-import { McpServer } from "effect/ai";
+import { McpSchema, McpServer } from "effect/ai";
 
 import { ServerSecretStore } from "../auth/ServerSecretStore.ts";
 import { ServerSelfUpdate } from "../cloud/selfUpdate.ts";
@@ -14,6 +15,7 @@ import { DeviceService } from "../device/DeviceService.ts";
 import { ServerEnvironment } from "../environment/ServerEnvironment.ts";
 import { GitWorkflowService } from "../git/GitWorkflowService.ts";
 import * as McpHttpServer from "../mcp/McpHttpServer.ts";
+import * as McpInvocationContext from "../mcp/McpInvocationContext.ts";
 import { PreviewAutomationBroker } from "../mcp/PreviewAutomationBroker.ts";
 import {
   CLAUDE_PROVIDER,
@@ -86,6 +88,35 @@ const toolHandlerServices = Layer.mergeAll(
 
 const utf8Bytes = (text: string) => Buffer.byteLength(text, "utf8");
 
+// A client sees only the tools whose EnabledWhen passes for its request scope.
+const budgetScope = {
+  environmentId: EnvironmentId.make("environment:budget"),
+  capabilities: new Set(),
+  issuedAt: 0,
+  requestNamespace: "budget",
+  thread: undefined,
+  client: undefined,
+} satisfies McpInvocationContext.McpInvocationScope;
+
+const listedToolJsonBytes = (scope: McpInvocationContext.McpInvocationScope) =>
+  Effect.gen(function* () {
+    const mcp = yield* McpServer.McpServer;
+    const listed = mcp.tools.filter(({ annotations }) => {
+      const enabledWhen = Context.getOrUndefined(annotations, McpSchema.EnabledWhen);
+      return enabledWhen === undefined || enabledWhen({ protocolVersion: "", capabilities: {} });
+    });
+    // The model sees these fields. outputSchema and annotations are protocol metadata.
+    return utf8Bytes(
+      JSON.stringify(
+        listed.map(({ tool }) => ({
+          name: tool.name,
+          description: tool.description,
+          inputSchema: tool.inputSchema,
+        })),
+      ),
+    );
+  }).pipe(Effect.provideService(McpInvocationContext.McpInvocationContext, scope));
+
 const claudeSystemAppend = () => {
   const { systemPrompt } = makeClaudeQueryOptions({
     modelSelection: {
@@ -114,20 +145,11 @@ const codexAdditionalContext = () =>
 // needs the agent-context-increase label. Lower the values when the text shrinks.
 it.effect("agent context matches the committed budget", () =>
   Effect.gen(function* () {
-    const mcp = yield* McpServer.McpServer;
     const measured = {
       claudeSystemAppendBytes: utf8Bytes(claudeSystemAppend()),
       codexAdditionalContextBytes: utf8Bytes(codexAdditionalContext()),
-      // The model sees these fields. outputSchema and annotations are protocol metadata.
-      mcpToolListJsonBytes: utf8Bytes(
-        JSON.stringify(
-          mcp.tools.map(({ tool }) => ({
-            name: tool.name,
-            description: tool.description,
-            inputSchema: tool.inputSchema,
-          })),
-        ),
-      ),
+      mcpToolListJsonBytes: yield* listedToolJsonBytes(budgetScope),
+      mcpToolListJsonBytesSwarmV2: yield* listedToolJsonBytes({ ...budgetScope, swarmV2: true }),
     };
 
     expect(
