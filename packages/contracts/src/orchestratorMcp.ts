@@ -45,7 +45,7 @@ import { ProviderOptionSelection, ProviderOptionSelectionValue } from "./model.t
 import { ProviderDriverKind, ProviderInstanceId } from "./providerInstance.ts";
 
 const OrchestratorMcpPrompt = TrimmedNonEmptyString.check(Schema.isMaxLength(120_000));
-const OrchestratorMcpTitle = TrimmedNonEmptyString.check(Schema.isMaxLength(512));
+export const OrchestratorMcpTitle = TrimmedNonEmptyString.check(Schema.isMaxLength(512));
 export const OrchestratorMcpClientRequestId = TrimmedNonEmptyString.check(Schema.isMaxLength(256))
   .check(
     Schema.makeFilter((value) =>
