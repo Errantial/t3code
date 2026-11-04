@@ -14,6 +14,7 @@ import {
   ProjectCreatePayload,
   ProjectUpdatePayload,
   ProjectId,
+  EnvironmentId,
   OrchestratorMcpClientRequestId,
   OrchestratorMcpEffort,
   OrchestratorMcpEnvironmentTarget,
@@ -32,6 +33,8 @@ import * as Schema from "effect/Schema";
 import { Tool, Toolkit } from "effect/ai";
 import * as ProjectService from "../../../project/ProjectService.ts";
 import * as ManagedProjectFolders from "../../../project/ManagedProjectFolders.ts";
+import * as ServerEnvironment from "../../../environment/ServerEnvironment.ts";
+import * as PeerLinks from "../../../peer/PeerLinks.ts";
 import * as ThreadManagementService from "../../../orchestration-v2/ThreadManagementService.ts";
 import * as SourceControlRepositoryService from "../../../sourceControl/SourceControlRepositoryService.ts";
 import * as GitVcsDriver from "../../../vcs/GitVcsDriver.ts";
@@ -94,6 +97,31 @@ const ProjectUpdateTool = Tool.make("t3_project_update", {
     ...ProjectUpdatePayload.fields,
   }),
 }).annotate(Tool.Destructive, true);
+const ProjectEnvironmentRoots = Tool.make("get_project_environment_roots", {
+  ...shared,
+  description:
+    "Read a project's workspace root on each linked environment. v1.2.0 stores the mapping; the target checks the path and repository when it uses it.",
+  parameters: Schema.Struct({ projectId: ProjectId }),
+  success: Schema.Struct({
+    projectId: ProjectId,
+    environmentRoots: Schema.Record(EnvironmentId, TrimmedNonEmptyString),
+  }),
+}).annotate(Tool.Readonly, true);
+const SetProjectEnvironmentRootTool = Tool.make("set_project_environment_root", {
+  ...shared,
+  description:
+    "Set or clear a project's workspace root for one linked environment. Requires full access. Pass root:null to clear. The path is stored, not checked here.",
+  parameters: Schema.Struct({
+    projectId: ProjectId,
+    environmentId: EnvironmentId,
+    root: Schema.NullOr(TrimmedNonEmptyString),
+  }),
+  success: Schema.Struct({
+    projectId: ProjectId,
+    environmentRoots: Schema.Record(EnvironmentId, TrimmedNonEmptyString),
+  }),
+  dependencies: [...shared.dependencies, PeerLinks.PeerLinks, ServerEnvironment.ServerEnvironment],
+}).annotate(Tool.Destructive, true);
 const ProjectDeleteTool = Tool.make("t3_project_delete", {
   ...shared,
   description: "Delete one project. Nonempty needs `force: true`. Folder on disk stays.",
@@ -126,6 +154,12 @@ const ThreadLaunchTool = Tool.make("t3_thread_launch", {
   parameters: Schema.Struct({
     environmentId: OrchestratorMcpEnvironmentTarget,
     projectId: Schema.optional(ProjectId),
+    repositoryKey: Schema.optional(
+      Schema.String.annotate({
+        description:
+          "Canonical git remote identity of your project, to place the thread on the target's matching project. Mutually exclusive with projectId; needs a linked environment.",
+      }),
+    ),
     scratch: Schema.optional(
       Schema.Boolean.annotate({
         description:
@@ -162,6 +196,7 @@ const ThreadLaunchTool = Tool.make("t3_thread_launch", {
     threadId: ThreadId,
     link: Schema.optional(Schema.String),
     projectId: ProjectId,
+    environmentId: EnvironmentId,
     modelSelection: ModelSelection,
     runId: Schema.NullOr(RunId),
     status: Schema.NullOr(OrchestrationV2RunStatus),
@@ -187,6 +222,8 @@ export const ProjectToolkit = Toolkit.make(
   ProjectReadTool,
   ProjectCreateTool,
   ProjectUpdateTool,
+  ProjectEnvironmentRoots,
+  SetProjectEnvironmentRootTool,
   ProjectDeleteTool,
   ProjectCloneTool,
 );

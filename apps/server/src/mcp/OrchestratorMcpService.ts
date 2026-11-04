@@ -2246,6 +2246,7 @@ const make = Effect.gen(function* () {
           "effort-v1",
           "thread-ref-v1",
           "thread-list-scope-v1",
+          "thread-placement-v1",
           ...(settings.executionTargetsEnabled ? [PEER_EXEC_CONTRACT] : []),
         ],
         ...(settings.executionTargetsEnabled ? { remoteExecution: settings.peerExecGrant } : {}),

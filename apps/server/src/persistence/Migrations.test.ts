@@ -128,6 +128,41 @@ describe("runMigrations", () => {
 });
 
 // The npm launcher reads the highest migration id from these file names.
+it.effect("reserves the peer-exec and environment-roots migration ids", () =>
+  Effect.gen(function* () {
+    yield* Effect.void;
+    assert.deepStrictEqual(
+      migrationManifest.filter(([id]) => id === 74 || id === 75),
+      [
+        [74, "PeerExecReceipts"],
+        [75, "ProjectionProjectsEnvironmentRoots"],
+      ],
+    );
+  }),
+);
+
+it.effect("075 adds environment_roots_json with an empty default and is idempotent", () =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    yield* runMigrations();
+    yield* sql`
+      INSERT INTO projection_projects
+        (project_id, title, workspace_root, default_model_selection_json,
+         default_thread_env_mode, auto_pull, favicon_path, project_icon_json,
+         scripts_json, created_at, updated_at, deleted_at)
+      VALUES
+        ('roots-project', 'Roots', '/tmp/roots', NULL, NULL, 0, NULL, NULL, '[]',
+         '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z', NULL)
+    `;
+    const rows = yield* sql<{ readonly environment_roots_json: string }>`
+      SELECT environment_roots_json FROM projection_projects WHERE project_id = 'roots-project'
+    `;
+    assert.strictEqual(rows[0]?.environment_roots_json, "{}");
+    assert.deepStrictEqual(yield* runMigrations(), []);
+  }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
+);
+
+// The npm launcher reads the highest migration id from these file names.
 it.effect("registers every migration file", () =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;

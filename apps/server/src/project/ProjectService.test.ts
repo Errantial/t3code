@@ -3,7 +3,13 @@ import * as Queue from "effect/Queue";
 import * as Tracer from "effect/Tracer";
 import { assert, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { CommandId, type Project, ProjectId, ProviderInstanceId } from "@t3tools/contracts";
+import {
+  CommandId,
+  EnvironmentId,
+  type Project,
+  ProjectId,
+  ProviderInstanceId,
+} from "@t3tools/contracts";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
@@ -242,6 +248,39 @@ it.layer(layerTest)("ProjectService", (it) => {
         changes.map((change) => change.event_type),
         ["project.created", "project.meta-updated", "project.meta-updated", "project.deleted"],
       );
+    }),
+  );
+
+  it.effect("stores per-environment roots and rejects a relative root", () =>
+    Effect.gen(function* () {
+      const service = yield* ProjectService.ProjectService;
+      const projectId = ProjectId.make("project:roots-test");
+      const environmentId = EnvironmentId.make("environment-roots-test");
+      yield* TestClock.setTime(Date.parse("2026-06-20T10:00:00.000Z"));
+      yield* service.create({
+        commandId: CommandId.make("command:roots:create"),
+        projectId,
+        title: "Roots",
+        workspaceRoot: "/work/roots",
+      });
+      const updated = yield* service.update({
+        commandId: CommandId.make("command:roots:update"),
+        projectId,
+        environmentRoots: { [environmentId]: "/srv/roots" },
+      });
+      assert.deepStrictEqual(updated.environmentRoots, { [environmentId]: "/srv/roots" });
+      const read = yield* service.getById(projectId);
+      assert.deepStrictEqual(Option.getOrThrow(read).environmentRoots, {
+        [environmentId]: "/srv/roots",
+      });
+      const rejected = yield* Effect.flip(
+        service.update({
+          commandId: CommandId.make("command:roots:bad"),
+          projectId,
+          environmentRoots: { [environmentId]: "relative/root" },
+        }),
+      );
+      assert.strictEqual(rejected._tag, "ProjectOperationError");
     }),
   );
 

@@ -1,5 +1,6 @@
 import {
   type CommandId,
+  type EnvironmentId,
   type EventId,
   MAX_SCRIPT_ID_LENGTH,
   type ModelSelection,
@@ -31,6 +32,7 @@ export interface ProjectMetaUpdateCommand {
   readonly projectId: ProjectId;
   readonly title?: string;
   readonly workspaceRoot?: string;
+  readonly environmentRoots?: Readonly<Record<EnvironmentId, string>>;
   readonly defaultModelSelection?: ModelSelection | null;
   readonly defaultThreadEnvMode?: ThreadEnvMode | null;
   readonly autoPull?: boolean;
@@ -103,6 +105,9 @@ export interface ProjectCommandState {
 
 const monogramSegmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
 const isScriptRunCommand = Schema.is(SCRIPT_RUN_COMMAND_PATTERN);
+/** Accept a POSIX or Windows absolute path; the target platform checks it at use time. */
+const isAbsoluteWorkspaceRoot = (value: string) =>
+  value.startsWith("/") || value.startsWith("\\\\") || /^[A-Za-z]:[\\/]/.test(value);
 
 /** Read state and commit the planned event under the project lock. */
 export function planProjectCommand(input: {
@@ -191,6 +196,15 @@ export function planProjectCommand(input: {
         const conflict = requireWorkspaceAvailable(command.workspaceRoot);
         if (conflict !== undefined) return Result.fail(conflict);
       }
+      if (command.environmentRoots !== undefined) {
+        for (const [environmentId, root] of Object.entries(command.environmentRoots)) {
+          if (!isAbsoluteWorkspaceRoot(root)) {
+            return invariant(
+              `Environment root for ${environmentId} must be an absolute path (got ${root}).`,
+            );
+          }
+        }
+      }
       return Result.succeed({
         ...base,
         type: "project.meta-updated",
@@ -198,6 +212,9 @@ export function planProjectCommand(input: {
           projectId: command.projectId,
           ...(command.title === undefined ? {} : { title: command.title }),
           ...(command.workspaceRoot === undefined ? {} : { workspaceRoot: command.workspaceRoot }),
+          ...(command.environmentRoots === undefined
+            ? {}
+            : { environmentRoots: command.environmentRoots }),
           ...(command.defaultModelSelection === undefined
             ? {}
             : { defaultModelSelection: command.defaultModelSelection }),
