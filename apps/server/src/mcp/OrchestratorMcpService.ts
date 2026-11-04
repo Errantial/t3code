@@ -33,6 +33,7 @@ import {
   type OrchestratorMcpScheduleTaskInput,
   type OrchestratorMcpScheduleTaskResult,
   type OrchestratorMcpTarget,
+  type ProviderDriverKind,
   type OrchestratorMcpTaskCancelInput,
   type OrchestratorMcpTaskCancelResult,
   type OrchestratorMcpUpdateScheduledTaskInput,
@@ -145,9 +146,10 @@ const DEFAULT_THREAD_READ_LIMIT = 50;
 const DEFAULT_THREAD_RUN_LIMIT = 10;
 const DEFAULT_THREAD_ITEM_MAX_CHARS = 20_000;
 
-interface ResolvedTarget {
+export interface ResolvedTarget {
   readonly modelSelection: ModelSelection;
   readonly supportedRuntimeModes: ReadonlyArray<RuntimeMode> | undefined;
+  readonly driver: ProviderDriverKind;
 }
 
 type TerminalTaskStatus = Extract<
@@ -217,6 +219,15 @@ export interface OrchestratorMcpServiceShape {
     scope: McpInvocationScope,
     input: OrchestratorMcpThreadInterruptInput,
   ) => Effect.Effect<OrchestratorMcpThreadInterruptResult, OrchestratorMcpFailure>;
+  /** Swarm v2 (internal, no MCP schema): resolves a member target as delegate_task does. */
+  readonly resolveSwarmTarget: (
+    parent: Pick<OrchestrationV2ThreadProjection, "thread">,
+    target: OrchestratorMcpTarget | undefined,
+  ) => Effect.Effect<ResolvedTarget, OrchestratorMcpFailure>;
+  /** Swarm v2 (internal): the parent checkout commit a worktree member starts from. */
+  readonly resolveWorktreeBase: (
+    parent: Pick<OrchestrationV2ThreadProjection, "thread">,
+  ) => Effect.Effect<string, OrchestratorMcpFailure>;
 }
 
 export class OrchestratorMcpService extends Context.Service<
@@ -1417,8 +1428,46 @@ const make = Effect.gen(function* () {
     return {
       modelSelection: { instanceId, model, ...(options === undefined ? {} : { options }) },
       supportedRuntimeModes: provider.supportedRuntimeModes,
+      driver: provider.driver,
     };
   });
+
+  const resolveWorktreeBase = Effect.fn("OrchestratorMcpService.resolveWorktreeBase")(function* (
+    parent: Pick<OrchestrationV2ThreadProjection, "thread">,
+  ) {
+    const project = yield* requireProject(parent.thread.projectId);
+    const base = yield* gitDriver
+      .resolveCommit({
+        cwd: parent.thread.worktreePath ?? project.workspaceRoot,
+        revision: "HEAD",
+      })
+      .pipe(
+        Effect.mapError(() =>
+          failure("invalid_request", "Unable to resolve the parent checkout commit."),
+        ),
+      );
+    // Launch preparation creates the worktree from the project root, so a
+    // parent checkout in another repository (such as a Git folder inside
+    // Scratch) would hand it a commit it cannot find.
+    if (parent.thread.worktreePath !== null) {
+      yield* gitDriver
+        .resolveCommit({ cwd: project.workspaceRoot, revision: base.commitSha })
+        .pipe(
+          Effect.mapError(() =>
+            failure(
+              "invalid_request",
+              `Isolation "worktree" creates the child checkout in project "${project.title}" (${project.workspaceRoot}), which does not contain the parent checkout's commit. Use isolation "shared" to work in the parent's checkout.`,
+            ),
+          ),
+        );
+    }
+    return base.commitSha;
+  });
+
+  const resolveSwarmTarget: OrchestratorMcpServiceShape["resolveSwarmTarget"] = (parent, target) =>
+    loadProviders.pipe(
+      Effect.flatMap((providers) => resolveTargetRechecking({ parent, target, providers })),
+    );
 
   const requestKey = (clientRequestId: string | undefined): Effect.Effect<string> =>
     clientRequestId === undefined
@@ -1901,6 +1950,8 @@ const make = Effect.gen(function* () {
   });
 
   return OrchestratorMcpService.of({
+    resolveSwarmTarget,
+    resolveWorktreeBase,
     scheduleTask: Effect.fn("OrchestratorMcpService.scheduleTask")(function* (scope, input) {
       const { parent, limits } = yield* loadCaller(scope);
       const projectId = yield* resolveProjectTarget(parent, input.projectId);
@@ -2317,33 +2368,8 @@ const make = Effect.gen(function* () {
       );
       let workspaceStrategy: OrchestrationV2ThreadLaunchWorkspaceStrategy | undefined;
       if (input.isolation === "worktree" && !isRetryOfAcceptedDelegation) {
-        const project = yield* requireProject(parent.thread.projectId);
-        const base = yield* gitDriver
-          .resolveCommit({
-            cwd: parent.thread.worktreePath ?? project.workspaceRoot,
-            revision: "HEAD",
-          })
-          .pipe(
-            Effect.mapError(() =>
-              failure("invalid_request", "Unable to resolve the parent checkout commit."),
-            ),
-          );
-        // Launch preparation creates the worktree from the project root, so a
-        // parent checkout in another repository (such as a Git folder inside
-        // Scratch) would hand it a commit it cannot find.
-        if (parent.thread.worktreePath !== null) {
-          yield* gitDriver
-            .resolveCommit({ cwd: project.workspaceRoot, revision: base.commitSha })
-            .pipe(
-              Effect.mapError(() =>
-                failure(
-                  "invalid_request",
-                  `Isolation "worktree" creates the child checkout in project "${project.title}" (${project.workspaceRoot}), which does not contain the parent checkout's commit. Use isolation "shared" to work in the parent's checkout.`,
-                ),
-              ),
-            );
-        }
-        workspaceStrategy = { type: "worktree", baseRef: base.commitSha, startFromOrigin: false };
+        const baseRef = yield* resolveWorktreeBase(parent);
+        workspaceStrategy = { type: "worktree", baseRef, startFromOrigin: false };
       }
       // ThreadManagementService.dispatch is the chokepoint for this command
       // type's own enablement check, using the same command id and its

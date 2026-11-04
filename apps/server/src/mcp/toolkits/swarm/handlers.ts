@@ -3,7 +3,10 @@ import { OrchestratorMcpFailure } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 
 import * as ServerSettings from "../../../serverSettings.ts";
+import * as SwarmService from "../../../swarm/SwarmService.ts";
+import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import * as McpToolAccess from "../../McpToolAccess.ts";
+import * as OrchestratorMcpService from "../../OrchestratorMcpService.ts";
 import { SwarmToolkit } from "./tools.ts";
 
 const swarmFailure = (
@@ -33,7 +36,22 @@ const notYetAvailable = (tool: string) =>
   );
 
 export const layer = McpToolAccess.toLayer(SwarmToolkit, {
-  swarm_create: McpToolAccess.actsAsCaller(() => notYetAvailable("swarm_create")),
+  swarm_create: McpToolAccess.actsAsCaller((input) =>
+    Effect.gen(function* () {
+      yield* requireSwarmV2;
+      const scope = yield* McpInvocationContext.McpInvocationContext;
+      const swarms = yield* SwarmService.SwarmService;
+      const orchestrator = yield* OrchestratorMcpService.OrchestratorMcpService;
+      return yield* swarms.create({
+        scope,
+        input,
+        resolver: {
+          resolveTarget: orchestrator.resolveSwarmTarget,
+          resolveWorktreeBase: orchestrator.resolveWorktreeBase,
+        },
+      });
+    }),
+  ),
   swarm_status: McpToolAccess.readsAsCaller(() => notYetAvailable("swarm_status")),
   swarm_cancel: McpToolAccess.actsAsCaller(() => notYetAvailable("swarm_cancel")),
   swarm_retry: McpToolAccess.actsAsCaller(() => notYetAvailable("swarm_retry")),

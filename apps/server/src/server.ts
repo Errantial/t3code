@@ -73,6 +73,7 @@ import * as PeerForwarding from "./peer/PeerForwarding.ts";
 import * as PeerExec from "./peer/PeerExec.ts";
 import * as PeerExecReceipts from "./peer/PeerExecReceipts.ts";
 import * as RemoteDelegation from "./peer/RemoteDelegation.ts";
+import * as SwarmService from "./swarm/SwarmService.ts";
 import * as SwarmStore from "./swarm/SwarmStore.ts";
 import * as PeerLinkRequests from "./peer/PeerLinkRequests.ts";
 import * as PeerLinks from "./peer/PeerLinks.ts";
@@ -753,6 +754,8 @@ const layerMakeRoutes = Layer.mergeAll(
     Layer.provide(ProviderAdapterRegistry.layerFromProviderInstanceRegistry),
     Layer.provide(McpOAuth.layerMcpClientAuthenticator),
   ),
+  // The Swarm v2 scheduler; it admits nothing while swarmV2Enabled is off.
+  Layer.effectDiscard(SwarmService.SwarmService.pipe(Effect.flatMap((swarms) => swarms.start()))),
   // Follows delegated tasks running in linked environments, including after a restart.
   Layer.effectDiscard(
     RemoteDelegation.RemoteDelegation.pipe(Effect.flatMap((remote) => remote.start())),
@@ -789,8 +792,8 @@ const layerMakeRoutes = Layer.mergeAll(
       Layer.provide(RuntimeLayer.layerProjectService),
     ),
   ),
-  // Swarm v2 records (migration 076); nothing reads or writes them while swarmV2Enabled is off.
-  Layer.provide(SwarmStore.layer),
+  // Swarm v2 (migration 076); nothing reads or writes the swarm tables while swarmV2Enabled is off.
+  Layer.provide(SwarmService.layer.pipe(Layer.provideMerge(SwarmStore.layer))),
   Layer.provide(ServerSelfUpdate.layer.pipe(Layer.provide(layerDesktopAppUpdate))),
   Layer.provide(layerCommandReadiness),
   Layer.provide(ServerHttp.layerBrowserApiCors),

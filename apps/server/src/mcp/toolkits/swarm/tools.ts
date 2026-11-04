@@ -16,6 +16,8 @@ import {
 import { McpSchema, Tool, Toolkit } from "effect/ai";
 
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
+import * as OrchestratorMcpService from "../../OrchestratorMcpService.ts";
+import * as SwarmService from "../../../swarm/SwarmService.ts";
 import * as ThreadManagementService from "../../../orchestration-v2/ThreadManagementService.ts";
 import * as ServerSettings from "../../../serverSettings.ts";
 
@@ -28,6 +30,8 @@ const base = {
     McpInvocationContext.McpInvocationContext,
     ServerSettings.ServerSettingsService,
     ThreadManagementService.ThreadManagementService,
+    OrchestratorMcpService.OrchestratorMcpService,
+    SwarmService.SwarmService,
   ],
 };
 

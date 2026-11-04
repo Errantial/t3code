@@ -1,0 +1,263 @@
+import type {
+  ModelSelection,
+  ProviderDriverKind,
+  ProviderInteractionMode,
+  RuntimeMode,
+  SwarmId,
+  SwarmMemberStatus,
+  SwarmWarning,
+} from "@t3tools/contracts";
+
+import { interactionModeRank, runtimeModeRank } from "../mcp/delegatedTaskModes.ts";
+
+// Pure Swarm v2 planning: what a member may run as, who may write where, and who is admitted
+// next under the caps. No I/O, so the scheduler and its tests share it exactly.
+
+/** What `swarm_members.spec_json` holds for a member. Task text is stored, never logged. */
+export interface SwarmMemberSpec {
+  readonly key: string;
+  readonly title: string;
+  /** The prompt the child receives, with its role applied. */
+  readonly task: string;
+  readonly isolation: "shared" | "worktree";
+  readonly ownsPaths?: ReadonlyArray<string>;
+  readonly allowNestedSwarm?: boolean;
+  /** Resolved once at create, per distinct target. */
+  readonly modelSelection: ModelSelection;
+  readonly supportedRuntimeModes?: ReadonlyArray<RuntimeMode>;
+  readonly driver: ProviderDriverKind;
+  /** The modes resolved at create are ceilings; an admission never runs above them. */
+  readonly runtimeCeiling: RuntimeMode;
+  readonly interactionCeiling: ProviderInteractionMode;
+}
+
+export const narrowerRuntimeMode = (left: RuntimeMode, right: RuntimeMode): RuntimeMode =>
+  runtimeModeRank(left) <= runtimeModeRank(right) ? left : right;
+
+export const narrowerInteractionMode = (
+  left: ProviderInteractionMode,
+  right: ProviderInteractionMode,
+): ProviderInteractionMode =>
+  interactionModeRank(left) <= interactionModeRank(right) ? left : right;
+
+/** A writer edits files: its interaction mode is `default`, not `plan`. */
+export const isWriter = (interactionMode: ProviderInteractionMode) =>
+  interactionModeRank(interactionMode) > 0;
+
+const FINAL_STATUSES: ReadonlySet<SwarmMemberStatus> = new Set([
+  "verified",
+  "claimed_done",
+  "failed",
+  "cancelled",
+  "detached",
+]);
+
+export const isFinalMemberStatus = (status: SwarmMemberStatus) => FINAL_STATUSES.has(status);
+
+/** Statuses that hold a concurrency slot. `limit_wait` frees its slot (SW-A8). */
+const SLOT_STATUSES: ReadonlySet<SwarmMemberStatus> = new Set([
+  "launching",
+  "running",
+  "verifying",
+]);
+
+const holdsSlot = (status: SwarmMemberStatus) => SLOT_STATUSES.has(status);
+
+/** Drivers that serve one turn at a time per account, so their default per-instance cap is 1. */
+const SERIAL_DRIVERS: ReadonlySet<string> = new Set(["chatgptBrowser"]);
+
+export interface SwarmCaps {
+  readonly global: number;
+  readonly perInstance: number;
+  readonly instanceOverrides: Readonly<Record<string, number>>;
+}
+
+export const instanceCap = (
+  caps: SwarmCaps,
+  instanceId: string,
+  driver: ProviderDriverKind | undefined,
+): number =>
+  caps.instanceOverrides[instanceId] ??
+  (driver !== undefined && SERIAL_DRIVERS.has(driver) ? 1 : caps.perInstance);
+
+export interface WriterCandidate {
+  readonly key: string;
+  readonly swarmId?: SwarmId;
+  readonly isolation: "shared" | "worktree";
+  readonly writer: boolean;
+  readonly ownsPaths?: ReadonlyArray<string> | undefined;
+}
+
+const sharedWriters = (members: ReadonlyArray<WriterCandidate>) =>
+  members.filter((member) => member.writer && member.isolation === "shared");
+
+/**
+ * Two or more non-final shared-checkout writers would edit the architect's checkout at once.
+ * That is refused unless `allowSharedWriters` is set and every shared writer has `ownsPaths`.
+ * Returns the refusal message, or undefined when the members may run.
+ */
+export const sharedWriterRefusal = (input: {
+  readonly members: ReadonlyArray<WriterCandidate>;
+  readonly allowSharedWriters: boolean;
+}): string | undefined => {
+  const writers = sharedWriters(input.members);
+  if (writers.length < 2) return undefined;
+  if (input.allowSharedWriters && writers.every((writer) => (writer.ownsPaths?.length ?? 0) > 0)) {
+    return undefined;
+  }
+  const keys = writers.map((writer) => `'${writer.key}'`).join(", ");
+  return `Members ${keys} would edit the same checkout at once. Give them isolation: "worktree", set interactionMode: "plan" for read-only work, or set allowSharedWriters with ownsPaths on every shared writer.`;
+};
+
+/** A path as compared: a glob by its literal prefix, without `./` or trailing slashes. */
+const comparablePath = (path: string) => {
+  const glob = path.search(/[*?[]/);
+  return (glob === -1 ? path : path.slice(0, glob)).replace(/^\.\//, "").replace(/\/+$/, "");
+};
+
+/** One path is equal to, or a directory prefix of, the other (globs by their literal prefix). */
+export const pathsOverlap = (left: string, right: string): boolean => {
+  const a = comparablePath(left);
+  const b = comparablePath(right);
+  const contains = (outer: string, inner: string) =>
+    outer === "" || inner === outer || inner.startsWith(`${outer}/`);
+  return contains(a, b) || contains(b, a);
+};
+
+/** `owns_paths_overlap` warnings between non-final writers; they never fail the call. */
+export const ownsPathsOverlapWarnings = (
+  members: ReadonlyArray<WriterCandidate>,
+): ReadonlyArray<SwarmWarning> => {
+  const writers = members.filter((member) => member.writer && (member.ownsPaths?.length ?? 0) > 0);
+  const warnings: Array<SwarmWarning> = [];
+  for (let i = 0; i < writers.length; i += 1) {
+    for (let j = i + 1; j < writers.length; j += 1) {
+      const left = writers[i]!;
+      const right = writers[j]!;
+      const path = left.ownsPaths!.find((candidate) =>
+        right.ownsPaths!.some((other) => pathsOverlap(candidate, other)),
+      );
+      if (path === undefined) continue;
+      warnings.push({
+        kind: "owns_paths_overlap",
+        keys: [left.key, right.key],
+        path,
+        message: `Members '${left.key}' and '${right.key}' both own '${path}'.`,
+      });
+    }
+  }
+  return warnings;
+};
+
+export interface PlannedSwarm {
+  readonly swarmId: SwarmId;
+  readonly createdAt: string;
+  readonly maxConcurrent: number | null;
+  /** False once the anchor cohort is no longer open, or the swarm is not active. */
+  readonly admits: boolean;
+}
+
+export interface PlannedMember {
+  readonly swarmId: SwarmId;
+  readonly memberKey: string;
+  readonly ordinal: number;
+  readonly status: SwarmMemberStatus;
+  readonly providerInstanceId: string | null;
+  readonly driver: ProviderDriverKind | undefined;
+}
+
+export interface AdmissionPlan {
+  readonly admit: ReadonlyArray<PlannedMember>;
+  /** The queue reason for every queued member that is not admitted. */
+  readonly queueReasons: ReadonlyMap<string, string>;
+}
+
+export const memberRef = (member: Pick<PlannedMember, "swarmId" | "memberKey">) =>
+  `${member.swarmId}\u0000${member.memberKey}`;
+
+/**
+ * Who is admitted next: swarm creation time, then member ordinal. A member that cannot start
+ * because its instance is full or paused does not block later ones that can.
+ */
+export const planAdmissions = (input: {
+  readonly swarms: ReadonlyArray<PlannedSwarm>;
+  readonly members: ReadonlyArray<PlannedMember>;
+  readonly caps: SwarmCaps;
+  /** Paused instances and the ISO time their pause ends. */
+  readonly pauses: ReadonlyMap<string, string>;
+  readonly now: string;
+}): AdmissionPlan => {
+  const active = input.members.filter((member) => holdsSlot(member.status));
+  let globalActive = active.length;
+  const perInstance = new Map<string, number>();
+  const perSwarm = new Map<string, number>();
+  for (const member of active) {
+    if (member.providerInstanceId !== null) {
+      perInstance.set(
+        member.providerInstanceId,
+        (perInstance.get(member.providerInstanceId) ?? 0) + 1,
+      );
+    }
+    perSwarm.set(member.swarmId, (perSwarm.get(member.swarmId) ?? 0) + 1);
+  }
+  const admit: Array<PlannedMember> = [];
+  const queueReasons = new Map<string, string>();
+  const swarms = input.swarms.toSorted(
+    (left, right) =>
+      left.createdAt.localeCompare(right.createdAt) || left.swarmId.localeCompare(right.swarmId),
+  );
+  for (const swarm of swarms) {
+    if (!swarm.admits) continue;
+    const queued = input.members
+      .filter((member) => member.swarmId === swarm.swarmId && member.status === "queued")
+      .toSorted((left, right) => left.ordinal - right.ordinal);
+    const swarmCap = Math.min(input.caps.global, swarm.maxConcurrent ?? input.caps.global);
+    for (const member of queued) {
+      if (globalActive >= input.caps.global || (perSwarm.get(swarm.swarmId) ?? 0) >= swarmCap) {
+        queueReasons.set(memberRef(member), "global_cap");
+        continue;
+      }
+      const instanceId = member.providerInstanceId;
+      if (instanceId !== null) {
+        const until = input.pauses.get(instanceId);
+        if (until !== undefined && until > input.now) {
+          queueReasons.set(memberRef(member), `instance_paused:${instanceId}:${until}`);
+          continue;
+        }
+        if (
+          (perInstance.get(instanceId) ?? 0) >= instanceCap(input.caps, instanceId, member.driver)
+        ) {
+          queueReasons.set(memberRef(member), `instance_cap:${instanceId}`);
+          continue;
+        }
+        perInstance.set(instanceId, (perInstance.get(instanceId) ?? 0) + 1);
+      }
+      globalActive += 1;
+      perSwarm.set(swarm.swarmId, (perSwarm.get(swarm.swarmId) ?? 0) + 1);
+      admit.push(member);
+    }
+  }
+  return { admit, queueReasons };
+};
+
+/** One `serial_instance` warning per instance whose effective cap is 1. */
+export const serialInstanceWarnings = (input: {
+  readonly members: ReadonlyArray<{
+    readonly key: string;
+    readonly instanceId: string;
+    readonly driver: ProviderDriverKind;
+  }>;
+  readonly caps: SwarmCaps;
+}): ReadonlyArray<SwarmWarning> => {
+  const byInstance = new Map<string, Array<string>>();
+  for (const member of input.members) {
+    if (instanceCap(input.caps, member.instanceId, member.driver) !== 1) continue;
+    byInstance.set(member.instanceId, [...(byInstance.get(member.instanceId) ?? []), member.key]);
+  }
+  return [...byInstance].map(([instanceId, keys]) => ({
+    kind: "serial_instance" as const,
+    keys,
+    instanceId: instanceId as SwarmWarning["instanceId"] & string,
+    message: `Members on instance ${instanceId} run one at a time.`,
+  }));
+};

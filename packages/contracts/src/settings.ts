@@ -1149,6 +1149,9 @@ export const StorageCleanupSettings = Schema.Struct({
 });
 export type StorageCleanupSettings = typeof StorageCleanupSettings.Type;
 
+/** Swarm v2 concurrency caps accept 1-48, so raising them is a settings change (D5). */
+const SwarmCapSetting = Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 48 }));
+
 export const ServerSettings = Schema.Struct({
   // Null means unmigrated; empty is authoritative and must not resurrect cleared preferences.
   favorites: Schema.NullOr(ModelFavorites).pipe(Schema.withDecodingDefault(Effect.succeed(null))),
@@ -1241,6 +1244,16 @@ export const ServerSettings = Schema.Struct({
    * only); on shows the `swarm_*` tools instead.
    */
   swarmV2Enabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+  /** Swarm v2: members running at once across every swarm here. */
+  swarmMaxConcurrent: SwarmCapSetting.pipe(Schema.withDecodingDefault(Effect.succeed(8))),
+  /** Swarm v2: members running at once on one provider instance (ChatGPT/CoS: 1). */
+  swarmMaxConcurrentPerInstance: SwarmCapSetting.pipe(
+    Schema.withDecodingDefault(Effect.succeed(4)),
+  ),
+  /** Swarm v2: per-instance overrides of the per-instance cap. */
+  swarmInstanceCaps: Schema.Record(Schema.String, SwarmCapSetting).pipe(
+    Schema.withDecodingDefault(Effect.succeed({})),
+  ),
   /**
    * What a linked environment may run here, separate from orchestration access.
    * Set only on the machine being executed on. Defaults to off.
@@ -1603,6 +1616,9 @@ export const ServerSettingsPatch = Schema.Struct({
   linkedEnvironmentsEnabled: Schema.optionalKey(Schema.Boolean),
   executionTargetsEnabled: Schema.optionalKey(Schema.Boolean),
   swarmV2Enabled: Schema.optionalKey(Schema.Boolean),
+  swarmMaxConcurrent: Schema.optionalKey(SwarmCapSetting),
+  swarmMaxConcurrentPerInstance: Schema.optionalKey(SwarmCapSetting),
+  swarmInstanceCaps: Schema.optionalKey(Schema.Record(Schema.String, SwarmCapSetting)),
   peerExecGrant: Schema.optionalKey(PeerExecGrant),
   peerExecRoots: Schema.optionalKey(Schema.Array(Schema.String)),
   backgroundActivity: Schema.optionalKey(
