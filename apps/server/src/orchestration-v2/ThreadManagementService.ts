@@ -79,10 +79,14 @@ export function withCreationProvenance(
       const { linkOrigin: _linkOrigin, delegatedFrom: _delegatedFrom, ...rest } = command;
       return { ...rest, ...provenance };
     }
+    case "delegated_task.request": {
+      // Only the server's swarm scheduler admits against an ended anchor run.
+      const { swarmAdmission: _swarmAdmission, ...rest } = command;
+      return { ...rest, ...provenance };
+    }
     case "message.dispatch":
     case "thread.fork":
     case "thread.merge_back":
-    case "delegated_task.request":
       return { ...command, ...provenance };
     default:
       return command;
