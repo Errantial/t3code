@@ -473,6 +473,13 @@ export const SETTINGS_SEARCH_ITEMS = [
     searchTerms: ["beta fleet shell command remote execute file read ssh peer"],
   },
   {
+    id: "swarm-v2-beta",
+    title: "Swarm v2",
+    to: "/settings/labs",
+    scope: "environment",
+    searchTerms: ["beta swarm agents parallel members queue verify fan out map architect"],
+  },
+  {
     id: "remote-execution-beta",
     title: "Remote execution",
     to: "/settings/labs",

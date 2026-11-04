@@ -1237,6 +1237,11 @@ export const ServerSettings = Schema.Struct({
    */
   executionTargetsEnabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   /**
+   * Labs: Swarm v2. Off keeps the MCP tool list and swarm behavior of v1.2.0 (`create_swarm`
+   * only); on shows the `swarm_*` tools instead.
+   */
+  swarmV2Enabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+  /**
    * What a linked environment may run here, separate from orchestration access.
    * Set only on the machine being executed on. Defaults to off.
    */
@@ -1597,6 +1602,7 @@ export const ServerSettingsPatch = Schema.Struct({
   guestSharingEnabled: Schema.optionalKey(Schema.Boolean),
   linkedEnvironmentsEnabled: Schema.optionalKey(Schema.Boolean),
   executionTargetsEnabled: Schema.optionalKey(Schema.Boolean),
+  swarmV2Enabled: Schema.optionalKey(Schema.Boolean),
   peerExecGrant: Schema.optionalKey(PeerExecGrant),
   peerExecRoots: Schema.optionalKey(Schema.Array(Schema.String)),
   backgroundActivity: Schema.optionalKey(

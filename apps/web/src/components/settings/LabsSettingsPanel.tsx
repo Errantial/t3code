@@ -24,6 +24,7 @@ export function LabsSettingsPanel() {
         {hasCloudPublicConfig() ? <GuestLinksRowWithSignIn /> : <GuestLinksRow />}
         <LinkedEnvironmentsRow />
         <ExecutionTargetsRow />
+        <SwarmV2Row />
         <RemoteExecutionRow />
         <SimlockHostsRow />
       </SettingsSection>
@@ -181,6 +182,33 @@ function ExecutionTargetsRow() {
             updateSettings({ executionTargetsEnabled: Boolean(checked) })
           }
           aria-label="Execution targets"
+        />
+      }
+    />
+  );
+}
+
+function SwarmV2Row() {
+  const settings = useScopedSettings();
+  const updateSettings = useUpdateScopedSettings();
+  return (
+    <SettingsRow
+      serverScoped
+      {...searchableSetting("swarm-v2-beta")}
+      settingKeys={["swarmV2Enabled"]}
+      description={
+        <>
+          Give agents the <code>swarm_*</code> tools in place of <code>create_swarm</code>: members
+          that wait for a free slot, verify their work, and report back as a group. Off keeps
+          today&apos;s swarm tool.
+        </>
+      }
+      control={
+        <ScopedSwitch
+          settingKeys={["swarmV2Enabled"]}
+          checked={settings.swarmV2Enabled}
+          onCheckedChange={(checked) => updateSettings({ swarmV2Enabled: Boolean(checked) })}
+          aria-label="Swarm v2"
         />
       }
     />
