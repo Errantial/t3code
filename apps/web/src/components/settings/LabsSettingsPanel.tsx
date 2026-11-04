@@ -1,9 +1,11 @@
 import { useAuth } from "@clerk/react";
+import type { PeerExecGrant } from "@t3tools/contracts";
 import { Link } from "@tanstack/react-router";
 
 import { hasCloudPublicConfig } from "~/cloud/publicConfig";
 import { useT3ConnectAuthPrompt } from "../clerk/useT3ConnectAuthPrompt";
 import { Button } from "../ui/button";
+import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
 import { Switch } from "../ui/switch";
 import { ScopedSwitch } from "./ScopedSwitch";
 import { SettingsPageContainer, SettingsRow, SettingsSection } from "./settingsLayout";
@@ -21,6 +23,8 @@ export function LabsSettingsPanel() {
         {/* Clerk is only mounted when this build has T3 Connect. */}
         {hasCloudPublicConfig() ? <GuestLinksRowWithSignIn /> : <GuestLinksRow />}
         <LinkedEnvironmentsRow />
+        <ExecutionTargetsRow />
+        <RemoteExecutionRow />
         <SimlockHostsRow />
       </SettingsSection>
       <LegacyFeaturesSection />
@@ -145,6 +149,77 @@ function LinkedEnvironmentsRow() {
           }
           aria-label="Linked environments"
         />
+      }
+    />
+  );
+}
+
+function ExecutionTargetsRow() {
+  const settings = useScopedSettings();
+  const updateSettings = useUpdateScopedSettings();
+  return (
+    <SettingsRow
+      serverScoped
+      {...searchableSetting("execution-targets-beta")}
+      settingKeys={["executionTargetsEnabled"]}
+      description={
+        <>
+          Let agents run commands and read files on this machine through <code>t3_shell</code> and{" "}
+          <code>t3_fs_read</code>, on this machine or a linked one. Enabling this here only offers
+          the tools; a linked environment also needs Remote execution granted in{" "}
+          <Link to="/settings/connections" className="underline underline-offset-2">
+            Connections
+          </Link>
+          . Provisioning and file writes are not included.
+        </>
+      }
+      control={
+        <ScopedSwitch
+          settingKeys={["executionTargetsEnabled"]}
+          checked={settings.executionTargetsEnabled}
+          onCheckedChange={(checked) =>
+            updateSettings({ executionTargetsEnabled: Boolean(checked) })
+          }
+          aria-label="Execution targets"
+        />
+      }
+    />
+  );
+}
+
+function RemoteExecutionRow() {
+  const settings = useScopedSettings();
+  const updateSettings = useUpdateScopedSettings();
+  const labels: Record<PeerExecGrant, string> = {
+    off: "Off",
+    "read-only": "Read files",
+    auto: "Run commands",
+    "full-access": "Run commands (full access)",
+  };
+  return (
+    <SettingsRow
+      serverScoped
+      {...searchableSetting("remote-execution-beta")}
+      settingKeys={["peerExecGrant"]}
+      description="What a linked environment may do on this machine when it calls peer_exec or peer_fs_read. Off refuses everything. Read files allows peer_fs_read and peer_fs_list only. This is separate from what a link may orchestrate; each machine sets its own."
+      control={
+        <Select
+          value={settings.peerExecGrant}
+          onValueChange={(next) => {
+            if (next !== null) updateSettings({ peerExecGrant: next as PeerExecGrant });
+          }}
+        >
+          <SelectTrigger aria-label="Remote execution on this machine">
+            <SelectValue>{labels[settings.peerExecGrant]}</SelectValue>
+          </SelectTrigger>
+          <SelectPopup alignItemWithTrigger={false}>
+            {(["off", "read-only", "auto", "full-access"] as const).map((option) => (
+              <SelectItem key={option} value={option}>
+                {labels[option]}
+              </SelectItem>
+            ))}
+          </SelectPopup>
+        </Select>
       }
     />
   );

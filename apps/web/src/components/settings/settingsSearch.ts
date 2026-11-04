@@ -466,6 +466,20 @@ export const SETTINGS_SEARCH_ITEMS = [
     searchTerms: ["beta link another machine vps peer agents work there delegate"],
   },
   {
+    id: "execution-targets-beta",
+    title: "Execution targets",
+    to: "/settings/labs",
+    scope: "environment",
+    searchTerms: ["beta fleet shell command remote execute file read ssh peer"],
+  },
+  {
+    id: "remote-execution-beta",
+    title: "Remote execution",
+    to: "/settings/labs",
+    scope: "environment",
+    searchTerms: ["beta grant peer shell exec command run files read access"],
+  },
+  {
     id: "simlock-hosts",
     title: "Simlock device hosts (alpha)",
     to: "/settings/labs",
