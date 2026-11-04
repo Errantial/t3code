@@ -69,7 +69,31 @@ export interface ThreadManagementProvenance {
   readonly creationSource: OrchestrationV2CreationSource;
 }
 
-export function withCreationProvenance(
+/** A client command that sets a field only the server may set. */
+export class ThreadManagementClientCommandError extends Schema.TaggedError<ThreadManagementClientCommandError>()(
+  "ThreadManagementClientCommandError",
+  { commandType: Schema.String, field: Schema.String },
+) {
+  override get message(): string {
+    return `Invalid request: ${this.field} is reserved for the server.`;
+  }
+}
+
+/** Stamps a client command with the client's provenance, refusing fields only the server sets. */
+export const withCreationProvenance = (
+  command: OrchestrationV2Command,
+  provenance: ThreadManagementProvenance,
+): Effect.Effect<OrchestrationV2Command, ThreadManagementClientCommandError> =>
+  command.type === "delegated_task.request" && command.completionWake === "held"
+    ? Effect.fail(
+        new ThreadManagementClientCommandError({
+          commandType: command.type,
+          field: 'completionWake "held"',
+        }),
+      )
+    : Effect.succeed(stampCreationProvenance(command, provenance));
+
+function stampCreationProvenance(
   command: OrchestrationV2Command,
   provenance: ThreadManagementProvenance,
 ): OrchestrationV2Command {

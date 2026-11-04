@@ -13,6 +13,7 @@ import {
   type OrchestrationV2ThreadProjection,
   ProjectId,
   ProviderInstanceId,
+  NodeId,
   RunId,
   ThreadId,
 } from "@t3tools/contracts";
@@ -36,43 +37,75 @@ import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter"
 import * as ThreadManagementService from "./ThreadManagementService.ts";
 import * as ThreadCommandExecutor from "./ThreadCommandExecutor.ts";
 
-it("stamps authoritative provenance on commands that create threads or messages", () => {
-  const command: OrchestrationV2Command = {
-    type: "thread.create",
-    createdBy: "agent",
-    creationSource: "mcp",
-    commandId: CommandId.make("command:thread-management:create"),
-    threadId: ThreadId.make("thread:thread-management:create"),
-    projectId: ProjectId.make("project:thread-management"),
-    title: "Thread management",
-    modelSelection: {
-      instanceId: ProviderInstanceId.make("codex"),
-      model: "gpt-5-codex",
-    },
-    runtimeMode: "full-access",
-    interactionMode: "default",
-    branch: null,
-    worktreePath: null,
-    // A client cannot claim a linked environment's origin, or a parent there.
-    linkOrigin: { sessionId: "forged", label: "Somewhere else" },
-    delegatedFrom: {
-      environmentId: EnvironmentId.make("environment:elsewhere"),
-      threadId: ThreadId.make("thread:elsewhere"),
-      title: "Somewhere else",
-    },
-  };
+it.effect("stamps authoritative provenance on commands that create threads or messages", () =>
+  Effect.gen(function* () {
+    const command: OrchestrationV2Command = {
+      type: "thread.create",
+      createdBy: "agent",
+      creationSource: "mcp",
+      commandId: CommandId.make("command:thread-management:create"),
+      threadId: ThreadId.make("thread:thread-management:create"),
+      projectId: ProjectId.make("project:thread-management"),
+      title: "Thread management",
+      modelSelection: {
+        instanceId: ProviderInstanceId.make("codex"),
+        model: "gpt-5-codex",
+      },
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      branch: null,
+      worktreePath: null,
+      // A client cannot claim a linked environment's origin, or a parent there.
+      linkOrigin: { sessionId: "forged", label: "Somewhere else" },
+      delegatedFrom: {
+        environmentId: EnvironmentId.make("environment:elsewhere"),
+        threadId: ThreadId.make("thread:elsewhere"),
+        title: "Somewhere else",
+      },
+    };
 
-  const stamped = ThreadManagementService.withCreationProvenance(command, {
-    createdBy: "user",
-    creationSource: "web",
-  });
-  expect(stamped).toMatchObject({
-    createdBy: "user",
-    creationSource: "web",
-  });
-  expect(stamped).not.toHaveProperty("linkOrigin");
-  expect(stamped).not.toHaveProperty("delegatedFrom");
-});
+    const stamped = yield* ThreadManagementService.withCreationProvenance(command, {
+      createdBy: "user",
+      creationSource: "web",
+    });
+    expect(stamped).toMatchObject({
+      createdBy: "user",
+      creationSource: "web",
+    });
+    expect(stamped).not.toHaveProperty("linkOrigin");
+    expect(stamped).not.toHaveProperty("delegatedFrom");
+  }),
+);
+
+it.effect("refuses a client's held completion wake, which only the server sets", () =>
+  Effect.gen(function* () {
+    const command: OrchestrationV2Command = {
+      type: "delegated_task.request",
+      createdBy: "agent",
+      creationSource: "server",
+      commandId: CommandId.make("command:thread-management:held"),
+      parentThreadId: ThreadId.make("thread:thread-management:parent"),
+      parentRunId: RunId.make("run:thread-management:parent"),
+      parentNodeId: NodeId.make("node:thread-management:parent"),
+      task: "Do it.",
+      modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5-codex" },
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      completionWake: "held",
+    };
+    const refused = yield* ThreadManagementService.withCreationProvenance(command, {
+      createdBy: "user",
+      creationSource: "web",
+    }).pipe(Effect.flip);
+    expect(refused._tag).toBe("ThreadManagementClientCommandError");
+    expect(refused.message).toContain('completionWake "held"');
+    const accepted = yield* ThreadManagementService.withCreationProvenance(
+      { ...command, completionWake: "always" },
+      { createdBy: "user", creationSource: "web" },
+    );
+    expect(accepted).toMatchObject({ createdBy: "user", completionWake: "always" });
+  }),
+);
 
 const layerReceiptsTest = CommandReceiptStore.layer.pipe(
   Layer.provide(SqlitePersistence.layerMemory),
