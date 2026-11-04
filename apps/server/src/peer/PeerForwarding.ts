@@ -169,8 +169,13 @@ const make = Effect.gen(function* () {
       readonly scratch?: boolean;
     };
     if (input.repositoryKey !== undefined) {
-      const { projectId: _projectId, ...rest } = input;
-      return rest;
+      if (input.projectId !== undefined) {
+        return yield* new OrchestratorMcpFailure({
+          code: "invalid_request",
+          message: "Pass projectId or repositoryKey, not both.",
+        });
+      }
+      return input;
     }
     if (input.scratch === true) return input;
     let projectId = input.projectId;

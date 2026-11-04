@@ -911,6 +911,15 @@ it.effect("places a launch by the caller project's repository key", () => {
     expect(forwarded).toHaveLength(1);
     expect(forwarded[0]).toMatchObject({ repositoryKey: "github.com/acme/app" });
     expect(forwarded[0]).not.toHaveProperty("projectId");
+    const both = yield* forwarding
+      .call(scope, ProjectToolkit.tools.t3_thread_launch, environmentId, {
+        environmentId,
+        projectId: localProjectId,
+        repositoryKey: "github.com/acme/app",
+        title: "Both",
+      })
+      .pipe(Effect.flip);
+    expect(both.code).toBe("invalid_request");
   }).pipe(
     Effect.provide(
       PeerForwarding.layer.pipe(Layer.provide(dependencies), Layer.provide(NodeCrypto.layer)),
