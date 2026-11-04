@@ -1039,6 +1039,12 @@ export const SETTINGS_SEARCH_ITEMS = [
     searchTerms: ["commands scripts setup run dev server checkout worktree t3.json import"],
   },
   {
+    id: "environment-roots",
+    title: "Environment roots",
+    to: "/settings/projects",
+    searchTerms: ["project workspace path linked environment machine checkout root"],
+  },
+  {
     id: "environment-icon",
     title: "Environment icon",
     to: "/settings/access",

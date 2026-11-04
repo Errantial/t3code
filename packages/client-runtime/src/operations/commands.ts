@@ -54,6 +54,7 @@ export interface UpdateProjectInput extends CommandMetadata {
   readonly projectId: ProjectId;
   readonly title?: string;
   readonly workspaceRoot?: string;
+  readonly environmentRoots?: Readonly<Record<string, string>>;
   readonly defaultModelSelection?: ModelSelection | null;
   readonly autoPull?: boolean;
   readonly projectIcon?: ProjectIconOverride | null;
