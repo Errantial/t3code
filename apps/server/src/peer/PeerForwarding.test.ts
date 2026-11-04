@@ -342,7 +342,9 @@ const makeLaptop = Effect.gen(function* () {
         Layer.mock(ProviderRegistry.ProviderRegistry)({}),
         Layer.mock(ProviderAdapterRegistry.ProviderAdapterRegistryV2)({}),
         Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
-        Layer.mock(ProjectService.ProjectService)({}),
+        Layer.mock(ProjectService.ProjectService)({
+          getById: () => Effect.succeedNone,
+        }),
         Layer.mock(RepositoryIdentityResolver.RepositoryIdentityResolver)({}),
         Layer.mock(ServerEnvironment.ServerEnvironment)({
           getEnvironmentId: Effect.succeed(laptop.environmentId),

@@ -169,24 +169,29 @@ const make = Effect.gen(function* () {
       readonly scratch?: boolean;
     };
     if (input.repositoryKey !== undefined) {
-      return { ...input, projectId: undefined };
+      const { projectId: _projectId, ...rest } = input;
+      return rest;
     }
     if (input.scratch === true) return input;
     let projectId = input.projectId;
     if (projectId === undefined && scope.thread !== undefined) {
       const shell = yield* threads
         .getThreadShell(scope.thread.threadId)
-        .pipe(Effect.catchCause(() => Effect.succeed(null)));
+        .pipe(Effect.orElseSucceed(() => null));
       projectId = shell?.projectId;
     }
     if (projectId === undefined) return input;
-    const found = yield* projects
-      .getById(projectId)
-      .pipe(Effect.catchCause(() => Effect.succeedNone));
-    if (Option.isNone(found)) return input;
-    const key = (yield* repositoryIdentities
-      .resolve(found.value.workspaceRoot)
-      .pipe(Effect.catchCause(() => Effect.void)))?.canonicalKey;
+    const looked = yield* Effect.result(projects.getById(projectId));
+    if (looked._tag === "Failure") {
+      return yield* new OrchestratorMcpFailure({
+        code: "orchestration_error",
+        message:
+          "Could not read this project to resolve its repository key. Pass repositoryKey explicitly or retry.",
+      });
+    }
+    if (Option.isNone(looked.success)) return input;
+    const key = (yield* repositoryIdentities.resolve(looked.success.value.workspaceRoot))
+      ?.canonicalKey;
     if (key === undefined) {
       return yield* new OrchestratorMcpFailure({
         code: "repository_identity_missing",
