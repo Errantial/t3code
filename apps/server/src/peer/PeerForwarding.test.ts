@@ -926,3 +926,60 @@ it.effect("places a launch by the caller project's repository key", () => {
     ),
   );
 });
+
+it.effect("refuses a launch when the caller project has no repository identity", () => {
+  const environmentId = EnvironmentId.make("environment-no-identity-peer");
+  const localProjectId = ProjectId.make("project:no-identity");
+  const scope = {
+    environmentId: EnvironmentId.make("environment-no-identity-caller"),
+    requestNamespace: "client:no-identity",
+    thread: {
+      threadId: ThreadId.make("thread:no-identity"),
+      providerSessionId: "session:no-identity",
+      providerInstanceId: ProviderInstanceId.make("codex"),
+    },
+    client: undefined,
+    capabilities: new Set(["orchestration"]),
+    issuedAt: 1,
+  } as unknown as McpInvocationContext.McpInvocationScope;
+  const dependencies = Layer.mergeAll(
+    Layer.mock(PeerMcpClient.PeerMcpClient)({
+      call: () =>
+        Effect.fail(
+          new OrchestratorMcpFailure({ code: "orchestration_error", message: "must not forward" }),
+        ),
+    }),
+    Layer.mock(PeerLinks.PeerLinks)({ enabled: Effect.succeed(true) }),
+    Layer.mock(ProjectService.ProjectService)({
+      getById: () =>
+        Effect.succeed(
+          Option.some({ projectId: localProjectId, workspaceRoot: "/work/no-identity" }) as never,
+        ),
+    }),
+    Layer.mock(RepositoryIdentityResolver.RepositoryIdentityResolver)({
+      resolve: () => Effect.succeed(null),
+    }),
+    Layer.mock(ThreadManagement.ThreadManagementService)({
+      getThreadShell: (threadId) =>
+        Effect.succeed(liveThreadShell(threadId, { runtimeMode: "full-access" })),
+    }),
+  );
+  return Effect.gen(function* () {
+    const forwarding = yield* PeerForwarding.PeerForwarding;
+    const error = yield* forwarding
+      .call(scope, ProjectToolkit.tools.t3_thread_launch, environmentId, {
+        environmentId,
+        projectId: localProjectId,
+        title: "No identity",
+      })
+      .pipe(Effect.flip);
+    expect(error.code).toBe("repository_identity_missing");
+    expect(error.message).toBe(
+      "This project has no repository identity to match on the target. Pass projectId.",
+    );
+  }).pipe(
+    Effect.provide(
+      PeerForwarding.layer.pipe(Layer.provide(dependencies), Layer.provide(NodeCrypto.layer)),
+    ),
+  );
+});
