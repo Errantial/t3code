@@ -1,5 +1,6 @@
 // @effect-diagnostics nodeBuiltinImport:off globalDateInEffect:off cryptoRandomUUIDInEffect:off -- the fixture writes files it then asks the executor to read and names its own exec ids.
 import * as NodeFSP from "node:fs/promises";
+import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 
@@ -7,7 +8,9 @@ import { expect, it } from "@effect/vitest";
 import { OrchestratorMcpFailure } from "@t3tools/contracts";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 import * as DateTime from "effect/DateTime";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as SqlClient from "effect/sql/SqlClient";
 
@@ -98,6 +101,39 @@ it.live("times out and kills the process", () =>
         timeoutMs: 200,
       });
       expect(result.timedOut).toBe(true);
+    }).pipe(Effect.provide(layerTest(directory))),
+  ),
+);
+
+it.live("cancels a running exec by its id", () =>
+  withRoot((directory) =>
+    Effect.gen(function* () {
+      yield* runMigrations();
+      const exec = yield* PeerExec.PeerExec;
+      const execId = globalThis.crypto.randomUUID();
+      const marker = NodePath.join(directory, "started");
+      const fiber = yield* exec
+        .run({
+          execId,
+          argv: [
+            node,
+            "-e",
+            `require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'x'); setInterval(() => {}, 1000)`,
+          ],
+          cwd: directory,
+          timeoutMs: 30_000,
+        })
+        .pipe(Effect.forkChild);
+      const started = yield* Deferred.make<void>();
+      const watcher = NodeFS.watch(directory, (_event, filename) => {
+        if (filename === "started") Deferred.doneUnsafe(started, Effect.void);
+      });
+      yield* Deferred.await(started);
+      watcher.close();
+      const cancelled = yield* exec.cancel(execId);
+      const result = yield* Fiber.join(fiber);
+      expect(cancelled.cancelled).toBe(true);
+      expect(result.cancelled).toBe(true);
     }).pipe(Effect.provide(layerTest(directory))),
   ),
 );
