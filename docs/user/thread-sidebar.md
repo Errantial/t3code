@@ -138,7 +138,11 @@ That includes subagents, watched pull requests, and background commands or monit
 says it is waiting on. A dev server or other process an agent leaves running does not keep a thread
 there. A thread returns to the top of the active list when it finishes, fails, or needs an approval or
 answer. The Working section lists the thread you last sent work to first. Pinned threads stay in
-the pinned section unless **Settings → Labs → Pin overhaul** is on.
+the pinned section unless the pin overhaul is on. With it on, a pinned thread folds into Working
+while it runs, waits 2 seconds after it stops like any other thread, then sorts with the active
+list. Settle stays hidden for it, and pinning still prevents automatic settling. Turn the pin
+overhaul on with **Settings → Labs → Pin overhaul** on web and desktop, or **Settings → General →
+Pin overhaul (Labs)** on iOS and Android. The folder sidebar keeps pinned threads on top either way.
 
 This is on by default. Turn it off with **Settings → General → Working section** on web and desktop,
 or **Settings → General → Working section** on iOS and Android. Each device keeps its own

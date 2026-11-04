@@ -582,6 +582,8 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
   readonly hasQueuedMessages?: boolean;
   readonly snoozed?: boolean;
   readonly pinned?: boolean;
+  /** Settle is hidden for this thread (a pinned thread under the pin overhaul). */
+  readonly settleHidden?: boolean;
   readonly wokeAt: string | null;
   readonly snoozeWakeLabelText?: string;
   readonly timeLabel: string;
@@ -762,6 +764,7 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
     snoozeSupported: props.snoozeSupported,
     snoozable: canSnooze(thread, { now: snoozeGateNow }),
     snoozed: snoozedRow,
+    settleHidden: props.settleHidden,
   });
   const snoozePresets = resolveThreadListV2SnoozePresets({
     secondary: swipeActions.secondary,
@@ -1450,9 +1453,12 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
                   ? legacyMenuActions
                   : canUnsettle
                     ? slimMenuActions
-                    : swipeActions.secondary === "snooze"
-                      ? snoozableCardMenuActions
-                      : cardMenuActions),
+                    : (swipeActions.secondary === "snooze"
+                        ? snoozableCardMenuActions
+                        : cardMenuActions
+                      ).filter(
+                        (action) => !(props.settleHidden === true && action.id === "settle"),
+                      )),
             ]}
             onPressAction={handleMenuAction}
             shouldOpenOnLongPress

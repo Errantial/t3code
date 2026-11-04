@@ -93,6 +93,7 @@ vi.mock("../../state/atom-registry", () => ({
               ),
   },
 }));
+vi.mock("../../state/preferences", () => ({ mobilePreferencesAtom: "mobile-preferences" }));
 vi.mock("../../state/use-atom-command", () => ({
   useAtomCommand: (command: unknown) => command,
 }));

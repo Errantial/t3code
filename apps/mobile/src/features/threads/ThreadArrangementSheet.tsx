@@ -168,7 +168,7 @@ function ThreadArrangementSheet(props: { onClose: () => void }) {
   const pendingOrder = useAtomValue(pendingThreadOrderAtom);
   const dropBusy = useAtomValue(threadDropBusyAtom);
   const { moveThread } = useThreadListActions();
-  const { workingShelfEnabled } = useThreadListV2ShelfPreferences();
+  const { workingShelfEnabled, pinOverhaulEnabled } = useThreadListV2ShelfPreferences();
   const now = useThreadListNow(threads);
   const [expanded, setExpanded] = useState({ snoozed: false, settled: false });
   const [settledVisibleCount, setSettledVisibleCount] = useState(
@@ -186,6 +186,7 @@ function ThreadArrangementSheet(props: { onClose: () => void }) {
       now,
       queuedThreadKeys,
       pendingOrder,
+      pinOverhaul: pinOverhaulEnabled,
       settlementEnvironmentIds: new Set(configs.keys()),
       snoozeEnvironmentIds: new Set(configs.keys()),
     };
@@ -203,7 +204,15 @@ function ThreadArrangementSheet(props: { onClose: () => void }) {
       snoozed: parked.filter((thread) => effectiveSnoozed(thread, { now })),
       settled: sortSettledThreads(parked.filter((thread) => !effectiveSnoozed(thread, { now }))),
     };
-  }, [threads, configs, now, queuedThreadKeys, pendingOrder, workingShelfEnabled]);
+  }, [
+    threads,
+    configs,
+    now,
+    queuedThreadKeys,
+    pendingOrder,
+    workingShelfEnabled,
+    pinOverhaulEnabled,
+  ]);
   const listedSettled = sections.settled.filter(olderSettledShelf.isListed);
   useOlderSettledShelfGrowth(olderSettledShelf, listedSettled);
   const visibleSettled = listedSettled.slice(0, settledVisibleCount);
@@ -224,6 +233,8 @@ function ThreadArrangementSheet(props: { onClose: () => void }) {
     const result: Row[] = [];
     let offset = 0;
     for (const section of ["pinned", "active", "snoozed", "settled"] as const) {
+      // Under the pin overhaul pinned threads follow the active rules: there is no pinned section.
+      if (section === "pinned" && pinOverhaulEnabled) continue;
       if (section === "snoozed" && sections[section].length === 0) continue;
       result.push({ key: section, section, offset, height: HEADER_HEIGHT });
       offset += HEADER_HEIGHT;
@@ -238,7 +249,7 @@ function ThreadArrangementSheet(props: { onClose: () => void }) {
       }
     }
     return result;
-  }, [sections, expanded, visibleSettled, settledCount]);
+  }, [sections, expanded, visibleSettled, settledCount, pinOverhaulEnabled]);
   const list = useRef<FlatList<Row>>(null);
   const geometry = useRef({ height: 0, offset: 0 });
   const drag = useRef<Drag | null>(null);
@@ -423,6 +434,7 @@ function ThreadArrangementSheet(props: { onClose: () => void }) {
                           label: string;
                         }>((section) => {
                           if (section === item.section) return [];
+                          if (section === "pinned" && pinOverhaulEnabled) return [];
                           const label = threadDragAction(item.section, section);
                           if (!label) return [];
                           if (section === "settled")

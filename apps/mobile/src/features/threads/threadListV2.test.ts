@@ -32,6 +32,7 @@ import { makeRawThreadShell, makeThreadShellFixture } from "../../test-fixtures"
 import { threadJumpTarget } from "../keyboard/threadKeyboardShortcuts";
 import {
   buildThreadListV2Items,
+  resolveThreadListV2SwipeActions,
   buildThreadListV2ListItems,
   getThreadListV2OrderedSection,
   resolveThreadListV2SnoozeMenuSelection,
@@ -1651,6 +1652,111 @@ describe("Working section beta", () => {
       tracker.observe(null);
       vi.useRealTimers();
     }
+  });
+
+  describe("pin overhaul", () => {
+    it("folds a running pinned thread into Working and leaves no pinned section", () => {
+      const layout = build({ pinOverhaulEnabled: true, workingShelfExpanded: true });
+      expect(layout.items.some((item) => item.pinned)).toBe(false);
+      expect(layout.workingCount).toBe(2);
+      const working = layout.items.slice(layout.workingShelfHeaderIndex!).map((i) => i.thread.id);
+      expect(working).toContain("pinned-working");
+      expect(ids(layout).slice(0, layout.workingShelfHeaderIndex!)).not.toContain("pinned-working");
+    });
+
+    it("keeps the pinned section when the overhaul is off", () => {
+      const layout = build({ pinOverhaulEnabled: false });
+      expect(layout.items[0]).toMatchObject({ pinned: true });
+      expect(layout.items[0]?.thread.id).toBe("pinned-working");
+    });
+
+    it("sorts a stopped pinned thread with the activity list under the overhaul", () => {
+      const stopped = makeThread({
+        id: ThreadId.make("stopped-pin"),
+        title: "stopped-pin",
+        createdAt: "2026-06-01T00:00:00.000Z",
+        pinnedAt: "2026-06-01T00:00:00.000Z",
+        latestRun: {
+          runId: RunId.make("run-stopped-pin"),
+          status: "completed",
+          requestedAt: "2026-06-01T00:00:00.000Z",
+          startedAt: "2026-06-01T00:00:00.000Z",
+          completedAt: "2026-06-01T05:00:00.000Z",
+          assistantMessageId: null,
+        },
+      });
+      const layout = build({ threads: [...threads, stopped], pinOverhaulEnabled: true });
+      expect(layout.items.some((item) => item.pinned)).toBe(false);
+      expect(layout.items[0]?.thread.id).toBe("stopped-pin");
+    });
+
+    it("holds a stopped pinned thread in Working for the grace under the overhaul", () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date(NOW));
+      const tracker = createInboxReturnTracker();
+      const pinnedAt = "2026-06-01T00:00:00.000Z";
+      const active = makeThread({
+        id: ThreadId.make("pg"),
+        title: "pg",
+        runtime: running,
+        pinnedAt,
+      });
+      const stopped = { ...active, runtime: null };
+      const render = () =>
+        build({
+          threads: [stopped],
+          pinOverhaulEnabled: true,
+          workingShelfExpanded: true,
+          isWorking: tracker.isWorking,
+          inboxReturnAt: tracker.returnedAt,
+        });
+      try {
+        tracker.observe([active], { pinnedInInbox: true });
+        tracker.observe([stopped], { pinnedInInbox: true });
+        expect(render().workingCount).toBe(1);
+        vi.advanceTimersByTime(2_000);
+        expect(render().workingCount).toBe(0);
+        expect(ids(render())).toEqual(["pg"]);
+      } finally {
+        tracker.observe(null);
+        vi.useRealTimers();
+      }
+    });
+
+    it("keeps snoozed and settled ahead of pinned", () => {
+      const pinnedAt = "2026-06-01T00:00:00.000Z";
+      const layout = build({
+        pinOverhaulEnabled: true,
+        threads: [
+          makeThread({ id: ThreadId.make("s"), title: "s", pinnedAt, settledOverride: "settled" }),
+          makeThread({
+            id: ThreadId.make("z"),
+            title: "z",
+            pinnedAt,
+            snoozedAt: "2026-06-01T00:00:00.000Z",
+            snoozedUntil: "2999-01-01T00:00:00.000Z",
+          }),
+        ],
+        snoozedShelfExpanded: true,
+        settledShelfExpanded: true,
+      });
+      expect(layout.settledCount).toBe(1);
+      expect(layout.snoozedCount).toBe(1);
+    });
+
+    it("archives instead of settling on swipe when Settle is hidden", () => {
+      const base = {
+        variant: "card",
+        settlementSupported: true,
+        snoozeSupported: true,
+        snoozable: true,
+      } as const;
+      expect(resolveThreadListV2SwipeActions(base).primary).toBe("settle");
+      expect(resolveThreadListV2SwipeActions({ ...base, settleHidden: true })).toEqual({
+        primary: "archive",
+        secondary: "snooze",
+      });
+    });
   });
 
   it("orders the inbox by the latest return this device observed", () => {
