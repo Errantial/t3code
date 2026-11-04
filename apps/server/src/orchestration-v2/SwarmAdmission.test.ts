@@ -607,18 +607,17 @@ it.layer(layerTest)("swarm admission after the anchor run (SW-A0)", (it) => {
       const stopped = (yield* orchestrator.getThreadProjection(threadId)).runs.find(
         (run) => run.id === anchor.id,
       )!;
-      // holdStoppedThread only stops cohorts with a delivery or an undelivered task, so an
-      // anchor whose members are all queued rows keeps an open cohort; the scan refuses.
-      assert.equal(stopped.delegatedCompletion?.disposition, "open");
+      // holdStoppedThread stops every anchored cohort, even one with only queued rows.
+      assert.equal(stopped.delegatedCompletion?.disposition, "stopped");
       assert.deepEqual(stopped.delegatedCompletion?.swarmIds, [swarmId]);
       assert.include(
         yield* admissionError({ threadId, anchor, swarmId, key: "while-stopping" }),
-        "A Stop reached the architect",
+        "no longer admits members",
       );
       yield* endRun({ threadId, runId: anchor.id, status: "interrupted" });
       assert.include(
         yield* admissionError({ threadId, anchor, swarmId, key: "after-stop" }),
-        "A Stop reached the architect",
+        "no longer admits members",
       );
     }),
   );
@@ -635,15 +634,13 @@ it.layer(layerTest)("swarm admission after the anchor run (SW-A0)", (it) => {
         commandId: CommandId.make("command:q2-idle-stop"),
         threadId,
       });
-      // The anchor's cohort holds no undelivered task, so Stop leaves it open and only marks
-      // the run; the interrupt-request scan is what refuses.
       const anchorRun = (yield* orchestrator.getThreadProjection(threadId)).runs.find(
         (run) => run.id === anchor.id,
       )!;
-      assert.equal(anchorRun.delegatedCompletion?.disposition, "open");
+      assert.equal(anchorRun.delegatedCompletion?.disposition, "stopped");
       assert.include(
         yield* admissionError({ threadId, anchor, swarmId, key: "after-idle-stop" }),
-        "A Stop reached the architect",
+        "no longer admits members",
       );
     }),
   );
@@ -681,10 +678,10 @@ it.layer(layerTest)("swarm admission after the anchor run (SW-A0)", (it) => {
           projection.subagents.find((task) => task.id === member.taskId)?.completionDelivery?.state,
           "delivered",
         );
-        // Stop reached only the later run: the anchor's cohort stays open.
+        // Stop interrupts only the later run, but still stops the anchored cohort.
         assert.equal(
           projection.runs.find((run) => run.id === anchor.id)?.delegatedCompletion?.disposition,
-          "open",
+          "stopped",
         );
         assert.isTrue(
           projection.turnItems.some(
@@ -698,9 +695,192 @@ it.layer(layerTest)("swarm admission after the anchor run (SW-A0)", (it) => {
         );
         assert.include(
           yield* admissionError({ threadId, anchor, swarmId, key: "queued-row" }),
-          "A Stop reached the architect",
+          "no longer admits members",
         );
       }),
+  );
+
+  it.effect("Q2: an interrupt of the swarm's wake turn leaves the anchor open and admitting", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const { threadId, anchor } = yield* seedArchitect("q2-wake-interrupt");
+      const swarmId = SwarmId.make("swarm:q2-wake-interrupt");
+      yield* anchorSwarm(threadId, anchor.id, swarmId);
+      const member = yield* admit({ threadId, anchor, swarmId: undefined, key: "first" });
+      yield* endRun({ threadId, runId: anchor.id });
+      yield* finishMember({
+        parentThreadId: threadId,
+        taskId: member.taskId,
+        childThreadId: member.childThreadId,
+        runId: member.childRun.id,
+        text: "first member done",
+      });
+      yield* takeWake(threadId);
+      const wake = yield* deliverWake(threadId, anchor.id);
+      // What /goal, skipped compaction, and t3_thread_interrupt dispatch: no holdQueue.
+      yield* orchestrator.dispatch({
+        type: "run.interrupt",
+        commandId: CommandId.make("command:q2-wake-interrupt"),
+        threadId,
+        runId: wake.run.id,
+      });
+      const projection = yield* orchestrator.getThreadProjection(threadId);
+      assert.equal(
+        projection.runs.find((run) => run.id === anchor.id)?.delegatedCompletion?.disposition,
+        "open",
+      );
+      const late = yield* admit({ threadId, anchor, swarmId, key: "after-interrupt" });
+      assert.equal(
+        (yield* orchestrator.getThreadProjection(threadId)).subagents.find(
+          (task) => task.id === late.taskId,
+        )?.runId,
+        anchor.id,
+      );
+    }),
+  );
+
+  it.effect("Q2: an interrupt of a later non-wake turn leaves the swarm admitting", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const { threadId, anchor } = yield* seedArchitect("q2-later-interrupt");
+      const swarmId = SwarmId.make("swarm:q2-later-interrupt");
+      yield* anchorSwarm(threadId, anchor.id, swarmId);
+      yield* endRun({ threadId, runId: anchor.id });
+      const messageId = MessageId.make("message:q2-later-interrupt");
+      yield* orchestrator.dispatch({
+        type: "message.dispatch",
+        createdBy: "user",
+        creationSource: "web",
+        commandId: CommandId.make("command:q2-later-interrupt-message"),
+        threadId,
+        messageId,
+        text: "Unrelated work",
+        attachments: [],
+        modelSelection,
+        dispatchMode: { type: "queue_after_active" },
+      });
+      yield* orchestrator.resumeQueuedRuns;
+      const later = (yield* orchestrator.getThreadProjection(threadId)).runs.find(
+        (run) => run.userMessageId === messageId,
+      )!;
+      yield* orchestrator.dispatch({
+        type: "run.interrupt",
+        commandId: CommandId.make("command:q2-later-interrupt"),
+        threadId,
+        runId: later.id,
+      });
+      assert.equal(
+        (yield* orchestrator.getThreadProjection(threadId)).runs.find((run) => run.id === anchor.id)
+          ?.delegatedCompletion?.disposition,
+        "open",
+      );
+      yield* admit({ threadId, anchor, swarmId, key: "after-later-interrupt" });
+    }),
+  );
+
+  it.effect("Q2: a wake run that ends cancelled re-delivers its swarm tasks", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const sink = yield* EventSink.EventSinkV2;
+      const { threadId, anchor } = yield* seedArchitect("q2-wake-cancelled");
+      const swarmId = SwarmId.make("swarm:q2-wake-cancelled");
+      yield* anchorSwarm(threadId, anchor.id, swarmId);
+      const member = yield* admit({ threadId, anchor, swarmId: undefined, key: "first" });
+      yield* endRun({ threadId, runId: anchor.id });
+      yield* finishMember({
+        parentThreadId: threadId,
+        taskId: member.taskId,
+        childThreadId: member.childThreadId,
+        runId: member.childRun.id,
+        text: "first member done",
+      });
+      const firstOffer = yield* takeWake(threadId);
+      const wake = yield* deliverWake(threadId, anchor.id);
+      // A restart cancels the running wake the way reconciliation records it.
+      const now = yield* DateTime.now;
+      const run = (yield* orchestrator.getThreadProjection(threadId)).runs.find(
+        (row) => row.id === wake.run.id,
+      )!;
+      yield* sink.write({
+        events: [
+          {
+            id: EventId.make("event:q2-wake-cancelled"),
+            type: "run.updated",
+            threadId,
+            runId: run.id,
+            occurredAt: now,
+            payload: { ...run, status: "cancelled", completedAt: now },
+          },
+        ],
+      });
+      const again = yield* takeWake(threadId);
+      assert.equal(again.delegatedCompletion?.parentRunId, anchor.id);
+      assert.notEqual(
+        again.delegatedCompletion?.messageId,
+        firstOffer.delegatedCompletion?.messageId,
+      );
+      assert.deepEqual(
+        (yield* orchestrator.getThreadProjection(threadId)).runs.find((row) => row.id === anchor.id)
+          ?.delegatedCompletion?.delivery?.taskIds,
+        [member.taskId],
+      );
+    }),
+  );
+
+  it.effect("Q2: a wake run that ends interrupted leaves its swarm tasks delivered", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const { threadId, anchor } = yield* seedArchitect("q2-wake-interrupted");
+      const swarmId = SwarmId.make("swarm:q2-wake-interrupted");
+      yield* anchorSwarm(threadId, anchor.id, swarmId);
+      const member = yield* admit({ threadId, anchor, swarmId: undefined, key: "first" });
+      yield* endRun({ threadId, runId: anchor.id });
+      yield* finishMember({
+        parentThreadId: threadId,
+        taskId: member.taskId,
+        childThreadId: member.childThreadId,
+        runId: member.childRun.id,
+        text: "first member done",
+      });
+      yield* takeWake(threadId);
+      const wake = yield* deliverWake(threadId, anchor.id);
+      yield* endRun({ threadId, runId: wake.run.id, status: "interrupted" });
+      yield* orchestrator.recoverDelegatedTasks;
+      const projection = yield* orchestrator.getThreadProjection(threadId);
+      assert.equal(
+        projection.subagents.find((task) => task.id === member.taskId)?.completionDelivery?.state,
+        "delivered",
+      );
+      assert.isNull(
+        projection.runs.find((row) => row.id === anchor.id)?.delegatedCompletion?.delivery ?? null,
+      );
+    }),
+  );
+
+  it.effect("Q2: a client run.interrupt with holdQueue that fails leaves the swarm running", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const { threadId, anchor } = yield* seedArchitect("q2-failed-stop");
+      const swarmId = SwarmId.make("swarm:q2-failed-stop");
+      yield* anchorSwarm(threadId, anchor.id, swarmId);
+      // The seeded run has no attempt, so the interrupt fails before holdStoppedThread.
+      const exit = yield* orchestrator
+        .dispatch({
+          type: "run.interrupt",
+          commandId: CommandId.make("command:q2-failed-stop"),
+          threadId,
+          runId: anchor.id,
+          holdQueue: true,
+        })
+        .pipe(Effect.exit);
+      assert.isTrue(Exit.isFailure(exit));
+      assert.equal(
+        (yield* orchestrator.getThreadProjection(threadId)).runs.find((run) => run.id === anchor.id)
+          ?.delegatedCompletion?.disposition,
+        "open",
+      );
+      yield* admit({ threadId, anchor, swarmId, key: "after-failed-stop" });
+    }),
   );
 
   it.effect("Q2: Stop on the architect stops a member that is in a verify-retry run", () =>

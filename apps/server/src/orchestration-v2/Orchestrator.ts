@@ -7202,8 +7202,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
 
   /**
    * A swarm member may be admitted after its architect's turn ended, but only against the run
-   * that anchors its swarm, while that run's cohort is open and no Stop has reached it or any
-   * later run of the thread. Runs under the parent lock, so a concurrent Stop cannot race it.
+   * that anchors its swarm, while that run's cohort is open. Runs under the parent lock, so a
+   * concurrent Stop cannot race it.
    */
   const assertSwarmAdmission = Effect.fnUntraced(function* (
     command: Extract<OrchestrationV2Command, { readonly type: "delegated_task.request" }>,
@@ -7228,21 +7228,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     if (cohort?.swarmIds?.includes(swarmId) !== true) {
       return yield* refuse(`Run ${anchor.id} is not the anchor of swarm ${swarmId}.`);
     }
+    // Every Stop marks anchored cohorts stopped (holdStoppedThread); archive and delete dispose.
     if (cohort.disposition !== "open") {
       return yield* refuse(`The anchor run of swarm ${swarmId} no longer admits members.`);
-    }
-    // thread.stop marks the run it interrupts, so a Stop during a later turn never reaches
-    // the anchor itself.
-    const { turnItems } = yield* projectionStore
-      .getThreadRecords(command.parentThreadId, ["turnItems"], {
-        turnItemTypes: ["run_interrupt_request"],
-        turnItemRunIds: parent.runs
-          .filter((run) => run.ordinal >= anchor.ordinal)
-          .map((run) => run.id),
-      })
-      .pipe(mapDispatchError(command));
-    if (turnItems.length > 0) {
-      return yield* refuse(`A Stop reached the architect of swarm ${swarmId}.`);
     }
   });
 
@@ -10538,6 +10526,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     const cohortRunIds = new Set(input.cohortRunIds);
     for (const run of runs) {
       if (run.delegatedCompletion?.delivery != null) cohortRunIds.add(run.id);
+      // A swarm's anchor may hold no undelivered task while members still queue; Stop ends it.
+      if ((run.delegatedCompletion?.swarmIds?.length ?? 0) > 0) cohortRunIds.add(run.id);
     }
     for (const task of subagents) {
       const delivery = task.completionDelivery?.state;
@@ -10912,10 +10902,16 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           })
         : Effect.gen(function* () {
             for (const parentRunId of new Set([completionCohortRunId, run.id])) {
+              const projection = yield* getProjectionWithPendingEvents(command.threadId, events);
+              // Only Stop (holdStoppedThread) ends a swarm; /goal and agent interrupts do not.
+              const cohort = projection.runs.find(
+                (candidate) => candidate.id === parentRunId,
+              )?.delegatedCompletion;
+              if ((cohort?.swarmIds?.length ?? 0) > 0) continue;
               yield* disposeDelegatedCompletionCohort({
                 command,
                 events,
-                projection: yield* getProjectionWithPendingEvents(command.threadId, events),
+                projection,
                 parentRunId,
                 disposition: "stopped",
                 now,
