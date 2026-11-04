@@ -77,6 +77,16 @@ describe("summarizeT3ToolCalls", () => {
     ).toBe("Requested a swarm launch");
   });
 
+  it("counts swarm v2 members, queued ones included", () => {
+    const members = [
+      { key: "a", status: "running", childThreadId: "thread-child-1" },
+      { key: "b", status: "queued" },
+    ];
+    expect(
+      summarizeT3ToolCalls("swarm", [completed({}, { members, failed: [], warnings: [] })]),
+    ).toEqual({ label: "Started 2 swarm members", failedCount: 0 });
+  });
+
   it("does not confuse a child's failure or wait timeout with failure of the orchestration call", () => {
     const failedChild = { taskId: "task-1", status: "failed", summary: "command not found" };
     expect(

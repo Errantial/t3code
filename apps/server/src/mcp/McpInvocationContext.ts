@@ -106,6 +106,8 @@ export interface McpInvocationScope {
   readonly client: McpClientCaller | undefined;
   /** False while the Linked environments beta is off here; `/mcp` reads it per request. */
   readonly linkedEnvironments?: boolean;
+  /** True while the Swarm v2 Labs setting is on here; `/mcp` reads it per request. */
+  readonly swarmV2?: boolean;
 }
 
 /**
@@ -142,6 +144,20 @@ export const hiddenWhileLinksOff = (): boolean => {
   const fiber = Fiber.getCurrent();
   const scope = fiber && Context.getOrUndefined(fiber.context, McpInvocationContext);
   return scope?.linkedEnvironments !== false;
+};
+
+/** `McpSchema.EnabledWhen` for the Swarm v2 tools, shown only while the Labs setting is on. */
+export const shownWhileSwarmV2On = (): boolean => {
+  const fiber = Fiber.getCurrent();
+  const scope = fiber && Context.getOrUndefined(fiber.context, McpInvocationContext);
+  return scope?.swarmV2 === true;
+};
+
+/** `McpSchema.EnabledWhen` for the legacy `create_swarm`, hidden while Swarm v2 is on. */
+export const hiddenWhileSwarmV2On = (): boolean => {
+  const fiber = Fiber.getCurrent();
+  const scope = fiber && Context.getOrUndefined(fiber.context, McpInvocationContext);
+  return scope?.swarmV2 !== true;
 };
 
 export type McpCapabilityError<C extends McpCapability> = C extends "preview"

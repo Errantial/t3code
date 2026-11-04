@@ -146,6 +146,14 @@ export function summarizeT3ToolCalls(
       label = phrase("Delegated", "delegate", quantity(countEntities(entityIds("taskId")), "task"));
       break;
     case "swarm": {
+      // Swarm v2 results list every member, including queued ones that have no thread yet.
+      const members = selected.flatMap((call) =>
+        Array.isArray(call.output?.members) ? call.output.members : [],
+      );
+      if (members.length > 0) {
+        label = phrase("Started", "start", quantity(members.length, "swarm member"));
+        break;
+      }
       const agents = new Set(
         selected.flatMap((call) =>
           (Array.isArray(call.output?.launched) ? call.output.launched : []).flatMap((member) => {
@@ -191,6 +199,22 @@ export function summarizeT3ToolCalls(
       break;
     case "task-status":
       label = phrase("Checked", "check", `task status ${times}`);
+      break;
+    case "swarm-status":
+      label = phrase("Checked", "check", `swarm status ${times}`);
+      break;
+    case "swarm-cancel":
+      label = phrase("Requested cancellation of", "cancel", `swarm members ${times}`);
+      break;
+    case "swarm-collect":
+      label = phrase("Read", "read", `swarm results ${times}`);
+      break;
+    case "swarm-followup":
+      label = phrase(
+        "Followed up with",
+        "follow up with",
+        quantity(selected.length, "swarm member"),
+      );
       break;
     case "background-wait":
       label = phrase("Updated", "update", `background waits ${times}`);

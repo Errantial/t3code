@@ -110,6 +110,29 @@ export function handoffSettings(tool: string, args: unknown, result: unknown): F
         targetChosen: members.some((member) => asFields(member).target !== undefined),
       };
     }
+    case "swarm_create": {
+      const members = Array.isArray(input.members) ? input.members.map(asFields) : [];
+      const map = input.map === undefined ? undefined : asFields(input.map);
+      const rows = map !== undefined && Array.isArray(map.rows) ? map.rows : [];
+      const targets = [
+        ...members.map((member) => member.target),
+        ...(map === undefined ? [] : [map.target]),
+      ].filter((target) => target !== undefined);
+      return defined({
+        // The expanded member count: a map's rows each become a member.
+        batchSize: map === undefined ? members.length : rows.length,
+        targetChosen: targets.length > 0,
+        wakePolicy:
+          oneOf(stringField(input, "wakePolicy"), ["group", "failure", "batch"]) ?? "group",
+        hasVerify:
+          input.verify !== undefined ||
+          members.some((member) => member.verify !== undefined) ||
+          map?.verify !== undefined,
+        shape: map === undefined ? "members" : "map",
+        hasSharedContext: input.sharedContext !== undefined,
+        hasAnyOf: targets.some((target) => asFields(target).anyOf !== undefined),
+      });
+    }
     case "create_threads": {
       const threads = Array.isArray(input.threads) ? input.threads : [];
       return {

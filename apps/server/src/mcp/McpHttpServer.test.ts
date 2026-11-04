@@ -30,6 +30,8 @@ import * as ServerSettings from "../serverSettings.ts";
 import { advertisedJsonSchema } from "./advertisedJsonSchema.ts";
 import * as McpHttpServer from "./McpHttpServer.ts";
 import * as McpToolAccess from "./McpToolAccess.ts";
+import * as SwarmHandlers from "./toolkits/swarm/handlers.ts";
+import { SwarmToolkit } from "./toolkits/swarm/tools.ts";
 import * as McpToolAccessTestkit from "./McpToolAccess.testkit.ts";
 import * as McpInvocationContext from "./McpInvocationContext.ts";
 import * as McpSessionRegistry from "./McpSessionRegistry.ts";
@@ -982,6 +984,130 @@ it.effect("hides tools for links and refuses another environment while the beta 
       expect(yield* ranIn(elsewhere)).toMatchObject({
         isError: true,
         content: [{ text: expect.stringContaining("cannot reach linked environments") }],
+      });
+    }),
+  ).pipe(Effect.provide(NodeHttpServer.layerTest)),
+);
+
+it.effect("shows swarm v2 tools only with the flag on, and hides create_swarm then", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const token = "swarmToken";
+      const scope: McpInvocationContext.McpThreadInvocationScope = {
+        environmentId,
+        requestNamespace: token,
+        thread: {
+          threadId: ThreadId.make("thread-swarm"),
+          providerSessionId: token,
+          providerInstanceId: ProviderInstanceId.make("codex"),
+        },
+        client: undefined,
+        capabilities: new Set(["orchestration"]),
+        issuedAt: 1,
+      };
+      // Stands in for OrchestratorToolkit's create_swarm, which carries the same annotation.
+      const LegacyToolkit = Toolkit.make(
+        Tool.make("create_swarm", {
+          description: "Legacy swarm.",
+          success: Schema.Struct({ ok: Schema.Boolean }),
+          failure: OrchestratorMcpFailure,
+          failureMode: "return",
+        }).annotate(McpSchema.EnabledWhen, McpInvocationContext.hiddenWhileSwarmV2On),
+      );
+      const settingsContext = yield* Layer.build(ServerSettings.layerTest());
+      const settings = Context.get(settingsContext, ServerSettings.ServerSettingsService);
+      const serverLayer = Layer.mergeAll(
+        McpHttpServer.toolkitRegistration(
+          LegacyToolkit,
+          McpToolAccess.toLayer(LegacyToolkit, {
+            create_swarm: McpToolAccess.reads(() => Effect.succeed({ ok: true })),
+          }),
+        ),
+        McpHttpServer.toolkitRegistration(SwarmToolkit, SwarmHandlers.layer),
+      ).pipe(
+        Layer.provideMerge(
+          McpHttpServer.layerMcpTransport.pipe(
+            Layer.provide(Layer.succeedContext(settingsContext)),
+          ),
+        ),
+        Layer.provide(Layer.succeedContext(settingsContext)),
+        Layer.provide(McpToolAccessTestkit.liveThreadsLayer),
+        Layer.provide(
+          Layer.mock(McpSessionRegistry.McpSessionRegistry)({
+            resolve: (presented) => Effect.succeed(presented === token ? scope : undefined),
+          }),
+        ),
+      );
+      yield* HttpRouter.serve(serverLayer, { disableListenLog: true, disableLogger: true }).pipe(
+        Layer.build,
+      );
+      const httpClient = yield* HttpClient.HttpClient;
+      const headers = {
+        accept: "application/json, text/event-stream",
+        authorization: `Bearer ${token}`,
+      };
+      const initialize = yield* httpClient.post("/mcp", {
+        headers,
+        body: HttpBody.text(
+          `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"probe","version":"1.0.0"}}}`,
+          "application/json",
+        ),
+      });
+      const rpc = (method: string, params: object) =>
+        httpClient
+          .post("/mcp", {
+            headers: {
+              ...headers,
+              "mcp-session-id": initialize.headers["mcp-session-id"]!,
+              "mcp-protocol-version": "2025-06-18",
+            },
+            body: HttpBody.text(
+              JSON.stringify({ jsonrpc: "2.0", id: 2, method, params }),
+              "application/json",
+            ),
+          })
+          .pipe(Effect.flatMap((response) => response.json));
+      const listed = () =>
+        rpc("tools/list", {}).pipe(
+          Effect.map((body) =>
+            (body as { result: { tools: ReadonlyArray<{ name: string }> } }).result.tools
+              .map((tool) => tool.name)
+              .toSorted(),
+          ),
+        );
+      const call = (name: string, args: object) =>
+        rpc("tools/call", { name, arguments: args }).pipe(
+          Effect.map(
+            (body) =>
+              (
+                body as {
+                  result: { isError?: boolean; content: ReadonlyArray<{ text: string }> };
+                }
+              ).result,
+          ),
+        );
+
+      expect(yield* listed()).toEqual(["create_swarm"]);
+      // A hidden tool cannot be called at all; the handlers also refuse while the flag is off.
+      expect(
+        yield* rpc("tools/call", { name: "swarm_status", arguments: { swarmId: "s" } }),
+      ).toMatchObject({
+        error: { message: expect.stringContaining("not found") },
+      });
+
+      yield* settings.updateSettings({ swarmV2Enabled: true });
+      expect(yield* listed()).toEqual([
+        "swarm_add_members",
+        "swarm_cancel",
+        "swarm_collect",
+        "swarm_create",
+        "swarm_followup",
+        "swarm_retry",
+        "swarm_status",
+      ]);
+      expect(yield* call("swarm_status", { swarmId: "swarm:1" })).toMatchObject({
+        isError: true,
+        content: [{ text: expect.stringContaining("not available in this build yet") }],
       });
     }),
   ).pipe(Effect.provide(NodeHttpServer.layerTest)),

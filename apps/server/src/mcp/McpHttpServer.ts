@@ -56,6 +56,8 @@ import { InstructionToolkit } from "./toolkits/instruction/tools.ts";
 import * as ThreadHandlers from "./toolkits/thread/handlers.ts";
 import * as InstructionHandlers from "./toolkits/instruction/handlers.ts";
 import * as FleetHandlers from "./toolkits/fleet/handlers.ts";
+import * as SwarmHandlers from "./toolkits/swarm/handlers.ts";
+import { SwarmToolkit } from "./toolkits/swarm/tools.ts";
 import { FleetToolkit } from "./toolkits/fleet/tools.ts";
 import * as ThreadMetadataMcpService from "./ThreadMetadataMcpService.ts";
 import * as McpSessionRegistry from "./McpSessionRegistry.ts";
@@ -200,9 +202,12 @@ const makeMcpAuthMiddleware = Effect.gen(function* () {
   const registry = yield* McpSessionRegistry.McpSessionRegistry;
   const clients = yield* Effect.serviceOption(McpClientAuthenticator);
   const serverSettings = yield* ServerSettings.ServerSettingsService;
-  const linksEnabled = serverSettings.getSettings.pipe(
-    Effect.map((settings) => settings.linkedEnvironmentsEnabled),
-    Effect.orElseSucceed(() => false),
+  const betaFlags = serverSettings.getSettings.pipe(
+    Effect.map((settings) => ({
+      linkedEnvironments: settings.linkedEnvironmentsEnabled,
+      swarmV2: settings.swarmV2Enabled,
+    })),
+    Effect.orElseSucceed(() => ({ linkedEnvironments: false, swarmV2: false })),
   );
   return Effect.fn("McpHttpServer.authenticateRequest")(function* (httpEffect) {
     const request = yield* HttpServerRequest.HttpServerRequest;
@@ -228,12 +233,14 @@ const makeMcpAuthMiddleware = Effect.gen(function* () {
     }
     const limited = withModeLimit(invocation, request);
     if (limited === undefined) return invalidModeLimit;
-    const linkedEnvironments = yield* linksEnabled;
+    const { linkedEnvironments, swarmV2 } = yield* betaFlags;
     if (limited.client?.linked === true && !linkedEnvironments) return linkedEnvironmentsOff;
     return yield* httpEffect.pipe(
       Effect.provideService(McpInvocationContext.McpInvocationContext, {
         ...limited,
         linkedEnvironments,
+        // Only set while on, so a flag-off scope is unchanged.
+        ...(swarmV2 ? { swarmV2 } : {}),
       }),
       Effect.map(normalizeMcpHttpResponse),
     );
@@ -811,6 +818,10 @@ const registerHtmlPreview = Effect.fn("McpHttpServer.registerHtmlPreview")(funct
 const HANDOFF_TOOLS: ReadonlySet<string> = new Set([
   "delegate_task",
   "create_swarm",
+  "swarm_create",
+  "swarm_retry",
+  "swarm_add_members",
+  "swarm_followup",
   "create_threads",
   "t3_thread_launch",
   "t3_thread_send",
@@ -849,6 +860,7 @@ const resultThreadIds = (content: unknown): ReadonlyArray<string> => {
   const record = content as Readonly<Record<string, unknown>>;
   if (Array.isArray(record.threads)) return record.threads.flatMap(resultThreadIds);
   if (Array.isArray(record.launched)) return record.launched.flatMap(resultThreadIds);
+  if (Array.isArray(record.members)) return record.members.flatMap(resultThreadIds);
   const key = resultThreadKeys.find((candidate) => typeof record[candidate] === "string");
   return key === undefined ? [] : [record[key] as string];
 };
@@ -1098,6 +1110,8 @@ export const layerOrchestratorToolkit = toolkitRegistration(
   OrchestratorHandlers.layer,
 ).pipe(Layer.provide(OrchestratorMcpService.layer), Layer.provide(ThreadMetadataMcpService.layer));
 
+const layerSwarmToolkit = toolkitRegistration(SwarmToolkit, SwarmHandlers.layer);
+
 export const layerThreadToolkit = toolkitRegistration(ThreadToolkit, ThreadHandlers.layer);
 const layerInstructionToolkit = toolkitRegistration(InstructionToolkit, InstructionHandlers.layer);
 const layerFleetToolkit = toolkitRegistration(FleetToolkit, FleetHandlers.layer);
@@ -1156,6 +1170,7 @@ export const layerMcpTransport = McpServer.layerHttp({
 export const layerTools = Layer.mergeAll(
   layerPreviewToolkit,
   layerOrchestratorToolkit,
+  layerSwarmToolkit,
   layerThreadToolkit,
   layerInstructionToolkit,
   layerFleetToolkit,
