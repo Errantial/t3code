@@ -1,4 +1,5 @@
 import { useAuth } from "@clerk/react";
+import { DEFAULT_UNIFIED_SETTINGS } from "@t3tools/contracts/settings";
 import { Link } from "@tanstack/react-router";
 
 import { hasCloudPublicConfig } from "~/cloud/publicConfig";
@@ -6,7 +7,12 @@ import { useT3ConnectAuthPrompt } from "../clerk/useT3ConnectAuthPrompt";
 import { Button } from "../ui/button";
 import { Switch } from "../ui/switch";
 import { ScopedSwitch } from "./ScopedSwitch";
-import { SettingsPageContainer, SettingsRow, SettingsSection } from "./settingsLayout";
+import {
+  SettingResetButton,
+  SettingsPageContainer,
+  SettingsRow,
+  SettingsSection,
+} from "./settingsLayout";
 import { searchableSetting } from "./settingsSearch";
 import { LegacyFeaturesSection } from "./SettingsPanels";
 import { useScopedSettings, useUpdateScopedSettings } from "./useScopedSettings";
@@ -18,6 +24,7 @@ export function LabsSettingsPanel() {
       <SettingsSection id="beta" title="Beta">
         <BoringSidebarRow />
         <BoringSidebarMultilineRow />
+        <PinOverhaulRow />
         {/* Clerk is only mounted when this build has T3 Connect. */}
         {hasCloudPublicConfig() ? <GuestLinksRowWithSignIn /> : <GuestLinksRow />}
         <LinkedEnvironmentsRow />
@@ -63,6 +70,38 @@ function BoringSidebarMultilineRow() {
             updateSettings({ boringSidebarMultilineRows: Boolean(checked) })
           }
           aria-label="Two-line folder rows"
+        />
+      }
+    />
+  );
+}
+
+/** Stored as `sidebarPinnedThreadsOnTop`; `false` means the overhaul is on. */
+function PinOverhaulRow() {
+  const settings = useScopedSettings();
+  const updateSettings = useUpdateScopedSettings();
+  return (
+    <SettingsRow
+      {...searchableSetting("pinned-threads-on-top")}
+      description="Pinned threads sort with activity and fold into Working while they run. Settle is hidden for pinned threads until they are unpinned. Pinning still prevents automatic settling. The folder sidebar keeps pinned threads on top."
+      resetAction={
+        settings.sidebarPinnedThreadsOnTop !==
+        DEFAULT_UNIFIED_SETTINGS.sidebarPinnedThreadsOnTop ? (
+          <SettingResetButton
+            label="pin overhaul"
+            onClick={() =>
+              updateSettings({
+                sidebarPinnedThreadsOnTop: DEFAULT_UNIFIED_SETTINGS.sidebarPinnedThreadsOnTop,
+              })
+            }
+          />
+        ) : null
+      }
+      control={
+        <Switch
+          checked={!settings.sidebarPinnedThreadsOnTop}
+          onCheckedChange={(checked) => updateSettings({ sidebarPinnedThreadsOnTop: !checked })}
+          aria-label="Pin overhaul"
         />
       }
     />

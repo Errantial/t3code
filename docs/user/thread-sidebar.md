@@ -74,7 +74,9 @@ files directly; see [Attach files](./composer.md#attach-files).
 On web and desktop, pinning or unpinning a thread keeps the sidebar at your current
 scroll position instead of following the thread to its new place in the list.
 
-Pinning does not prevent automatic settlement. Settling a thread removes its pin.
+Pinning prevents automatic settlement. Settling a thread yourself removes its pin.
+
+By default pinned threads stay in their own section above your active work. **Settings → Labs → Pin overhaul** (web and desktop) changes that: pinned threads then sort with activity like any other thread, and Settle is hidden for them until they are unpinned. The folder sidebar keeps pinned threads on top either way.
 
 On web and desktop, drag a thread between sections to change its state. Drag a thread up into
 the pinned section to pin it at the spot you drop it; drag a pinned thread down into the active
@@ -136,7 +138,7 @@ That includes subagents, watched pull requests, and background commands or monit
 says it is waiting on. A dev server or other process an agent leaves running does not keep a thread
 there. A thread returns to the top of the active list when it finishes, fails, or needs an approval or
 answer. The Working section lists the thread you last sent work to first. Pinned threads stay in
-the pinned section.
+the pinned section unless **Settings → Labs → Pin overhaul** is on.
 
 This is on by default. Turn it off with **Settings → General → Working section** on web and desktop,
 or **Settings → General → Working section** on iOS and Android. Each device keeps its own
