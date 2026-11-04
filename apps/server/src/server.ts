@@ -71,6 +71,7 @@ import * as McpHttpServer from "./mcp/McpHttpServer.ts";
 import * as ProviderMcpRelay from "./mcp/ProviderMcpRelay.ts";
 import * as PeerForwarding from "./peer/PeerForwarding.ts";
 import * as RemoteDelegation from "./peer/RemoteDelegation.ts";
+import * as SwarmStore from "./swarm/SwarmStore.ts";
 import * as PeerLinkRequests from "./peer/PeerLinkRequests.ts";
 import * as PeerLinks from "./peer/PeerLinks.ts";
 import * as PeerMcpClient from "./peer/PeerMcpClient.ts";
@@ -779,6 +780,8 @@ const layerMakeRoutes = Layer.mergeAll(
     ),
   ),
   Layer.provide(PreviewAutomationBroker.layer),
+  // Swarm v2 records (migration 076); nothing reads or writes them while swarmV2Enabled is off.
+  Layer.provide(SwarmStore.layer),
   Layer.provide(ServerSelfUpdate.layer.pipe(Layer.provide(layerDesktopAppUpdate))),
   Layer.provide(layerCommandReadiness),
   Layer.provide(ServerHttp.layerBrowserApiCors),

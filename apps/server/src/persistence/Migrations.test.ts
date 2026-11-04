@@ -158,6 +158,86 @@ it.effect("075 adds environment_roots_json with an empty default and is idempote
   }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
 );
 
+// v1.2.0 reserves 074 and 075; Swarm v2 (v1.2.1) takes 076.
+it.effect("reserves the swarm records migration id", () =>
+  Effect.gen(function* () {
+    yield* Effect.void;
+    assert.deepStrictEqual(
+      migrationManifest.filter(([id]) => id === 76),
+      [[76, "SwarmRecords"]],
+    );
+  }),
+);
+
+it.effect("076 creates the swarm tables with their defaults and is idempotent", () =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    yield* runMigrations();
+    const at = "2026-11-04T00:00:00.000Z";
+    yield* sql`
+      INSERT INTO swarms
+        (swarm_id, request_key, parent_thread_id, anchor_run_id, anchor_node_id, title,
+         wake_policy, status, created_at, updated_at)
+      VALUES ('swarm-1', 'request-1', 'thread-1', 'run-1', 'node-1', 'Swarm', 'group',
+         'active', ${at}, ${at})
+    `;
+    yield* sql`
+      INSERT INTO swarm_members
+        (swarm_id, member_key, ordinal, spec_json, status, queued_at, updated_at)
+      VALUES ('swarm-1', 'a', 0, '{}', 'queued', ${at}, ${at})
+    `;
+    yield* sql`
+      INSERT INTO swarm_note_outbox (swarm_id, seq, kind, members_json, created_at)
+      VALUES ('swarm-1', 1, 'followup_result', '[]', ${at})
+    `;
+    yield* sql`
+      INSERT INTO swarm_instance_pauses (provider_instance_id, pause_class, until, at)
+      VALUES ('codex', 'usage_limit', ${at}, ${at})
+    `;
+    const swarm = yield* sql<{
+      readonly allow_shared_writers: number;
+      readonly budget_exhausted: number;
+    }>`SELECT allow_shared_writers, budget_exhausted FROM swarms`;
+    assert.deepStrictEqual(swarm, [{ allow_shared_writers: 0, budget_exhausted: 0 }]);
+    const member = yield* sql<{
+      readonly attempt: number;
+      readonly priority: number;
+      readonly released: number;
+      readonly followup_notified: number;
+      readonly superseded_task_id: string | null;
+      readonly last_failed_instance_id: string | null;
+    }>`
+      SELECT attempt, priority, released, followup_notified, superseded_task_id,
+        last_failed_instance_id
+      FROM swarm_members
+    `;
+    assert.deepStrictEqual(member, [
+      {
+        attempt: 1,
+        priority: 0,
+        released: 0,
+        followup_notified: 0,
+        superseded_task_id: null,
+        last_failed_instance_id: null,
+      },
+    ]);
+    const outbox = yield* sql<{ readonly sent: number }>`SELECT sent FROM swarm_note_outbox`;
+    assert.deepStrictEqual(outbox, [{ sent: 0 }]);
+    const badStatus = yield* sql`
+      INSERT INTO swarm_members
+        (swarm_id, member_key, ordinal, spec_json, status, queued_at, updated_at)
+      VALUES ('swarm-1', 'b', 1, '{}', 'unknown', ${at}, ${at})
+    `.pipe(Effect.exit);
+    assert.isTrue(Exit.isFailure(badStatus));
+    const badPause = yield* sql`
+      INSERT INTO swarm_instance_pauses (provider_instance_id, pause_class, until, at)
+      VALUES ('other', 'launch', ${at}, ${at})
+    `.pipe(Effect.exit);
+    assert.isTrue(Exit.isFailure(badPause));
+    assert.deepStrictEqual(yield* runMigrations(), []);
+  }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
+);
+
 // The npm launcher reads the highest migration id from these file names.
 it.effect("registers every migration file", () =>
   Effect.gen(function* () {
