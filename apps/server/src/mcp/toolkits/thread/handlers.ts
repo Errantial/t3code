@@ -24,6 +24,8 @@ import {
   unavailable,
 } from "../../threadAccess.ts";
 import * as ThreadSearch from "../../../orchestration-v2/ThreadSearch.ts";
+import * as ProviderRegistry from "../../../provider/ProviderRegistry.ts";
+import { retainSupportedOptions } from "../../modelEffort.ts";
 import * as ScheduledTasks from "../../../scheduledTasks/ScheduledTaskService.ts";
 import { queuedRunsInDeliveryOrder } from "../../../orchestration-v2/QueuedRunOrder.ts";
 import { ThreadToolkit } from "./tools.ts";
@@ -279,11 +281,37 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
           threads,
           projection: { thread },
         } = yield* readThread(input.threadId, [], "mutate");
-        const type = modelSelectionCommandType(thread.providerInstanceId, modelSelection);
+        const registry = yield* Effect.serviceOption(ProviderRegistry.ProviderRegistry);
+        const providers = Option.isNone(registry)
+          ? []
+          : yield* registry.value.getProviders.pipe(Effect.mapError(unavailable));
+        const descriptors = providers
+          .find((provider) => provider.instanceId === modelSelection.instanceId)
+          ?.models.find((model) => model.slug === modelSelection.model)
+          ?.capabilities?.optionDescriptors;
+        const requestedOptions = modelSelection.options ?? thread.modelSelection.options;
+        const adjusted = retainSupportedOptions({
+          selection: {
+            ...modelSelection,
+            ...(requestedOptions === undefined ? {} : { options: requestedOptions }),
+          },
+          descriptors,
+        });
+        const type = modelSelectionCommandType(thread.providerInstanceId, adjusted.selection);
         const result = yield* threads
-          .dispatch({ type, threadId: thread.id, commandId: yield* newCommandId(), modelSelection })
+          .dispatch({
+            type,
+            threadId: thread.id,
+            commandId: yield* newCommandId(),
+            modelSelection: adjusted.selection,
+          })
           .pipe(Effect.mapError(dispatchFailure));
-        return { sequence: result.sequence };
+        return {
+          sequence: result.sequence,
+          ...(adjusted.optionsDropped.length === 0
+            ? {}
+            : { optionsDropped: [...adjusted.optionsDropped] }),
+        };
       }),
     ),
   ),

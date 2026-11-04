@@ -778,6 +778,7 @@ export const OrchestratorMcpCapabilitiesResult = Schema.Struct({
     scheduledTasks: Schema.Boolean,
     maxBatchThreads: Schema.Number,
   }),
+  contracts: Schema.optional(Schema.Array(Schema.String)),
 });
 export type OrchestratorMcpCapabilitiesResult = typeof OrchestratorMcpCapabilitiesResult.Type;
 
@@ -1006,6 +1007,7 @@ export class OrchestratorMcpFailure extends Schema.TaggedError<OrchestratorMcpFa
       "orchestration_error",
       "thread_credential_required",
       "target_required",
+      "target_capability_missing",
     ]),
     message: Schema.String,
   },

@@ -1,6 +1,7 @@
 import {
   type EnvironmentId,
   OrchestratorMcpFailure,
+  OrchestratorMcpCapabilitiesResult,
   type OrchestratorMcpEnvironmentLinksResult,
   OrchestratorMcpThreadInterruptInput,
   OrchestratorMcpThreadInterruptResult,
@@ -90,6 +91,28 @@ export const linkedEnvironmentsOff = new OrchestratorMcpFailure({
 /** The linked environment a call names, or nothing when it names this one. */
 export const remoteTarget = (scope: Scope, environmentId: EnvironmentId | undefined) =>
   environmentId === scope.environmentId ? undefined : environmentId;
+
+/** A peer older than v1.2.0 has no `contracts`, so any effort cannot be honored there. */
+const carriesEffort = (value: unknown, depth = 0): boolean => {
+  if (value === null || typeof value !== "object" || depth > 4) return false;
+  if (Array.isArray(value)) return value.some((entry) => carriesEffort(entry, depth + 1));
+  const record = value as Record<string, unknown>;
+  if (typeof record.effort === "string") return true;
+  if (
+    Array.isArray(record.options) &&
+    record.options.some(
+      (option) =>
+        option !== null &&
+        typeof option === "object" &&
+        ["effort", "reasoningEffort", "thinking"].includes(String((option as { id?: unknown }).id)),
+    )
+  ) {
+    return true;
+  }
+  return ["target", "modelSelection", "members", "threads"].some((key) =>
+    carriesEffort(record[key], depth + 1),
+  );
+};
 
 const make = Effect.gen(function* () {
   const peers = yield* PeerMcpClient.PeerMcpClient;
@@ -228,7 +251,28 @@ const make = Effect.gen(function* () {
           params as OrchestratorMcpThreadWaitInput,
         ) as Effect.Effect<Tool.Success<typeof tool>, OrchestratorMcpFailure>)
       : forward(scope, tool.name, tool.parametersSchema, tool.successSchema, environmentId, params);
-    return Effect.andThen(requireEnabled, forwarded);
+    return Effect.andThen(
+      requireEnabled,
+      Effect.gen(function* () {
+        if (carriesEffort(params)) {
+          const limits = yield* callerLimits(scope);
+          const capabilities = yield* peers.call({
+            environmentId,
+            tool: "orchestrator_capabilities",
+            arguments: {},
+            limits,
+            success: OrchestratorMcpCapabilitiesResult,
+          });
+          if (capabilities.contracts?.includes("effort-v1") !== true) {
+            return yield* new OrchestratorMcpFailure({
+              code: "target_capability_missing",
+              message: `The linked environment ${environmentId} does not support effort; update it to a build with the effort-v1 contract or retry without effort.`,
+            });
+          }
+        }
+        return yield* forwarded;
+      }),
+    );
   };
 
   /**

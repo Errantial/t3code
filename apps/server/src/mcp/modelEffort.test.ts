@@ -10,6 +10,7 @@ import {
   effortOptionDescriptor,
   mergeOptionSelections,
   resolveEffortSelection,
+  retainSupportedOptions,
 } from "./modelEffort.ts";
 
 const claudeInstanceId = ProviderInstanceId.make("claude");
@@ -196,6 +197,26 @@ describe("modelEffort", () => {
     expect(effortOptionDescriptor(piDescriptors)?.id).toBe("thinking");
     expect(effortOptionDescriptor([])).toBeUndefined();
     expect(effortOptionDescriptor(undefined)).toBeUndefined();
+  });
+
+  it("drops an option the new model does not advertise and reports its id", () => {
+    const selection = {
+      instanceId: claudeInstanceId,
+      model: "new-model",
+      options: [{ id: "effort", value: "high" }],
+    } as const;
+    expect(retainSupportedOptions({ selection, descriptors: [] })).toEqual({
+      selection: { ...selection, options: [] },
+      optionsDropped: ["effort"],
+    });
+    expect(retainSupportedOptions({ selection, descriptors: claudeDescriptors })).toEqual({
+      selection,
+      optionsDropped: [],
+    });
+    expect(retainSupportedOptions({ selection, descriptors: undefined })).toEqual({
+      selection,
+      optionsDropped: [],
+    });
   });
 
   it("merges an effort over the same option and keeps the others", () => {

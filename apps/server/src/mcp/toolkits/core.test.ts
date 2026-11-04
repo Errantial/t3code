@@ -913,3 +913,78 @@ it.effect("only the caller that prepared a pending upload can discard it", () =>
     ),
   ),
 );
+
+it.effect("t3_thread_configure drops an option the new model does not advertise", () => {
+  const instanceId = ProviderInstanceId.make("codex");
+  const shell = {
+    ...McpToolAccessTestkit.liveThreadShell(threadId),
+    modelSelection: {
+      instanceId,
+      model: "old-model",
+      options: [{ id: "effort", value: "high" }],
+    },
+  };
+  const projection = McpToolAccessTestkit.idleThreadProjection(shell);
+  const dispatched: Array<{
+    modelSelection?: { options?: ReadonlyArray<{ id: string; value: unknown }> };
+  }> = [];
+  return Effect.gen(function* () {
+    const server = yield* McpServer.McpServer;
+    const result = yield* server
+      .callTool({
+        name: "t3_thread_configure",
+        arguments: { modelSelection: { instanceId, model: "new-model" } },
+      })
+      .pipe(
+        Effect.provideService(McpInvocationContext.McpInvocationContext, scope),
+        Effect.provideService(McpSchema.McpServerClient, client),
+      );
+    expect(result.isError).toBe(false);
+    expect(result.structuredContent).toMatchObject({ optionsDropped: ["effort"] });
+    expect(dispatched).toHaveLength(1);
+    expect(dispatched[0]?.modelSelection?.options).toEqual([]);
+  }).pipe(
+    Effect.provide(
+      layerThreadToolkit.pipe(
+        Layer.provideMerge(McpServer.McpServer.layer),
+        Layer.provide(NodeCrypto.layer),
+        Layer.provide(
+          Layer.mock(ThreadManagement.ThreadManagementService)({
+            getThreadShell: () => Effect.succeed(shell),
+            getProjectThreadRecords: () => Effect.succeed(projection),
+            dispatch: (command) => {
+              dispatched.push(command as never);
+              return Effect.succeed({ sequence: 1 } as never);
+            },
+          }),
+        ),
+        Layer.provide(
+          Layer.mock(ProviderRegistry.ProviderRegistry)({
+            getProviders: Effect.succeed([
+              {
+                instanceId,
+                driver: ProviderDriverKind.make("codex"),
+                enabled: true,
+                installed: true,
+                version: "test",
+                status: "ready",
+                auth: { status: "authenticated" },
+                checkedAt: "2026-09-13T00:00:00.000Z",
+                models: [
+                  {
+                    slug: "new-model",
+                    name: "New Model",
+                    isCustom: false,
+                    capabilities: { optionDescriptors: [] },
+                  },
+                ],
+                slashCommands: [],
+                skills: [],
+              } as never,
+            ]),
+          }),
+        ),
+      ),
+    ),
+  );
+});

@@ -2241,6 +2241,7 @@ const make = Effect.gen(function* () {
           scheduledTasks: true,
           maxBatchThreads: 20,
         },
+        contracts: ["effort-v1", "thread-ref-v1", "thread-list-scope-v1"],
       };
     }),
     delegateTask: Effect.fn("OrchestratorMcpService.delegateTask")(function* (callerScope, input) {

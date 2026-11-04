@@ -4,6 +4,7 @@ import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
   EnvironmentId,
+  OrchestratorMcpFailure,
   type OrchestrationV2Run,
   type OrchestrationV2ThreadShell,
   type SourceControlCloneRepositoryInput,
@@ -39,6 +40,8 @@ import { liveThreadShell } from "../mcp/McpToolAccess.testkit.ts";
 import * as PeerForwarding from "./PeerForwarding.ts";
 import * as PeerLinks from "./PeerLinks.ts";
 import * as PeerLinkRequests from "./PeerLinkRequests.ts";
+import * as PeerMcpClient from "./PeerMcpClient.ts";
+import { OrchestratorToolkit } from "../mcp/toolkits/orchestrator/tools.ts";
 import { descriptorOf, layerLinkingEnvironment, linkTo, servePeer } from "./PeerLinks.testkit.ts";
 
 const laptop = descriptorOf("environment-laptop", "Laptop");
@@ -686,3 +689,57 @@ it.effect("refuses what a linked environment cannot take before anything leaves"
     }),
   ).pipe(Effect.provide(NodeHttpServer.layerTest)),
 );
+
+it.effect("refuses effort before forwarding when the peer lacks effort-v1", () => {
+  const environmentId = EnvironmentId.make("environment-old-peer");
+  const callerThreadId = ThreadId.make("thread:old-peer-caller");
+  const scope = {
+    environmentId: EnvironmentId.make("environment-old-peer-caller"),
+    requestNamespace: "client:old-peer",
+    thread: {
+      threadId: callerThreadId,
+      providerSessionId: "session:old-peer",
+      providerInstanceId: ProviderInstanceId.make("codex"),
+    },
+    client: { sessionId: "old-peer", label: "Claude Code", access: "full-access" },
+    capabilities: new Set(["orchestration"]),
+    issuedAt: 1,
+  } as unknown as McpInvocationContext.McpInvocationScope;
+  const calls: string[] = [];
+  const dependencies = Layer.mergeAll(
+    Layer.mock(PeerMcpClient.PeerMcpClient)({
+      call: (input) => {
+        calls.push(input.tool);
+        return input.tool === "orchestrator_capabilities"
+          ? Effect.succeed({ contracts: [] } as never)
+          : Effect.fail(
+              new OrchestratorMcpFailure({
+                code: "orchestration_error",
+                message: "must not forward",
+              }),
+            );
+      },
+    }),
+    Layer.mock(PeerLinks.PeerLinks)({ enabled: Effect.succeed(true) }),
+    Layer.mock(ThreadManagement.ThreadManagementService)({
+      getThreadShell: (threadId) =>
+        Effect.succeed(liveThreadShell(threadId, { runtimeMode: "full-access" })),
+    }),
+  );
+  return Effect.gen(function* () {
+    const forwarding = yield* PeerForwarding.PeerForwarding;
+    const error = yield* forwarding
+      .call(scope, OrchestratorToolkit.tools.t3_thread_send, environmentId, {
+        threadId: ThreadId.make("thread:target"),
+        message: "hello",
+        effort: "high",
+      })
+      .pipe(Effect.flip);
+    expect(error.code).toBe("target_capability_missing");
+    expect(calls).toEqual(["orchestrator_capabilities"]);
+  }).pipe(
+    Effect.provide(
+      PeerForwarding.layer.pipe(Layer.provide(dependencies), Layer.provide(NodeCrypto.layer)),
+    ),
+  );
+});

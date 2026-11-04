@@ -150,16 +150,20 @@ const threadConfiguration = Schema.Struct({
   runtimeMode: RuntimeMode,
   interactionMode: ProviderInteractionMode,
 });
+const ThreadConfigureWriteResult = Schema.Struct({
+  sequence: NonNegativeInt,
+  optionsDropped: Schema.optional(Schema.Array(Schema.String)),
+});
 const ThreadConfigureTool = Tool.make("t3_thread_configure", {
   ...commandTool,
   description:
-    "Read a thread's provider, model, and modes, or set its provider, model, and options with `modelSelection`. Omit `threadId` for this thread. Permission modes stay. Values from `orchestrator_capabilities`; its `options` carries the effort level, as `t3_thread_send` `effort` does with validation.",
+    "Read a thread's provider, model, and modes, or set its provider, model, and options with `modelSelection`. Omit `threadId` for this thread. Permission modes stay. Values from `orchestrator_capabilities`; its `options` carries the effort level, as `t3_thread_send` `effort` does with validation. A model switch drops an option that model does not advertise and reports it in `optionsDropped`.",
   parameters: Schema.Struct({
     environmentId: OrchestratorMcpEnvironmentTarget,
     threadId: Schema.optional(ThreadId),
     modelSelection: Schema.optional(ModelSelection),
   }),
-  success: Schema.Union([threadConfiguration, OrchestrationV2DispatchCommandResult]),
+  success: Schema.Union([threadConfiguration, ThreadConfigureWriteResult]),
 }).annotate(Tool.Destructive, true);
 
 const ThreadTransferTool = Tool.make("t3_thread_transfer", {

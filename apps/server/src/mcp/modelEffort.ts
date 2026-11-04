@@ -1,5 +1,6 @@
 import {
   OrchestratorMcpFailure,
+  type ModelSelection,
   type ProviderInstanceId,
   type ProviderOptionDescriptor,
   type ProviderOptionSelection,
@@ -30,6 +31,29 @@ export function mergeOptionSelections(
   const merged = new Map((base ?? []).map((selection) => [selection.id, selection]));
   for (const selection of overrides) merged.set(selection.id, selection);
   return [...merged.values()];
+}
+
+/**
+ * Drops options a model does not advertise, reporting their ids. An undefined
+ * descriptor list means the provider has not reported capabilities yet, so the
+ * selection is left alone rather than guessed at.
+ */
+export function retainSupportedOptions(input: {
+  readonly selection: ModelSelection;
+  readonly descriptors: ReadonlyArray<ProviderOptionDescriptor> | undefined;
+}): { readonly selection: ModelSelection; readonly optionsDropped: ReadonlyArray<string> } {
+  if (input.descriptors === undefined || input.selection.options === undefined) {
+    return { selection: input.selection, optionsDropped: [] };
+  }
+  const supported = new Set(input.descriptors.map((descriptor) => descriptor.id));
+  const kept = input.selection.options.filter((option) => supported.has(option.id));
+  const optionsDropped = input.selection.options
+    .filter((option) => !supported.has(option.id))
+    .map((option) => option.id);
+  return {
+    selection: { ...input.selection, options: kept },
+    optionsDropped,
+  };
 }
 
 /**
