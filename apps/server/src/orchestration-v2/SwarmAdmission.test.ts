@@ -1047,11 +1047,24 @@ it.layer(layerTest)("swarm admission after the anchor run (SW-A0)", (it) => {
       yield* endRun({ threadId, runId: anchor.id });
 
       // ws.ts stamps every client command with the user's provenance.
-      const forged = withCreationProvenance(
-        memberCommand({ threadId, anchor, swarmId, key: "forged" }),
+      const { completionWake: _wake, ...unheld } = memberCommand({
+        threadId,
+        anchor,
+        swarmId,
+        key: "forged",
+      });
+      const forged = yield* withCreationProvenance(
+        { ...unheld, completionWake: "always" },
         { createdBy: "user", creationSource: "server" },
       );
       assert.notProperty(forged, "swarmAdmission");
+      // A held wake is reserved for the server, so a client sending one is refused.
+      const held = yield* withCreationProvenance(
+        { ...unheld, completionWake: "held" },
+        { createdBy: "user", creationSource: "web" },
+      ).pipe(Effect.flip);
+      assert.equal(held._tag, "ThreadManagementClientCommandError");
+      assert.include(held.message, "Invalid request");
       const orchestrator = yield* Orchestrator.OrchestratorV2;
       const forgedExit = yield* orchestrator.dispatch(forged).pipe(Effect.exit);
       assert.isTrue(Exit.isFailure(forgedExit));
@@ -1403,7 +1416,7 @@ const layerSwarm = SwarmService.layer.pipe(
         }),
     } as unknown as ThreadLaunchService.ThreadLaunchService["Service"]),
   ),
-  Layer.provide(ServerSettings.layerTest({ swarmV2Enabled: true, swarmMaxConcurrent: 2 })),
+  Layer.provideMerge(ServerSettings.layerTest({ swarmV2Enabled: true, swarmMaxConcurrent: 2 })),
   Layer.provideMerge(layerTest),
 );
 
@@ -1465,10 +1478,15 @@ const rows = (swarmId: SwarmId) =>
 const retire = (swarmId: SwarmId) =>
   Effect.gen(function* () {
     const store = yield* SwarmStore.SwarmStore;
-    yield* store.updateSwarm(swarmId, {
-      status: "cancelled",
-      updatedAt: DateTime.formatIso(yield* DateTime.now),
-    });
+    const updatedAt = DateTime.formatIso(yield* DateTime.now);
+    for (const row of yield* store.listMembers(swarmId)) {
+      yield* store.updateMember({
+        swarmId,
+        memberKey: row.memberKey,
+        patch: { status: "cancelled", updatedAt },
+      });
+    }
+    yield* store.updateSwarm(swarmId, { status: "cancelled", updatedAt });
   });
 
 const slotCount = (list: ReadonlyArray<SwarmStore.SwarmMemberRecord>) =>
@@ -1500,8 +1518,10 @@ it.layer(layerSwarm)("swarm_create, admission, and the scheduler (SW-A3)", (it) 
       );
       yield* endRun({ threadId, runId: anchor.id });
 
+      let peak = 0;
       for (let round = 0; round < 6; round += 1) {
         const list = yield* rows(result.swarmId);
+        peak = Math.max(peak, slotCount(list));
         assert.isAtMost(slotCount(list), 2);
         const running = list.find((row) => row.status === "launching" || row.status === "running");
         if (running === undefined) break;
@@ -1514,6 +1534,7 @@ it.layer(layerSwarm)("swarm_create, admission, and the scheduler (SW-A3)", (it) 
         });
         yield* swarms.tick;
       }
+      assert.equal(peak, 2, "two members run at once after the anchor ended");
       const final = yield* rows(result.swarmId);
       assert.deepEqual(
         final.map((row) => row.status),
@@ -1713,7 +1734,7 @@ it.layer(layerSwarm)("swarm_create, admission, and the scheduler (SW-A3)", (it) 
     }),
   );
 
-  it.effect("admits nothing after the architect's Stop", () =>
+  it.effect("cancels queued members and the swarm after the architect's Stop", () =>
     Effect.gen(function* () {
       const orchestrator = yield* Orchestrator.OrchestratorV2;
       const swarms = yield* SwarmService.SwarmService;
@@ -1737,8 +1758,166 @@ it.layer(layerSwarm)("swarm_create, admission, and the scheduler (SW-A3)", (it) 
         text: "first done",
       });
       yield* swarms.tick;
-      assert.equal((yield* rows(result.swarmId))[1]?.status, "queued");
+      const store = yield* SwarmStore.SwarmStore;
+      const after = yield* rows(result.swarmId);
+      assert.deepInclude(after[1], {
+        status: "cancelled",
+        failureClass: "cancelled_by_architect_stop",
+      });
+      assert.equal(Option.getOrThrow(yield* store.getSwarm(result.swarmId)).status, "cancelled");
+      assert.isUndefined(
+        (yield* orchestrator.getThreadProjection(threadId)).subagents.find(
+          (task) => task.id === after[1]?.taskId,
+        ),
+      );
       yield* retire(result.swarmId);
+    }),
+  );
+
+  it.effect("resumes launching rows whose child ids were never stored, admitting each once", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const swarms = yield* SwarmService.SwarmService;
+      const store = yield* SwarmStore.SwarmStore;
+      const { threadId } = yield* seedArchitect("a3-resume");
+      const result = yield* createSwarm(threadId, {
+        maxConcurrent: 1,
+        members: members(2, { interactionMode: "plan" }),
+      });
+      const updatedAt = DateTime.formatIso(yield* DateTime.now);
+      const [first] = yield* rows(result.swarmId);
+      // m0 was dispatched, but a crash lost its ids before they were stored.
+      yield* store.updateMember({
+        swarmId: result.swarmId,
+        memberKey: "m0",
+        patch: { taskId: null, childThreadId: null, childRunId: null, boundRunId: null, updatedAt },
+      });
+      // m1 was marked launching, but the crash came before its dispatch.
+      yield* store.updateMember({
+        swarmId: result.swarmId,
+        memberKey: "m1",
+        patch: {
+          status: "launching",
+          queueReason: null,
+          commandId: CommandId.make(`swarm-admit:${result.swarmId}:m1:1`),
+          effectiveRuntimeMode: "full-access",
+          effectiveInteractionMode: "plan",
+          updatedAt,
+        },
+      });
+      const tasksBefore = (yield* orchestrator.getThreadProjection(threadId)).subagents.length;
+
+      yield* swarms.tick;
+      yield* swarms.tick;
+
+      const [m0, m1] = yield* rows(result.swarmId);
+      assert.equal(m0?.taskId, first?.taskId);
+      assert.equal(m0?.childThreadId, first?.childThreadId);
+      assert.equal(m0?.childRunId, first?.childRunId);
+      assert.isNotNull(m1?.childThreadId ?? null);
+      assert.equal(m1?.status, "launching");
+      // The replay reused m0's task; only m1 added one.
+      assert.equal(
+        (yield* orchestrator.getThreadProjection(threadId)).subagents.length,
+        tasksBefore + 1,
+      );
+      yield* retire(result.swarmId);
+    }),
+  );
+
+  it.effect("detaches the swarm when the user cancels its queued wake", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const swarms = yield* SwarmService.SwarmService;
+      const store = yield* SwarmStore.SwarmStore;
+      const { threadId, anchor } = yield* seedArchitect("a3-detach");
+      const result = yield* createSwarm(threadId, {
+        maxConcurrent: 2,
+        members: members(3, { interactionMode: "plan" }),
+      });
+      yield* endRun({ threadId, runId: anchor.id });
+      yield* startRun({ threadId, ordinal: 2 });
+      const [first] = yield* rows(result.swarmId);
+      yield* finishMember({
+        parentThreadId: threadId,
+        taskId: first!.taskId!,
+        childThreadId: first!.childThreadId!,
+        runId: first!.childRunId!,
+        text: "first done",
+      });
+      yield* takeWake(threadId);
+      const wake = yield* deliverWake(threadId, anchor.id);
+      assert.equal(wake.run.status, "queued");
+      yield* orchestrator.dispatch({
+        type: "queued-run.cancel",
+        commandId: CommandId.make("command:a3-detach-cancel"),
+        threadId,
+        runId: wake.run.id,
+      });
+      assert.equal(
+        (yield* orchestrator.getThreadProjection(threadId)).runs.find((run) => run.id === anchor.id)
+          ?.delegatedCompletion?.disposition,
+        "disposed",
+      );
+
+      yield* swarms.tick;
+
+      assert.deepEqual(
+        (yield* rows(result.swarmId)).map((row) => row.status),
+        ["claimed_done", "detached", "cancelled"],
+      );
+      assert.equal(Option.getOrThrow(yield* store.getSwarm(result.swarmId)).status, "detached");
+    }),
+  );
+
+  it.effect("does not touch swarm rows while the flag is off", () =>
+    Effect.gen(function* () {
+      const swarms = yield* SwarmService.SwarmService;
+      const settings = yield* ServerSettings.ServerSettingsService;
+      const { threadId, anchor } = yield* seedArchitect("a3-flag-off");
+      const result = yield* createSwarm(threadId, {
+        maxConcurrent: 1,
+        members: members(2, { interactionMode: "plan" }),
+      });
+      yield* endRun({ threadId, runId: anchor.id });
+      const [first] = yield* rows(result.swarmId);
+      yield* finishMember({
+        parentThreadId: threadId,
+        taskId: first!.taskId!,
+        childThreadId: first!.childThreadId!,
+        runId: first!.childRunId!,
+        text: "first done",
+      });
+      yield* settings.updateSettings({ swarmV2Enabled: false });
+      const before = yield* rows(result.swarmId);
+      yield* swarms.tick;
+      assert.deepEqual(yield* rows(result.swarmId), before);
+      yield* settings.updateSettings({ swarmV2Enabled: true });
+      yield* swarms.tick;
+      assert.deepEqual(
+        (yield* rows(result.swarmId)).map((row) => row.status),
+        ["claimed_done", "launching"],
+      );
+      yield* retire(result.swarmId);
+    }),
+  );
+
+  it.effect("returns one swarm to two concurrent calls with the same clientRequestId", () =>
+    Effect.gen(function* () {
+      const { threadId } = yield* seedArchitect("a3-race");
+      const input = {
+        clientRequestId: "race-1",
+        maxConcurrent: 1,
+        members: members(1, { interactionMode: "plan" as const }),
+      };
+      const [left, right] = yield* Effect.all(
+        [createSwarm(threadId, input), createSwarm(threadId, input)],
+        {
+          concurrency: "unbounded",
+        },
+      );
+      assert.equal(left.swarmId, right.swarmId);
+      yield* retire(left.swarmId);
     }),
   );
 });

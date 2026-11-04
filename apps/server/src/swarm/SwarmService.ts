@@ -4,7 +4,10 @@ import * as NodeCrypto from "node:crypto";
 import {
   CommandId,
   OrchestratorMcpFailure,
+  type OrchestrationV2Command,
   type OrchestrationV2Run,
+  type ProviderInteractionMode,
+  type RuntimeMode,
   type OrchestrationV2ThreadProjection,
   type OrchestratorMcpTarget,
   type ServerSettings as ServerSettingsValue,
@@ -23,7 +26,9 @@ import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Fiber from "effect/Fiber";
 import * as Queue from "effect/Queue";
+import * as Result from "effect/Result";
 import * as Scope from "effect/Scope";
 import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
@@ -36,6 +41,7 @@ import {
   resolveRuntimeMode,
   taskPrompt,
 } from "../mcp/delegatedTaskModes.ts";
+import type * as Orchestrator from "../orchestration-v2/Orchestrator.ts";
 import * as ThreadLaunchService from "../orchestration-v2/ThreadLaunchService.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
 import * as ServerSettings from "../serverSettings.ts";
@@ -115,15 +121,44 @@ const capsOf = (settings: {
   instanceOverrides: settings.swarmInstanceCaps,
 });
 
-/** The architect's run this MCP call belongs to, as delegate_task picks it. */
+/**
+ * The architect's run this MCP call belongs to, by delegate_task's rule: the newest active run,
+ * refused when another provider owns it.
+ */
 const liveRunOf = (
   parent: Pick<OrchestrationV2ThreadProjection, "runs">,
   providerInstanceId: string,
-): OrchestrationV2Run | undefined =>
-  parent.runs
+): OrchestrationV2Run | undefined => {
+  const newest = parent.runs
     .filter(ThreadManagementService.isActiveRun)
-    .toSorted((left, right) => right.ordinal - left.ordinal)
-    .find((run) => run.rootNodeId !== null && run.providerInstanceId === providerInstanceId);
+    .toSorted((left, right) => right.ordinal - left.ordinal)[0];
+  return newest === undefined ||
+    newest.rootNodeId === null ||
+    newest.providerInstanceId !== providerInstanceId
+    ? undefined
+    : newest;
+};
+
+type AdmissionFailureKind = "provider_disabled" | "refused" | "unknown";
+
+/** A failed dispatch by class, as delegate_task maps it; the message never carries task text. */
+const failureKindOf = (error: unknown): AdmissionFailureKind => {
+  switch (storageOrDispatchTag(error)) {
+    case "ThreadManagementProviderInstanceDisabledError":
+      return "provider_disabled";
+    case "OrchestratorDispatchError":
+    case "OrchestratorCommandPreviouslyRejectedError":
+      return "refused";
+    default:
+      return "unknown";
+  }
+};
+
+const FAILURE_MESSAGES: Readonly<Record<AdmissionFailureKind, string>> = {
+  provider_disabled: "Its provider instance is disabled for this project.",
+  refused: "The orchestrator refused to start it.",
+  unknown: "The member could not start. The server log has details.",
+};
 
 /** Fields a later task owns; until then they fail explicitly rather than being ignored. */
 const unsupportedFields = (input: SwarmCreateInput): string | undefined => {
@@ -158,92 +193,79 @@ const make = Effect.gen(function* () {
     Effect.mapError(() => failure("orchestration_error", "Unable to read settings.")),
   );
 
-  const loadProjection = (threadId: ThreadId) =>
+  /** The thread and its runs only: the scheduler never needs a transcript. */
+  const loadRuns = (threadId: ThreadId) =>
     threads
-      .getThreadProjection(threadId)
+      .getThreadRecords(threadId, ["runs"])
       .pipe(
-        Effect.mapError(() =>
-          failure("orchestration_error", "Unable to read the architect thread."),
-        ),
+        Effect.mapError(() => failure("orchestration_error", "Unable to read a swarm thread.")),
       );
 
-  const dispatchAdmission = Effect.fn("SwarmService.admitMember")(function* (
+  /** Why a member's last admission failed, by class only, for the next swarm_create result. */
+  const admissionFailures = new Map<string, AdmissionFailureKind>();
+
+  /** Threads whose run changes matter to the scheduler: architects and launched members. */
+  let watchedThreads: ReadonlySet<string> = new Set();
+
+  const admissionCommand = (
     swarm: SwarmStore.SwarmRecord,
-    member: SwarmStore.SwarmMemberRecord,
-  ) {
-    const spec = parseSpec(member.specJson);
-    const architect = yield* loadProjection(swarm.parentThreadId);
-    const anchor = architect.runs.find((run) => run.id === swarm.anchorRunId);
-    if (anchor?.delegatedCompletion?.disposition !== "open") return;
-    // Ceilings never rise; the architect's current modes can only lower them.
-    const runtimeMode = yield* resolveRuntimeMode(
-      narrowerRuntimeMode(spec.runtimeCeiling, architect.thread.runtimeMode),
-      undefined,
-      { modelSelection: spec.modelSelection, supportedRuntimeModes: spec.supportedRuntimeModes },
-    );
-    const interactionMode = narrowerInteractionMode(
-      spec.interactionCeiling,
-      architect.thread.interactionMode,
-    );
-    const commandId = CommandId.make(
-      `swarm-admit:${swarm.swarmId}:${member.memberKey}:${member.attempt}`,
-    );
-    const updatedAt = yield* nowIso;
-    yield* store.updateMember({
-      swarmId: swarm.swarmId,
-      memberKey: member.memberKey,
-      patch: {
-        status: "launching",
-        queueReason: null,
-        commandId,
-        effectiveRuntimeMode: runtimeMode,
-        effectiveInteractionMode: interactionMode,
-        updatedAt,
-      },
-    });
-    const dispatched = yield* threads
-      .dispatch({
-        type: "delegated_task.request",
-        createdBy: "agent",
-        creationSource: "server",
-        commandId,
-        parentThreadId: swarm.parentThreadId,
-        parentRunId: swarm.anchorRunId,
-        parentNodeId: swarm.anchorNodeId,
-        task: spec.task,
-        title: spec.title,
-        modelSelection: spec.modelSelection,
-        runtimeMode,
-        interactionMode,
-        ...(spec.isolation === "worktree" && swarm.baseCommit !== null
-          ? {
-              workspaceStrategy: {
-                type: "worktree" as const,
-                baseRef: swarm.baseCommit,
-                startFromOrigin: false,
-              },
-            }
-          : {}),
-        completionWake: "held",
-        swarmAdmission: { swarmId: swarm.swarmId },
-      })
-      .pipe(Effect.result);
+    spec: SwarmMemberSpec,
+    input: {
+      readonly commandId: CommandId;
+      readonly runtimeMode: RuntimeMode;
+      readonly interactionMode: ProviderInteractionMode;
+    },
+  ) =>
+    ({
+      type: "delegated_task.request",
+      createdBy: "agent",
+      creationSource: "server",
+      commandId: input.commandId,
+      parentThreadId: swarm.parentThreadId,
+      parentRunId: swarm.anchorRunId,
+      parentNodeId: swarm.anchorNodeId,
+      task: spec.task,
+      title: spec.title,
+      modelSelection: spec.modelSelection,
+      runtimeMode: input.runtimeMode,
+      interactionMode: input.interactionMode,
+      ...(spec.isolation === "worktree" && swarm.baseCommit !== null
+        ? {
+            workspaceStrategy: {
+              type: "worktree" as const,
+              baseRef: swarm.baseCommit,
+              startFromOrigin: false,
+            },
+          }
+        : {}),
+      completionWake: "held",
+      swarmAdmission: { swarmId: swarm.swarmId },
+    }) satisfies Extract<OrchestrationV2Command, { readonly type: "delegated_task.request" }>;
+
+  /** Records a dispatch's outcome: the child's ids on success, class `launch` on failure. */
+  const finishAdmission = Effect.fn("SwarmService.finishAdmission")(function* (input: {
+    readonly swarm: SwarmStore.SwarmRecord;
+    readonly member: SwarmStore.SwarmMemberRecord;
+    readonly spec: SwarmMemberSpec;
+    readonly commandId: CommandId;
+    readonly dispatched: Result.Result<Orchestrator.OrchestratorV2DispatchResult, unknown>;
+  }) {
+    const { swarm, member, spec, commandId, dispatched } = input;
     const endedAt = yield* nowIso;
-    const task =
-      dispatched._tag === "Success"
-        ? dispatched.success.storedEvents.flatMap((stored) =>
-            stored.event.type === "subagent.updated" && stored.event.payload.origin === "app_owned"
-              ? [stored.event.payload]
-              : [],
-          )[0]
-        : undefined;
-    if (dispatched._tag === "Failure" || task === undefined || task.childThreadId === null) {
+    const events = Result.isSuccess(dispatched) ? dispatched.success.storedEvents : [];
+    const task = events.flatMap((stored) =>
+      stored.event.type === "subagent.updated" && stored.event.payload.origin === "app_owned"
+        ? [stored.event.payload]
+        : [],
+    )[0];
+    if (task === undefined || task.childThreadId === null) {
+      const kind = Result.isFailure(dispatched) ? failureKindOf(dispatched.failure) : "unknown";
+      admissionFailures.set(memberRef(member), kind);
       yield* Effect.logWarning("swarm.admission-failed", {
         swarmId: swarm.swarmId,
         memberKey: member.memberKey,
         attempt: member.attempt,
-        errorTag:
-          dispatched._tag === "Failure" ? storageOrDispatchTag(dispatched.failure) : "no_task",
+        failureKind: kind,
       });
       yield* store.updateMember({
         swarmId: swarm.swarmId,
@@ -261,14 +283,11 @@ const make = Effect.gen(function* () {
       return;
     }
     const childThreadId = task.childThreadId;
-    const childRun =
-      dispatched._tag === "Success"
-        ? dispatched.success.storedEvents.flatMap((stored) =>
-            stored.event.type === "run.created" && stored.event.threadId === childThreadId
-              ? [stored.event.payload]
-              : [],
-          )[0]
-        : undefined;
+    const childRun = events.flatMap((stored) =>
+      stored.event.type === "run.created" && stored.event.threadId === childThreadId
+        ? [stored.event.payload]
+        : [],
+    )[0];
     yield* store.updateMember({
       swarmId: swarm.swarmId,
       memberKey: member.memberKey,
@@ -286,28 +305,88 @@ const make = Effect.gen(function* () {
     }
   });
 
-  /** Admits one queued member against its swarm's anchor run. Never fails the pass. */
-  const admitMember = (swarm: SwarmStore.SwarmRecord, member: SwarmStore.SwarmMemberRecord) =>
-    dispatchAdmission(swarm, member).pipe(
-      Effect.catchCause((cause) =>
-        Effect.logWarning("swarm.admission-error", {
-          swarmId: swarm.swarmId,
-          memberKey: member.memberKey,
-          causeKind: storageOrDispatchTag(Cause.squash(cause)),
-        }),
-      ),
+  const dispatchAdmission = Effect.fn("SwarmService.admitMember")(function* (
+    swarm: SwarmStore.SwarmRecord,
+    member: SwarmStore.SwarmMemberRecord,
+    architect: Pick<OrchestrationV2ThreadProjection, "thread">,
+  ) {
+    const spec = parseSpec(member.specJson);
+    // Ceilings never rise; the architect's current modes can only lower them.
+    const runtimeMode = yield* resolveRuntimeMode(
+      narrowerRuntimeMode(spec.runtimeCeiling, architect.thread.runtimeMode),
+      undefined,
+      { modelSelection: spec.modelSelection, supportedRuntimeModes: spec.supportedRuntimeModes },
     );
+    const interactionMode = narrowerInteractionMode(
+      spec.interactionCeiling,
+      architect.thread.interactionMode,
+    );
+    const commandId = CommandId.make(
+      `swarm-admit:${swarm.swarmId}:${member.memberKey}:${member.attempt}`,
+    );
+    // Written before the dispatch, so a crash replays the same command (resumeAdmission).
+    yield* store.updateMember({
+      swarmId: swarm.swarmId,
+      memberKey: member.memberKey,
+      patch: {
+        status: "launching",
+        queueReason: null,
+        commandId,
+        effectiveRuntimeMode: runtimeMode,
+        effectiveInteractionMode: interactionMode,
+        updatedAt: yield* nowIso,
+      },
+    });
+    const dispatched = yield* threads
+      .dispatch(admissionCommand(swarm, spec, { commandId, runtimeMode, interactionMode }))
+      .pipe(Effect.result);
+    yield* finishAdmission({ swarm, member, spec, commandId, dispatched });
+  });
 
   /**
-   * Seam for SW-A5/A6/A8: until envelopes, verify, and failure classes land, a member whose
-   * first run ended is final by its run status alone.
+   * A row left `launching` before its child ids were stored (a crash or a lost dispatch)
+   * dispatches the same command again; the orchestrator's receipts make that idempotent.
+   */
+  const resumeAdmission = Effect.fn("SwarmService.resumeAdmission")(function* (
+    swarm: SwarmStore.SwarmRecord,
+    member: SwarmStore.SwarmMemberRecord & { readonly commandId: CommandId },
+  ) {
+    const spec = parseSpec(member.specJson);
+    const dispatched = yield* threads
+      .dispatch(
+        admissionCommand(swarm, spec, {
+          commandId: member.commandId,
+          runtimeMode: member.effectiveRuntimeMode ?? spec.runtimeCeiling,
+          interactionMode: member.effectiveInteractionMode ?? spec.interactionCeiling,
+        }),
+      )
+      .pipe(Effect.result);
+    yield* finishAdmission({ swarm, member, spec, commandId: member.commandId, dispatched });
+  });
+
+  const logged =
+    (event: string, ids: Readonly<Record<string, unknown>>) =>
+    <A, E, R>(effect: Effect.Effect<A, E, R>) =>
+      effect.pipe(
+        Effect.asVoid,
+        Effect.catchCause((cause) =>
+          Effect.logWarning(event, {
+            ...ids,
+            causeKind: storageOrDispatchTag(Cause.squash(cause)),
+          }),
+        ),
+      );
+
+  /**
+   * Seam for SW-A5/A6/A8, which must replace it before `"held"` is honored: until envelopes,
+   * verify, and failure classes land, a member whose first run ended is final by its run status.
    */
   const reconcileMember = Effect.fn("SwarmService.reconcileMember")(function* (
     swarm: SwarmStore.SwarmRecord,
     member: SwarmStore.SwarmMemberRecord,
   ) {
     if (member.childThreadId === null || member.childRunId === null) return;
-    const child = yield* loadProjection(member.childThreadId);
+    const child = yield* loadRuns(member.childThreadId);
     const run = child.runs.find((candidate) => candidate.id === member.childRunId);
     if (run === undefined) return;
     const updatedAt = yield* nowIso;
@@ -347,72 +426,187 @@ const make = Effect.gen(function* () {
     });
   });
 
+  /**
+   * The architect's Stop cancels a swarm (D12): rows that never launched become `cancelled`.
+   * Cancelling the queued wake disposes the cohort and detaches it: launched members keep
+   * running unmanaged. Archive or delete cancels (§4.6).
+   */
+  const closeSwarm = Effect.fn("SwarmService.closeSwarm")(function* (
+    swarm: SwarmStore.SwarmRecord,
+    members: ReadonlyArray<SwarmStore.SwarmMemberRecord>,
+    outcome: "stopped" | "detached" | "closed_thread",
+  ) {
+    const now = yield* nowIso;
+    let cancelled = 0;
+    let detached = 0;
+    for (const member of members) {
+      const neverLaunched =
+        member.status === "queued" ||
+        (member.status === "launching" && member.childThreadId === null);
+      if (neverLaunched) {
+        cancelled += 1;
+        yield* store.updateMember({
+          swarmId: swarm.swarmId,
+          memberKey: member.memberKey,
+          patch: {
+            status: "cancelled",
+            queueReason: null,
+            ...(outcome === "stopped" ? { failureClass: "cancelled_by_architect_stop" } : {}),
+            endedAt: now,
+            updatedAt: now,
+          },
+        });
+      } else if (outcome === "detached" && !isFinalMemberStatus(member.status)) {
+        detached += 1;
+        yield* store.updateMember({
+          swarmId: swarm.swarmId,
+          memberKey: member.memberKey,
+          patch: { status: "detached", updatedAt: now },
+        });
+      }
+    }
+    yield* store.updateSwarm(swarm.swarmId, {
+      status: outcome === "detached" ? "detached" : "cancelled",
+      updatedAt: now,
+    });
+    yield* Effect.logInfo("swarm.closed", { swarmId: swarm.swarmId, outcome, cancelled, detached });
+  });
+
+  const anchorStateOf = (
+    swarm: SwarmStore.SwarmRecord,
+    architect: Option.Option<Pick<OrchestrationV2ThreadProjection, "thread" | "runs">>,
+  ): "open" | "stopped" | "detached" | "closed_thread" | "unknown" => {
+    if (Option.isNone(architect)) return "unknown";
+    const { thread, runs } = architect.value;
+    if (thread.archivedAt !== null || thread.deletedAt !== null) return "closed_thread";
+    const disposition = runs.find((run) => run.id === swarm.anchorRunId)?.delegatedCompletion
+      ?.disposition;
+    return disposition === "open"
+      ? "open"
+      : disposition === "stopped"
+        ? "stopped"
+        : disposition === "disposed"
+          ? "detached"
+          : "unknown";
+  };
+
   const pass = (settings: ServerSettingsValue) =>
     passLock.withPermits(1)(
       Effect.gen(function* () {
-        const swarms = yield* store.listSwarms({ statuses: ["active"] });
-        if (swarms.length === 0) return;
+        // Cancelled swarms still hold slots until their launched members end.
+        const swarms = yield* store.listSwarms({ statuses: ["active", "cancelled"] });
         const membersBySwarm = new Map<string, ReadonlyArray<SwarmStore.SwarmMemberRecord>>();
+        const architects = new Map<
+          string,
+          Option.Option<Pick<OrchestrationV2ThreadProjection, "thread" | "runs">>
+        >();
         const admits = new Map<string, boolean>();
+        const watched = new Set<string>();
         for (const swarm of swarms) {
-          for (const member of yield* store.listMembers(swarm.swarmId)) {
-            if (member.status === "launching" || member.status === "running") {
+          let members = yield* store.listMembers(swarm.swarmId);
+          if (
+            swarm.status === "cancelled" &&
+            members.every((row) => isFinalMemberStatus(row.status))
+          ) {
+            continue;
+          }
+          // A launched member whose run ended is final before the swarm closes around it.
+          for (const member of members) {
+            if (
+              member.childThreadId !== null &&
+              (member.status === "launching" || member.status === "running")
+            ) {
               yield* reconcileMember(swarm, member).pipe(
-                Effect.catchCause((cause) =>
-                  Effect.logWarning("swarm.reconcile-error", {
-                    swarmId: swarm.swarmId,
-                    memberKey: member.memberKey,
-                    causeKind: storageOrDispatchTag(Cause.squash(cause)),
-                  }),
-                ),
+                logged("swarm.reconcile-error", {
+                  swarmId: swarm.swarmId,
+                  memberKey: member.memberKey,
+                }),
               );
             }
           }
-          membersBySwarm.set(swarm.swarmId, yield* store.listMembers(swarm.swarmId));
-          const architect = yield* loadProjection(swarm.parentThreadId).pipe(Effect.option);
-          admits.set(
-            swarm.swarmId,
-            Option.match(architect, {
-              onNone: () => false,
-              onSome: (projection) =>
-                projection.thread.archivedAt === null &&
-                projection.thread.deletedAt === null &&
-                projection.runs.find((run) => run.id === swarm.anchorRunId)?.delegatedCompletion
-                  ?.disposition === "open",
-            }),
-          );
+          members = yield* store.listMembers(swarm.swarmId);
+          const architect = yield* loadRuns(swarm.parentThreadId).pipe(Effect.option);
+          architects.set(swarm.swarmId, architect);
+          const state = swarm.status === "active" ? anchorStateOf(swarm, architect) : "unknown";
+          if (state === "stopped" || state === "detached" || state === "closed_thread") {
+            yield* closeSwarm(swarm, members, state).pipe(
+              logged("swarm.close-error", { swarmId: swarm.swarmId }),
+            );
+          } else if (state === "open") {
+            for (const member of members) {
+              if (
+                member.status === "launching" &&
+                member.childThreadId === null &&
+                member.commandId !== null
+              ) {
+                yield* resumeAdmission(swarm, { ...member, commandId: member.commandId }).pipe(
+                  logged("swarm.resume-error", {
+                    swarmId: swarm.swarmId,
+                    memberKey: member.memberKey,
+                  }),
+                );
+              }
+            }
+          }
+          members = yield* store.listMembers(swarm.swarmId);
+          membersBySwarm.set(swarm.swarmId, members);
+          admits.set(swarm.swarmId, swarm.status === "active" && state === "open");
+          watched.add(swarm.parentThreadId);
+          for (const member of members) {
+            if (member.childThreadId !== null && !isFinalMemberStatus(member.status)) {
+              watched.add(member.childThreadId);
+            }
+          }
         }
+        watchedThreads = watched;
+        if (membersBySwarm.size === 0) return;
         const pauses = new Map(
           (yield* store.listInstancePauses).map((pause) => [pause.providerInstanceId, pause.until]),
         );
         const now = yield* nowIso;
+        const tracked = swarms.filter((swarm) => membersBySwarm.has(swarm.swarmId));
         const plan = planAdmissions({
-          swarms: swarms.map((swarm) => ({
+          swarms: tracked.map((swarm) => ({
             swarmId: swarm.swarmId,
             createdAt: swarm.createdAt,
             maxConcurrent: swarm.maxConcurrent,
             admits: admits.get(swarm.swarmId) === true,
           })),
-          members: [...membersBySwarm.values()].flat().map((member) => ({
-            swarmId: member.swarmId,
-            memberKey: member.memberKey,
-            ordinal: member.ordinal,
-            status: member.status,
-            providerInstanceId:
-              member.providerInstanceId ?? parseSpec(member.specJson).modelSelection.instanceId,
-            driver: parseSpec(member.specJson).driver,
-          })),
+          members: [...membersBySwarm.values()].flat().map((member) => {
+            const spec = parseSpec(member.specJson);
+            return {
+              swarmId: member.swarmId,
+              memberKey: member.memberKey,
+              ordinal: member.ordinal,
+              status: member.status,
+              providerInstanceId: member.providerInstanceId ?? spec.modelSelection.instanceId,
+              driver: spec.driver,
+            };
+          }),
           caps: capsOf(settings),
           pauses,
           now,
         });
-        const swarmById = new Map(swarms.map((swarm) => [swarm.swarmId, swarm]));
+        const swarmById = new Map(tracked.map((swarm) => [swarm.swarmId, swarm]));
         for (const planned of plan.admit) {
           const swarm = swarmById.get(planned.swarmId)!;
           const member = membersBySwarm
             .get(planned.swarmId)!
             .find((candidate) => candidate.memberKey === planned.memberKey)!;
-          yield* admitMember(swarm, member);
+          const architect = architects.get(swarm.swarmId);
+          if (architect === undefined || Option.isNone(architect)) continue;
+          yield* dispatchAdmission(swarm, member, architect.value).pipe(
+            logged("swarm.admission-error", {
+              swarmId: swarm.swarmId,
+              memberKey: member.memberKey,
+            }),
+          );
+          if (member.childThreadId === null) {
+            const updated = (yield* store.listMembers(swarm.swarmId)).find(
+              (candidate) => candidate.memberKey === member.memberKey,
+            );
+            if (updated?.childThreadId != null) watched.add(updated.childThreadId);
+          }
         }
         for (const [swarmId, members] of membersBySwarm) {
           for (const member of members) {
@@ -434,33 +628,40 @@ const make = Effect.gen(function* () {
     // Flag off: nothing new is admitted, and the swarm tables are not touched.
     if (!settings.swarmV2Enabled) return;
     yield* pass(settings);
-  }).pipe(
-    Effect.catchCause((cause) =>
-      Effect.logWarning("swarm.tick-error", {
-        causeKind: storageOrDispatchTag(Cause.squash(cause)),
-      }),
-    ),
-  );
+  }).pipe(logged("swarm.tick-error", {}));
 
   const wake: SwarmService["Service"]["wake"] = Queue.offer(wakes, undefined).pipe(Effect.asVoid);
 
+  /** Member and architect runs starting or ending free and fill slots. */
+  const watchRunEvents = threads.streamDomainEvents.pipe(
+    Stream.filter((event) => event.type === "run.updated" && watchedThreads.has(event.threadId)),
+    Stream.runForEach(() => wake),
+    Effect.ignoreCause,
+  );
+
   const start: SwarmService["Service"]["start"] = Effect.fn("SwarmService.start")(function* () {
+    const scope = yield* Effect.scope;
     yield* Effect.forkScoped(
       Effect.forever(
         Effect.race(Queue.take(wakes), Effect.sleep(SAFETY_TICK)).pipe(Effect.andThen(tick)),
       ),
     );
-    // Member runs starting or ending free and fill slots.
-    yield* Effect.forkScoped(
-      threads.streamDomainEvents.pipe(
-        Stream.filter((event) => event.type === "run.updated"),
-        Stream.runForEach(() => wake),
-        Effect.ignoreCause,
-      ),
-    );
+    // With the flag off nothing subscribes to domain events; turning it on subscribes.
+    let subscription: Fiber.Fiber<void> | undefined;
+    const follow = Effect.fn("SwarmService.followRunEvents")(function* (enabled: boolean) {
+      if (enabled && subscription === undefined) {
+        subscription = yield* Effect.forkIn(watchRunEvents, scope);
+      } else if (!enabled && subscription !== undefined) {
+        const running = subscription;
+        subscription = undefined;
+        yield* Fiber.interrupt(running);
+      }
+    });
+    const initial = yield* settingsService.getSettings.pipe(Effect.option);
+    yield* follow(Option.isSome(initial) && initial.value.swarmV2Enabled);
     yield* Effect.forkScoped(
       settingsService.streamChanges.pipe(
-        Stream.runForEach(() => wake),
+        Stream.runForEach((settings) => follow(settings.swarmV2Enabled).pipe(Effect.andThen(wake))),
         Effect.ignoreCause,
       ),
     );
@@ -512,7 +713,7 @@ const make = Effect.gen(function* () {
           .map((member) => ({
             key: member.memberKey,
             title: parseSpec(member.specJson).title,
-            message: "The member could not start. The server log has details.",
+            message: FAILURE_MESSAGES[admissionFailures.get(memberRef(member)) ?? "unknown"],
           })),
         warnings,
       })),
@@ -575,7 +776,7 @@ const make = Effect.gen(function* () {
     const existing = yield* store.getSwarmByRequestKey(requestKey);
     if (Option.isSome(existing)) return yield* swarmResult(scope, existing.value, []);
 
-    const architect = yield* loadProjection(caller.threadId);
+    const architect = yield* loadRuns(caller.threadId);
     const anchor = liveRunOf(architect, caller.providerInstanceId);
     if (anchor === undefined || anchor.rootNodeId === null) {
       return yield* failure(
@@ -728,17 +929,25 @@ const make = Effect.gen(function* () {
       createdAt: now,
       updatedAt: now,
     };
-    yield* store.createSwarm({
-      swarm,
-      members: specs.map(({ writer, ...spec }, ordinal) => ({
-        memberKey: spec.key,
-        ordinal,
-        specJson: encodeSpecJson(spec),
-        queuedAt: now,
-        writer,
-        providerInstanceId: spec.modelSelection.instanceId,
-      })),
-    });
+    const created = yield* store
+      .createSwarm({
+        swarm,
+        members: specs.map(({ writer, ...spec }, ordinal) => ({
+          memberKey: spec.key,
+          ordinal,
+          specJson: encodeSpecJson(spec),
+          queuedAt: now,
+          writer,
+          providerInstanceId: spec.modelSelection.instanceId,
+        })),
+      })
+      .pipe(Effect.result);
+    if (Result.isFailure(created)) {
+      // A concurrent call with the same clientRequestId won the unique request_key.
+      const winner = yield* store.getSwarmByRequestKey(requestKey);
+      if (Option.isSome(winner)) return yield* swarmResult(scope, winner.value, []);
+      return yield* created.failure;
+    }
     yield* Effect.logInfo("swarm.created", { swarmId, members: specs.length });
     // Immediate admission: what fits the caps starts inside this call, on the live anchor.
     yield* pass(settings).pipe(
