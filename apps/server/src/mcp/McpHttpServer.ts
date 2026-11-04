@@ -1110,7 +1110,10 @@ export const layerOrchestratorToolkit = toolkitRegistration(
   OrchestratorHandlers.layer,
 ).pipe(Layer.provide(OrchestratorMcpService.layer), Layer.provide(ThreadMetadataMcpService.layer));
 
-const layerSwarmToolkit = toolkitRegistration(SwarmToolkit, SwarmHandlers.layer);
+// Shares the orchestrator toolkit's OrchestratorMcpService by layer memoization.
+const layerSwarmToolkit = toolkitRegistration(SwarmToolkit, SwarmHandlers.layer).pipe(
+  Layer.provide(OrchestratorMcpService.layer),
+);
 
 export const layerThreadToolkit = toolkitRegistration(ThreadToolkit, ThreadHandlers.layer);
 const layerInstructionToolkit = toolkitRegistration(InstructionToolkit, InstructionHandlers.layer);

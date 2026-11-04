@@ -30,6 +30,7 @@ import * as ServerSettings from "../serverSettings.ts";
 import { advertisedJsonSchema } from "./advertisedJsonSchema.ts";
 import * as McpHttpServer from "./McpHttpServer.ts";
 import * as McpToolAccess from "./McpToolAccess.ts";
+import * as SwarmService from "../swarm/SwarmService.ts";
 import * as SwarmHandlers from "./toolkits/swarm/handlers.ts";
 import { SwarmToolkit } from "./toolkits/swarm/tools.ts";
 import * as McpToolAccessTestkit from "./McpToolAccess.testkit.ts";
@@ -1025,6 +1026,8 @@ it.effect("shows swarm v2 tools only with the flag on, and hides create_swarm th
         ),
         McpHttpServer.toolkitRegistration(SwarmToolkit, SwarmHandlers.layer),
       ).pipe(
+        Layer.provide(Layer.mock(SwarmService.SwarmService)({})),
+        Layer.provide(Layer.mock(OrchestratorMcpService.OrchestratorMcpService)({})),
         Layer.provideMerge(
           McpHttpServer.layerMcpTransport.pipe(
             Layer.provide(Layer.succeedContext(settingsContext)),

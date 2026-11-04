@@ -4,11 +4,13 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import {
   CommandId,
+  EnvironmentId,
   EventId,
   MessageId,
   type ModelSelection,
   NodeId,
   type OrchestrationV2Command,
+  type OrchestratorMcpFailure,
   type OrchestrationV2Run,
   ProjectId,
   ProviderDriverKind,
@@ -16,6 +18,8 @@ import {
   ProviderThreadId,
   RunId,
   SwarmId,
+  type SwarmCreateInput,
+  type SwarmMemberInput,
   ThreadId,
   TurnItemId,
 } from "@t3tools/contracts";
@@ -24,10 +28,12 @@ import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Stream from "effect/Stream";
 
 import * as CheckpointStore from "../checkpointing/CheckpointStore.ts";
 import * as ServerConfig from "../config.ts";
+import type { McpInvocationScope } from "../mcp/McpInvocationContext.ts";
 import * as McpSessionRegistryTestkit from "../mcp/McpSessionRegistry.testkit.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as ProjectEnrichmentService from "../project/ProjectEnrichmentService.ts";
@@ -35,6 +41,8 @@ import * as ProjectService from "../project/ProjectService.ts";
 import type { ProviderInstance } from "@t3tools/provider-core/server/driver";
 import * as ProviderInstanceRegistry from "../provider/ProviderInstanceRegistry.ts";
 import * as ServerSettings from "../serverSettings.ts";
+import * as SwarmService from "../swarm/SwarmService.ts";
+import * as SwarmStore from "../swarm/SwarmStore.ts";
 import * as VcsDriverRegistry from "../vcs/VcsDriverRegistry.ts";
 import * as VcsProcess from "../vcs/VcsProcess.ts";
 import * as WorkspacePaths from "../workspace/WorkspacePaths.ts";
@@ -45,6 +53,7 @@ import * as Orchestrator from "./Orchestrator.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import * as RuntimeLayer from "./runtimeLayer.ts";
 import * as ThreadCommandExecutor from "./ThreadCommandExecutor.ts";
+import * as ThreadLaunchService from "./ThreadLaunchService.ts";
 import * as ThreadManagementService from "./ThreadManagementService.ts";
 import { withCreationProvenance } from "./ThreadManagementService.ts";
 import { limitRecoveryCommand } from "./UsageLimitRecoveryWorker.ts";
@@ -1377,5 +1386,359 @@ it.layer(layerTest)("swarm release and the shared wake budget (SW-A0 Q7)", (it) 
           { text: wake.text, taskIds: [...wake.taskIds] },
         ]);
       }),
+  );
+});
+
+// SW-A3: swarm_create, admission, and the scheduler on the real orchestrator. The scheduler is
+// driven by `tick`, and child completion by terminal run events.
+
+const prepareRuns: Array<string> = [];
+const layerSwarm = SwarmService.layer.pipe(
+  Layer.provideMerge(SwarmStore.layer.pipe(Layer.provide(SqlitePersistence.layerMemory))),
+  Layer.provide(
+    Layer.succeed(ThreadLaunchService.ThreadLaunchService, {
+      prepareRun: (input: { readonly threadId: ThreadId }) =>
+        Effect.sync(() => {
+          prepareRuns.push(input.threadId);
+        }),
+    } as unknown as ThreadLaunchService.ThreadLaunchService["Service"]),
+  ),
+  Layer.provide(ServerSettings.layerTest({ swarmV2Enabled: true, swarmMaxConcurrent: 2 })),
+  Layer.provideMerge(layerTest),
+);
+
+const resolverCalls: Array<string> = [];
+const resolver: SwarmService.SwarmTargetResolver = {
+  resolveTarget: (_parent, target) =>
+    Effect.sync(() => {
+      resolverCalls.push(JSON.stringify(target ?? null));
+      return {
+        modelSelection: { ...modelSelection, model: target?.model ?? modelSelection.model },
+        supportedRuntimeModes: undefined,
+        driver,
+      };
+    }),
+  resolveWorktreeBase: () => Effect.succeed("0000000000000000000000000000000000000000"),
+};
+
+const scopeFor = (threadId: ThreadId): McpInvocationScope => ({
+  environmentId: EnvironmentId.make("environment:swarm"),
+  capabilities: new Set(["orchestration"]),
+  issuedAt: 0,
+  requestNamespace: `ns:${threadId}`,
+  thread: {
+    threadId,
+    providerSessionId: `session:${threadId}`,
+    providerInstanceId: modelSelection.instanceId,
+  },
+  client: undefined,
+});
+
+const members = (count: number, overrides: Partial<SwarmMemberInput> = {}) =>
+  Array.from({ length: count }, (_, index) => ({
+    key: `m${index}`,
+    title: `Member ${index}`,
+    task: `Do part ${index}.`,
+    ...overrides,
+  }));
+
+const createSwarm = (threadId: ThreadId, input: Omit<SwarmCreateInput, "title">) =>
+  Effect.gen(function* () {
+    const swarms = yield* SwarmService.SwarmService;
+    return yield* swarms.create({
+      scope: scopeFor(threadId),
+      input: { title: "Swarm", ...input },
+      resolver,
+    });
+  });
+
+const createError = (threadId: ThreadId, input: Omit<SwarmCreateInput, "title">) =>
+  createSwarm(threadId, input).pipe(Effect.flip);
+
+const rows = (swarmId: SwarmId) =>
+  Effect.gen(function* () {
+    const store = yield* SwarmStore.SwarmStore;
+    return yield* store.listMembers(swarmId);
+  });
+
+/** Tests share one database and cap; a finished test's swarm stops counting toward the cap. */
+const retire = (swarmId: SwarmId) =>
+  Effect.gen(function* () {
+    const store = yield* SwarmStore.SwarmStore;
+    yield* store.updateSwarm(swarmId, {
+      status: "cancelled",
+      updatedAt: DateTime.formatIso(yield* DateTime.now),
+    });
+  });
+
+const slotCount = (list: ReadonlyArray<SwarmStore.SwarmMemberRecord>) =>
+  list.filter((row) => row.status === "launching" || row.status === "running").length;
+
+it.layer(layerSwarm)("swarm_create, admission, and the scheduler (SW-A3)", (it) => {
+  it.effect("6 members with cap 2: at most 2 run, and late admissions follow the anchor", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const swarms = yield* SwarmService.SwarmService;
+      const { threadId, anchor } = yield* seedArchitect("a3-cap");
+      const result = yield* createSwarm(threadId, {
+        members: members(6, { interactionMode: "plan" }),
+      });
+      assert.equal(result.members.length, 6);
+      assert.deepEqual(
+        result.members.map((row) => row.status),
+        ["launching", "launching", "queued", "queued", "queued", "queued"],
+      );
+      assert.deepEqual(
+        result.members.slice(2).map((row) => row.queueReason),
+        ["global_cap", "global_cap", "global_cap", "global_cap"],
+      );
+      assert.isDefined(result.members[0]?.childThreadId);
+      assert.deepEqual(
+        (yield* orchestrator.getThreadProjection(threadId)).runs.find((run) => run.id === anchor.id)
+          ?.delegatedCompletion?.swarmIds,
+        [result.swarmId],
+      );
+      yield* endRun({ threadId, runId: anchor.id });
+
+      for (let round = 0; round < 6; round += 1) {
+        const list = yield* rows(result.swarmId);
+        assert.isAtMost(slotCount(list), 2);
+        const running = list.find((row) => row.status === "launching" || row.status === "running");
+        if (running === undefined) break;
+        yield* finishMember({
+          parentThreadId: threadId,
+          taskId: running.taskId!,
+          childThreadId: running.childThreadId!,
+          runId: running.childRunId!,
+          text: `${running.memberKey} done`,
+        });
+        yield* swarms.tick;
+      }
+      const final = yield* rows(result.swarmId);
+      assert.deepEqual(
+        final.map((row) => row.status),
+        Array(6).fill("claimed_done"),
+      );
+      const parent = yield* orchestrator.getThreadProjection(threadId);
+      for (const row of final) {
+        const task = parent.subagents.find((candidate) => candidate.id === row.taskId);
+        assert.equal(task?.runId, anchor.id, row.memberKey);
+        assert.equal(task?.completionWake, "held");
+      }
+      yield* retire(result.swarmId);
+    }),
+  );
+
+  it.effect("replays a retried call, and resolves each distinct target once", () =>
+    Effect.gen(function* () {
+      const { threadId } = yield* seedArchitect("a3-replay");
+      resolverCalls.length = 0;
+      const input = {
+        clientRequestId: "replay-1",
+        members: [
+          ...members(2, { target: { model: "gpt-5.4" }, interactionMode: "plan" }),
+          {
+            key: "other",
+            title: "Other",
+            task: "Other.",
+            target: { model: "gpt-5.5" },
+            interactionMode: "plan" as const,
+          },
+        ],
+      };
+      const first = yield* createSwarm(threadId, input);
+      assert.equal(resolverCalls.length, 2);
+      const second = yield* createSwarm(threadId, input);
+      assert.equal(second.swarmId, first.swarmId);
+      assert.equal(resolverCalls.length, 2);
+      assert.equal((yield* rows(first.swarmId)).length, 3);
+      yield* retire(first.swarmId);
+    }),
+  );
+
+  it.effect("refuses remote, nested, unsupported, and invalid swarms before launching", () =>
+    Effect.gen(function* () {
+      const { threadId } = yield* seedArchitect("a3-refusals");
+      const code = (error: OrchestratorMcpFailure) => error.code;
+      assert.equal(
+        code(
+          yield* createError(threadId, {
+            members: members(1, { target: { environmentId: EnvironmentId.make("env:remote") } }),
+          }),
+        ),
+        "capability_denied",
+      );
+      assert.equal(
+        code(
+          yield* createError(threadId, {
+            map: { task: "t", title: "t", rows: [{ key: "r" }] },
+          }),
+        ),
+        "capability_denied",
+      );
+      assert.equal(
+        code(yield* createError(threadId, { members: members(1), wakePolicy: "batch" })),
+        "capability_denied",
+      );
+      assert.equal(
+        code(yield* createError(threadId, { members: [...members(1), ...members(1)] })),
+        "invalid_request",
+      );
+      assert.equal(
+        code(yield* createError(threadId, { members: members(1), maxConcurrent: 3 })),
+        "invalid_request",
+      );
+      assert.equal(
+        code(
+          yield* createError(threadId, {
+            members: members(1, { interactionMode: "plan", verify: { argv: ["pnpm", "test"] } }),
+          }),
+        ),
+        "invalid_request",
+      );
+      // Verify passes the create-time mode check, then waits for its runner (SW-A6).
+      assert.equal(
+        code(yield* createError(threadId, { members: members(1, { verify: { argv: ["x"] } }) })),
+        "capability_denied",
+      );
+      const shared = yield* createError(threadId, { members: members(2) });
+      assert.equal(shared.code, "invalid_request");
+      assert.include(shared.message, `isolation: "worktree"`);
+      // A shared writer in another active swarm of this architect counts too.
+      const solo = yield* createSwarm(threadId, { members: members(1), maxConcurrent: 1 });
+      const second = yield* createError(threadId, {
+        members: [{ key: "next", title: "Next", task: "Next." }],
+      });
+      assert.equal(second.code, "invalid_request");
+      assert.include(second.message, "'m0'");
+      yield* retire(solo.swarmId);
+
+      // A member may start its own swarm only with allowNestedSwarm.
+      const parent = yield* createSwarm(threadId, {
+        members: [{ key: "lead", title: "Lead", task: "Lead.", interactionMode: "plan" }],
+      });
+      const lead = parent.members[0]!.childThreadId!;
+      assert.equal(
+        code(yield* createError(lead, { members: members(1, { interactionMode: "plan" }) })),
+        "capability_denied",
+      );
+      yield* retire(parent.swarmId);
+    }),
+  );
+
+  it.effect("caps modes at the architect's, lowers them at late admission, and never raises", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const swarms = yield* SwarmService.SwarmService;
+      const { threadId, anchor } = yield* seedArchitect("a3-modes");
+      yield* orchestrator.dispatch({
+        type: "thread.runtime-mode.set",
+        commandId: CommandId.make("command:a3-modes-auto"),
+        threadId,
+        runtimeMode: "auto",
+      });
+      const escalation = yield* createError(threadId, {
+        members: members(1, { runtimeMode: "full-access", interactionMode: "plan" }),
+      });
+      assert.equal(escalation.code, "runtime_mode_escalation_denied");
+
+      const result = yield* createSwarm(threadId, {
+        maxConcurrent: 1,
+        members: members(2, { interactionMode: "plan" }),
+      });
+      assert.deepEqual(
+        result.members.map((row) => [row.status, row.runtimeMode, row.interactionMode]),
+        [
+          ["launching", "auto", "plan"],
+          ["queued", "auto", "plan"],
+        ],
+      );
+      yield* endRun({ threadId, runId: anchor.id });
+      // The architect narrows; the queued member starts narrower, and a later widening is ignored.
+      yield* orchestrator.dispatch({
+        type: "thread.runtime-mode.set",
+        commandId: CommandId.make("command:a3-modes-approval"),
+        threadId,
+        runtimeMode: "approval-required",
+      });
+      const first = (yield* rows(result.swarmId))[0]!;
+      yield* finishMember({
+        parentThreadId: threadId,
+        taskId: first.taskId!,
+        childThreadId: first.childThreadId!,
+        runId: first.childRunId!,
+        text: "first done",
+      });
+      yield* swarms.tick;
+      const second = (yield* rows(result.swarmId))[1]!;
+      assert.equal(second.status, "launching");
+      assert.equal(second.effectiveRuntimeMode, "approval-required");
+      assert.equal(
+        (yield* orchestrator.getThreadProjection(second.childThreadId!)).thread.runtimeMode,
+        "approval-required",
+      );
+      yield* retire(result.swarmId);
+    }),
+  );
+
+  it.effect("calls prepareRun for worktree members, also after a late admission", () =>
+    Effect.gen(function* () {
+      const swarms = yield* SwarmService.SwarmService;
+      const store = yield* SwarmStore.SwarmStore;
+      const { threadId, anchor } = yield* seedArchitect("a3-worktree");
+      prepareRuns.length = 0;
+      const result = yield* createSwarm(threadId, {
+        maxConcurrent: 1,
+        members: members(2, { isolation: "worktree" }),
+      });
+      assert.equal(
+        Option.getOrThrow(yield* store.getSwarm(result.swarmId)).baseCommit,
+        "0000000000000000000000000000000000000000",
+      );
+      assert.equal(prepareRuns.length, 1);
+      yield* endRun({ threadId, runId: anchor.id });
+      const first = (yield* rows(result.swarmId))[0]!;
+      yield* finishMember({
+        parentThreadId: threadId,
+        taskId: first.taskId!,
+        childThreadId: first.childThreadId!,
+        runId: first.childRunId!,
+        text: "first done",
+      });
+      yield* swarms.tick;
+      const second = (yield* rows(result.swarmId))[1]!;
+      assert.equal(second.status, "launching");
+      assert.deepEqual(prepareRuns, [first.childThreadId!, second.childThreadId!]);
+      yield* retire(result.swarmId);
+    }),
+  );
+
+  it.effect("admits nothing after the architect's Stop", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const swarms = yield* SwarmService.SwarmService;
+      const { threadId, anchor } = yield* seedArchitect("a3-stop");
+      const result = yield* createSwarm(threadId, {
+        maxConcurrent: 1,
+        members: members(2, { interactionMode: "plan" }),
+      });
+      yield* endRun({ threadId, runId: anchor.id });
+      yield* orchestrator.dispatch({
+        type: "thread.stop",
+        commandId: CommandId.make("command:a3-stop"),
+        threadId,
+      });
+      const first = (yield* rows(result.swarmId))[0]!;
+      yield* finishMember({
+        parentThreadId: threadId,
+        taskId: first.taskId!,
+        childThreadId: first.childThreadId!,
+        runId: first.childRunId!,
+        text: "first done",
+      });
+      yield* swarms.tick;
+      assert.equal((yield* rows(result.swarmId))[1]?.status, "queued");
+      yield* retire(result.swarmId);
+    }),
   );
 });
