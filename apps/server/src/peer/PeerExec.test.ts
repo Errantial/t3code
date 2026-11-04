@@ -6,6 +6,7 @@ import * as NodePath from "node:path";
 
 import { expect, it } from "@effect/vitest";
 import { OrchestratorMcpFailure } from "@t3tools/contracts";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
@@ -136,6 +137,43 @@ it.live("cancels a running exec by its id", () =>
       expect(result.cancelled).toBe(true);
     }).pipe(Effect.provide(layerTest(directory))),
   ),
+);
+
+it.live.skipIf(HostProcess.Platform.defaultValue() !== "win32")(
+  "kills a grandchild when the parent times out",
+  () =>
+    withRoot((directory) =>
+      Effect.gen(function* () {
+        yield* runMigrations();
+        const exec = yield* PeerExec.PeerExec;
+        const pidFile = NodePath.join(directory, "grandchild.pid");
+        const result = yield* exec.run({
+          execId: globalThis.crypto.randomUUID(),
+          argv: [
+            node,
+            "-e",
+            `const { spawn } = require('node:child_process'); const fs = require('node:fs');
+           const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+           fs.writeFileSync(process.argv[1], String(child.pid));
+           setInterval(() => {}, 1000);`,
+            pidFile,
+          ],
+          cwd: directory,
+          timeoutMs: 500,
+        });
+        expect(result.timedOut).toBe(true);
+        const grandchild = Number(yield* Effect.promise(() => NodeFSP.readFile(pidFile, "utf8")));
+        const alive = yield* Effect.sync(() => {
+          try {
+            process.kill(grandchild, 0);
+            return true;
+          } catch {
+            return false;
+          }
+        });
+        expect(alive).toBe(false);
+      }).pipe(Effect.provide(layerTest(directory))),
+    ),
 );
 
 it.live("replays an execId without spawning twice", () =>
