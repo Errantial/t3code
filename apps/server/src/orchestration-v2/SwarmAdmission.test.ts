@@ -2016,6 +2016,7 @@ it.layer(layerSwarm)("swarm_create, admission, and the scheduler (SW-A3)", (it) 
           ?.delegatedCompletion?.disposition,
         "disposed",
       );
+      const runsBefore = (yield* orchestrator.getThreadProjection(threadId)).runs.length;
 
       yield* swarms.tick;
 
@@ -2025,11 +2026,12 @@ it.layer(layerSwarm)("swarm_create, admission, and the scheduler (SW-A3)", (it) 
         ["claimed_done", "detached", "detached", "cancelled"],
       );
       assert.equal(Option.getOrThrow(yield* store.getSwarm(result.swarmId)).status, "detached");
-      assert.isTrue(
-        (yield* orchestrator.getThreadProjection(threadId)).messages.some(
-          (message) => message.notification?.summary === "Swarm detached",
-        ),
+      // The user cancelled the wake: no server message may start an architect turn (review I1).
+      const afterDetach = yield* orchestrator.getThreadProjection(threadId);
+      assert.isFalse(
+        afterDetach.messages.some((message) => message.notification?.summary === "Swarm detached"),
       );
+      assert.equal(afterDetach.runs.length, runsBefore, "no new architect run");
       // A detached member keeps running unmanaged; its result still lands for swarm_collect.
       const detachedRow = (yield* rows(result.swarmId))[1]!;
       yield* finishRow(threadId, detachedRow, "detached member done");
@@ -2754,14 +2756,19 @@ it.layer(layerSwarm)("swarm_create, admission, and the scheduler (SW-A3)", (it) 
           updatedAt: DateTime.formatIso(now),
         });
 
-        // Stop cancels the swarm, with a closing note that never waits for the window.
+        // Stop cancels the swarm with no note: a note would start the turn the user stopped.
         yield* orchestrator.dispatch({
           type: "thread.stop",
           commandId: CommandId.make("command:a5-notes-stop"),
           threadId,
         });
+        const runsBeforeStop = (yield* orchestrator.getThreadProjection(threadId)).runs.length;
         yield* swarms.tick;
-        assert.include(yield* summaries(threadId), "Swarm cancelled by Stop");
+        assert.notInclude(yield* summaries(threadId), "Swarm cancelled by Stop");
+        assert.equal(
+          (yield* orchestrator.getThreadProjection(threadId)).runs.length,
+          runsBeforeStop,
+        );
         yield* retire(result.swarmId);
 
         // A delivery that never gets a run is reported after 10 minutes.
@@ -3784,6 +3791,33 @@ it.layer(layerSwarm)("status, cancel, retry, collect, and follow-up (SW-A7)", (i
       assert.equal(refused.notCancelled[0]?.key, "m0");
       assert.equal(refused.notCancelled[0]?.code, "runtime_mode_escalation_denied");
       assert.notEqual((yield* rows(result.swarmId))[0]!.status, "cancelled");
+      yield* retire(result.swarmId);
+    }),
+  );
+
+  it.effect("a Stop with an idle architect cancels the swarm and starts no architect run", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const swarms = yield* SwarmService.SwarmService;
+      const store = yield* SwarmStore.SwarmStore;
+      const { threadId, anchor } = yield* seedArchitect("a7-stop-idle");
+      const result = yield* createSwarm(threadId, {
+        maxConcurrent: 1,
+        members: members(2, { interactionMode: "plan" }),
+      });
+      yield* endRun({ threadId, runId: anchor.id });
+      yield* orchestrator.dispatch({
+        type: "thread.stop",
+        commandId: CommandId.make("command:a7-stop-idle"),
+        threadId,
+      });
+      const before = yield* orchestrator.getThreadProjection(threadId);
+      yield* swarms.tick;
+      yield* swarms.tick;
+      const after = yield* orchestrator.getThreadProjection(threadId);
+      assert.equal(Option.getOrThrow(yield* store.getSwarm(result.swarmId)).status, "cancelled");
+      assert.equal(after.runs.length, before.runs.length, "no architect run started");
+      assert.equal(after.messages.length, before.messages.length, "no message was sent");
       yield* retire(result.swarmId);
     }),
   );
