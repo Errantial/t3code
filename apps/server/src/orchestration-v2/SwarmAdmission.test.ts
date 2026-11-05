@@ -51,6 +51,7 @@ import * as ServerSettings from "../serverSettings.ts";
 import * as SwarmService from "../swarm/SwarmService.ts";
 import * as SwarmStore from "../swarm/SwarmStore.ts";
 import * as SwarmVerifier from "../swarm/SwarmVerifier.ts";
+import { makeSwarmNoticesContributor } from "../swarm/swarmTurnContext.ts";
 import * as VcsDriverRegistry from "../vcs/VcsDriverRegistry.ts";
 import * as VcsProcess from "../vcs/VcsProcess.ts";
 import * as WorkspacePaths from "../workspace/WorkspacePaths.ts";
@@ -1638,6 +1639,13 @@ const finishRow = (
         );
       });
 
+/** The text of every notice written for the architect thread (delivered or not). */
+const noticeTexts = (threadId: ThreadId) =>
+  Effect.gen(function* () {
+    const store = yield* SwarmStore.SwarmStore;
+    return (yield* store.listNotices(threadId)).map((notice) => notice.text);
+  });
+
 /**
  * Tests share one database and cap; a finished test's swarm stops counting toward the cap. Each
  * test's TestClock starts at 0, so its failure history and pauses are cleared too: otherwise
@@ -2069,6 +2077,10 @@ it.layer(layerSwarm)("swarm_create, admission, and the scheduler (SW-A3)", (it) 
         afterDetach.messages.some((message) => message.notification?.summary === "Swarm detached"),
       );
       assert.equal(afterDetach.runs.length, runsBefore, "no new architect run");
+      // The outcome waits for the architect's next turn.
+      assert.isTrue(
+        (yield* noticeTexts(threadId)).some((text) => text.includes("was detached because")),
+      );
       // A detached member keeps running unmanaged; its result still lands for swarm_collect.
       const detachedRow = (yield* rows(result.swarmId))[1]!;
       yield* finishRow(threadId, detachedRow, "detached member done");
@@ -2720,26 +2732,21 @@ it.layer(layerSwarm)("swarm_create, admission, and the scheduler (SW-A3)", (it) 
         const swarms = yield* SwarmService.SwarmService;
         const store = yield* SwarmStore.SwarmStore;
         const sink = yield* EventSink.EventSinkV2;
-        const summaries = (threadId: ThreadId) =>
+        // Notices go to the architect's next turn context; none is ever a message.
+        const kinds = (threadId: ThreadId) =>
+          store.listNotices(threadId).pipe(Effect.map((list) => list.map((n) => n.kind)));
+        const messageCount = (threadId: ThreadId) =>
           orchestrator
             .getThreadProjection(threadId)
-            .pipe(
-              Effect.map((projection) =>
-                projection.messages.flatMap((message) =>
-                  message.notification?.source.kind === "system"
-                    ? [message.notification.summary]
-                    : [],
-                ),
-              ),
-            );
+            .pipe(Effect.map((projection) => projection.messages.length));
 
-        // Pause, approvals, and budget for an open swarm, one per 30 s window.
         const { threadId, anchor } = yield* seedArchitect("a5-notes");
         const result = yield* createSwarm(threadId, {
           maxConcurrent: 1,
           members: members(2, { interactionMode: "plan" }),
         });
         yield* endRun({ threadId, runId: anchor.id });
+        const messagesBefore = yield* messageCount(threadId);
         const now = yield* DateTime.now;
         yield* store.setInstancePause({
           providerInstanceId: ProviderInstanceId.make("codex"),
@@ -2748,52 +2755,50 @@ it.layer(layerSwarm)("swarm_create, admission, and the scheduler (SW-A3)", (it) 
           at: DateTime.formatIso(now),
         });
         yield* swarms.tick;
-        assert.deepEqual(yield* summaries(threadId), [
-          "Swarm admissions paused on a provider instance",
-        ]);
+        assert.deepEqual(yield* kinds(threadId), ["instance_paused"]);
         const [first] = yield* rows(result.swarmId);
         const childRun = (yield* orchestrator.getThreadProjection(first!.childThreadId!)).runs[0]!;
-        yield* sink.write({
-          events: [
-            {
-              id: EventId.make("event:a5-notes-approval"),
-              type: "runtime-request.updated",
-              threadId: first!.childThreadId!,
-              runId: childRun.id,
-              occurredAt: now,
-              payload: {
-                id: RuntimeRequestId.make("request:a5-notes-approval"),
-                nodeId: childRun.rootNodeId!,
-                providerTurnId: null,
-                nativeRequestRef: null,
-                kind: "command",
-                status: "pending",
-                responseCapability: { type: "message" },
-                createdAt: now,
-                resolvedAt: null,
-              },
-            },
-          ],
+        const approval = (id: string) => ({
+          id: EventId.make(`event:a5-notes-${id}`),
+          type: "runtime-request.updated" as const,
+          threadId: first!.childThreadId!,
+          runId: childRun.id,
+          occurredAt: now,
+          payload: {
+            id: RuntimeRequestId.make(`request:a5-notes-${id}`),
+            nodeId: childRun.rootNodeId!,
+            providerTurnId: null,
+            nativeRequestRef: null,
+            kind: "command" as const,
+            status: "pending" as const,
+            responseCapability: { type: "message" as const },
+            createdAt: now,
+            resolvedAt: null,
+          },
         });
+        yield* sink.write({ events: [approval("one")] });
         yield* swarms.tick;
-        assert.equal((yield* summaries(threadId)).length, 1, "the 30 s window holds the next note");
-        yield* TestClock.adjust("31 seconds");
+        // A changed approval set replaces the one pending notice instead of adding another.
+        yield* sink.write({ events: [approval("two")] });
         yield* swarms.tick;
-        assert.include(yield* summaries(threadId), "Swarm members are waiting on approval");
+        const approvals = (yield* store.listNotices(threadId)).filter(
+          (n) => n.kind === "approvals",
+        );
+        assert.equal(approvals.length, 1);
+        assert.include(approvals[0]!.text, "waiting on the user's approval");
         yield* store.updateSwarm(result.swarmId, {
           budgetExhausted: true,
           updatedAt: DateTime.formatIso(now),
         });
-        yield* TestClock.adjust("31 seconds");
         yield* swarms.tick;
-        assert.include(yield* summaries(threadId), "Swarm stopped admitting members");
+        assert.include(yield* kinds(threadId), "budget");
         yield* store.clearInstancePause(ProviderInstanceId.make("codex"));
         yield* store.updateSwarm(result.swarmId, {
           budgetExhausted: false,
           updatedAt: DateTime.formatIso(now),
         });
 
-        // Stop cancels the swarm with no note: a note would start the turn the user stopped.
+        // Stop: a notice for the next turn, and still no message or new architect run.
         yield* orchestrator.dispatch({
           type: "thread.stop",
           commandId: CommandId.make("command:a5-notes-stop"),
@@ -2801,11 +2806,20 @@ it.layer(layerSwarm)("swarm_create, admission, and the scheduler (SW-A3)", (it) 
         });
         const runsBeforeStop = (yield* orchestrator.getThreadProjection(threadId)).runs.length;
         yield* swarms.tick;
-        assert.notInclude(yield* summaries(threadId), "Swarm cancelled by Stop");
+        const stopped = (yield* store.listNotices(threadId)).find((n) => n.kind === "stopped");
+        assert.include(stopped?.text ?? "", "was cancelled by your Stop");
         assert.equal(
           (yield* orchestrator.getThreadProjection(threadId)).runs.length,
           runsBeforeStop,
         );
+        assert.equal(yield* messageCount(threadId), messagesBefore, "no notice became a message");
+
+        // The contributor delivers the pending notices once, with the architect's next turn.
+        const contributor = makeSwarmNoticesContributor(store);
+        const entry = yield* contributor.build({ threadId });
+        assert.include(entry?.text ?? "", "Swarm updates since your last turn:");
+        assert.include(entry?.text ?? "", "was cancelled by your Stop");
+        assert.isUndefined(yield* contributor.build({ threadId }), "delivered once");
         yield* retire(result.swarmId);
 
         // A delivery that never gets a run is reported after 10 minutes.
@@ -2823,10 +2837,7 @@ it.layer(layerSwarm)("swarm_create, admission, and the scheduler (SW-A3)", (it) 
         yield* swarms.tick;
         yield* TestClock.adjust("11 minutes");
         yield* swarms.tick;
-        assert.include(
-          yield* summaries(stalledThread),
-          "Swarm results are waiting to be delivered",
-        );
+        assert.include(yield* kinds(stalledThread), "delivery_stalled");
         yield* drainWakes(stalledThread, stalledAnchor.id);
         yield* retire(stalled.swarmId);
       }),
@@ -3363,8 +3374,8 @@ it.layer(layerSwarm)("verify (SW-A6)", (it) => {
         "settled_only",
         "nothing is sent for a task that is no longer held",
       );
-      const notes = parent.messages.filter((message) =>
-        message.text.includes("m0's result could not be delivered; read it with swarm_collect"),
+      const notes = (yield* noticeTexts(threadId)).filter((text) =>
+        text.includes("m0's result could not be delivered; read it with swarm_collect"),
       );
       assert.equal(notes.length, 1);
       yield* retire(result.swarmId);
@@ -3907,6 +3918,10 @@ it.layer(layerSwarm)("status, cancel, retry, collect, and follow-up (SW-A7)", (i
       assert.equal(Option.getOrThrow(yield* store.getSwarm(result.swarmId)).status, "cancelled");
       assert.equal(after.runs.length, before.runs.length, "no architect run started");
       assert.equal(after.messages.length, before.messages.length, "no message was sent");
+      assert.isTrue(
+        (yield* noticeTexts(threadId)).some((text) => text.includes("was cancelled by your Stop")),
+        "a notice waits for the next turn",
+      );
       yield* retire(result.swarmId);
     }),
   );
@@ -4325,7 +4340,6 @@ it.layer(layerSwarm)("status, cancel, retry, collect, and follow-up (SW-A7)", (i
 
   it.effect("a failed stop leaves the member as it was, retries, and gives up with a note", () =>
     Effect.gen(function* () {
-      const orchestrator = yield* Orchestrator.OrchestratorV2;
       const swarms = yield* SwarmService.SwarmService;
       const { threadId, anchor } = yield* seedArchitect("a7-stop-fails");
       const result = yield* createSwarm(threadId, {
@@ -4352,8 +4366,8 @@ it.layer(layerSwarm)("status, cancel, retry, collect, and follow-up (SW-A7)", (i
       // m1 keeps failing: after five tries the swarm gives up, once, with a note.
       for (let pass = 0; pass < 5; pass += 1) yield* swarms.tick;
       assert.notEqual((yield* rows(result.swarmId))[1]!.status, "cancelled");
-      const notes = (yield* orchestrator.getThreadProjection(threadId)).messages.filter((message) =>
-        message.text.includes("member m1 could not be stopped"),
+      const notes = (yield* noticeTexts(threadId)).filter((text) =>
+        text.includes("member m1 could not be stopped"),
       );
       assert.equal(notes.length, 1);
       failStopThreads.delete(m1!.childThreadId!);
@@ -4870,9 +4884,8 @@ it.layer(layerSwarm)("failures, usage limits, and instance health (SW-A8)", (it)
       );
       assert.isTrue(after[1]!.queueReason?.startsWith("retry_after:"));
       // The note reaches this swarm: it has members waiting on the instance.
-      const parent = yield* (yield* Orchestrator.OrchestratorV2).getThreadProjection(threadId);
       assert.equal(
-        parent.messages.filter((message) => message.text.includes("failed repeatedly")).length,
+        (yield* noticeTexts(threadId)).filter((text) => text.includes("failed repeatedly")).length,
         1,
       );
       yield* resetHealth;
@@ -5162,7 +5175,6 @@ it.layer(layerSwarm)("limits (SW-A9)", (it) => {
 
   it.effect("exhausts the swarm turn budget: queued rows cancelled, tools refused, one note", () =>
     Effect.gen(function* () {
-      const orchestrator = yield* Orchestrator.OrchestratorV2;
       const swarms = yield* SwarmService.SwarmService;
       const store = yield* SwarmStore.SwarmStore;
       const { threadId, anchor } = yield* seedArchitect("a9-budget");
@@ -5185,11 +5197,9 @@ it.layer(layerSwarm)("limits (SW-A9)", (it) => {
       // The note goes out on the next pass, which reads the exhausted swarm; only once.
       yield* swarms.tick;
       yield* swarms.tick;
-      const summaries = (yield* orchestrator.getThreadProjection(threadId)).messages.flatMap(
-        (message) => (message.notification === undefined ? [] : [message.notification.summary]),
-      );
       assert.equal(
-        summaries.filter((summary) => summary === "Swarm stopped admitting members").length,
+        (yield* noticeTexts(threadId)).filter((text) => text.includes("used its turn budget"))
+          .length,
         1,
       );
       // Then the three tools refuse.

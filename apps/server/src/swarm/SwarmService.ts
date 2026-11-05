@@ -295,6 +295,8 @@ const encodeWakeBatch = Schema.encodeSync(WakeBatchJson);
 const decodeEnvelope = (json: string) => decodeSpecJson(json) as SwarmEnvelope;
 
 type SwarmNoteKind =
+  | "stopped"
+  | "detached"
   | "budget"
   | "instance_paused"
   | "approvals"
@@ -303,7 +305,6 @@ type SwarmNoteKind =
   | "stop_failed"
   | "instance_down";
 
-const NOTE_WINDOW_MS = 30_000;
 const FOLLOWUP_COALESCE_MS = 5_000;
 const DELIVERY_STALL_MS = 10 * 60_000;
 const MAX_RELEASE_ATTEMPTS = 5;
@@ -426,8 +427,6 @@ const make = Effect.gen(function* () {
   const passLock = yield* Semaphore.make(1);
   // Architect notes (SW-A5): routine notes at most once per swarm every 30 s; notes already
   // sent this process are skipped (a replay after a restart hits the command receipt instead).
-  const lastNoteAt = new Map<string, number>();
-  const sentNotes = new Set<string>();
   const stalledSince = new Map<string, number>();
   const releaseAttempts = new Map<string, number>();
   const stopAttempts = new Map<string, number>();
@@ -1312,9 +1311,7 @@ const make = Effect.gen(function* () {
       yield* notifyArchitect(swarm, {
         kind: "instance_down",
         key: `${providerInstanceId}:${until}`,
-        summary: "A provider instance looks down",
         text: `Swarm ${swarm.swarmId}: provider instance ${providerInstanceId} failed repeatedly, so admissions there are paused until ${until}. Members that can run elsewhere move; the rest wait.`,
-        routine: false,
       });
     }
   });
@@ -1726,9 +1723,7 @@ const make = Effect.gen(function* () {
           yield* notifyArchitect(swarm, {
             kind: "delivery_stalled",
             key: String(delivery.messageId),
-            summary: "Swarm results are waiting to be delivered",
             text: `Swarm ${swarm.swarmId}: a completion wake has had no run for 10 minutes. Released member results are in swarm_collect.`,
-            routine: false,
           });
         }
       }
@@ -1786,9 +1781,7 @@ const make = Effect.gen(function* () {
       yield* notifyArchitect(swarm, {
         kind: "undelivered",
         key: `${member.memberKey}:${member.attempt}`,
-        summary: "A swarm result could not be delivered",
         text: `Swarm ${swarm.swarmId}: member ${member.memberKey}'s result could not be delivered; read it with swarm_collect.`,
-        routine: false,
       });
     });
     for (const { member, digest } of releases) {
@@ -1862,58 +1855,28 @@ const make = Effect.gen(function* () {
    * running unmanaged. Archive or delete cancels (§4.6).
    */
   /**
-   * A server-created message to the architect (§SW-A5): not a member completion, so it does not
-   * go through the cohort. Command ids derive from state, so a crash before the state change
-   * replays the same note instead of sending a second one. Never carries task text.
+   * A notice for the architect (review of SW-A7/A8): written to `swarm_notices` and delivered
+   * once, in its next turn's context, so a notice never starts a turn. One notice per kind and
+   * key, replaced while pending; ids and counts only, never task text.
    */
   const notifyArchitect = Effect.fn("SwarmService.notifyArchitect")(function* (
     swarm: SwarmStore.SwarmRecord,
     note: {
       readonly kind: SwarmNoteKind;
       readonly key: string;
-      readonly summary: string;
       readonly text: string;
-      readonly outcome?: "updated" | "cancelled";
-      /** Routine notes wait out the 30 s window; closing notes never do. */
-      readonly routine: boolean;
     },
   ) {
-    const id = `swarm-note:${swarm.swarmId}:${note.kind}:${note.key}`;
-    if (sentNotes.has(id)) return true;
-    const nowMillis = DateTime.toEpochMillis(yield* DateTime.now);
-    if (note.routine && nowMillis - (lastNoteAt.get(swarm.swarmId) ?? -Infinity) < NOTE_WINDOW_MS) {
-      return false;
-    }
-    const sent = yield* threads
-      .dispatch({
-        type: "message.dispatch",
-        commandId: CommandId.make(id),
-        threadId: swarm.parentThreadId,
-        messageId: MessageId.make(`message:${id}`),
-        text: note.text,
-        notification: {
-          source: { kind: "system" },
-          outcome: note.outcome ?? "updated",
-          summary: note.summary,
-        },
-        attachments: [],
-        dispatchMode: { type: "queue_after_active" },
-        createdBy: "agent",
-        creationSource: "server",
-      })
-      .pipe(Effect.result);
-    if (Result.isFailure(sent)) {
-      yield* Effect.logWarning("swarm.note-failed", {
-        swarmId: swarm.swarmId,
-        kind: note.kind,
-        errorTag: storageOrDispatchTag(sent.failure),
-      });
-      return false;
-    }
-    sentNotes.add(id);
-    lastNoteAt.set(swarm.swarmId, nowMillis);
-    yield* Effect.logInfo("swarm.note", { swarmId: swarm.swarmId, kind: note.kind });
-    return true;
+    const changed = yield* store.putNotice({
+      swarmId: swarm.swarmId,
+      parentThreadId: swarm.parentThreadId,
+      noticeKey: `${note.kind}:${note.key}`,
+      kind: note.kind,
+      text: note.text,
+      createdAt: yield* nowIso,
+    });
+    if (changed) yield* Effect.logInfo("swarm.notice", { swarmId: swarm.swarmId, kind: note.kind });
+    return changed;
   });
 
   /** Pauses, approvals waiting (D6), and an exhausted budget, for an open swarm. */
@@ -1926,9 +1889,7 @@ const make = Effect.gen(function* () {
       yield* notifyArchitect(swarm, {
         kind: "budget",
         key: "1",
-        summary: "Swarm stopped admitting members",
         text: `Swarm ${swarm.swarmId} used its turn budget: no new members start and no member is retried. Running members finish; read results with swarm_collect.`,
-        routine: true,
       });
     }
     const queuedInstances = new Set(
@@ -1944,10 +1905,8 @@ const make = Effect.gen(function* () {
       if (pause.until <= now || !queuedInstances.has(pause.providerInstanceId)) continue;
       yield* notifyArchitect(swarm, {
         kind: "instance_paused",
-        key: `${pause.providerInstanceId}:${pause.until}`,
-        summary: "Swarm admissions paused on a provider instance",
+        key: String(pause.providerInstanceId),
         text: `Swarm ${swarm.swarmId}: admissions on provider instance ${pause.providerInstanceId} are paused until ${pause.until} (${pause.pauseClass}). Queued members there wait; members on other instances continue.`,
-        routine: true,
       });
     }
     // D6: approvals go to the user; the architect only hears how many are waiting.
@@ -1966,10 +1925,9 @@ const make = Effect.gen(function* () {
     if (waiting.length > 0) {
       yield* notifyArchitect(swarm, {
         kind: "approvals",
-        key: waiting.toSorted().join(","),
-        summary: "Swarm members are waiting on approval",
+        // One pending notice, replaced as the set changes; it never wakes the architect.
+        key: "pending",
         text: `Swarm ${swarm.swarmId}: ${waiting.length} member${waiting.length === 1 ? " is" : "s are"} waiting on the user's approval in ${waiting.length === 1 ? "its thread" : "their threads"}. You cannot approve them; the user does.`,
-        routine: true,
       });
     }
   });
@@ -2184,9 +2142,23 @@ const make = Effect.gen(function* () {
     const undelivered = members.filter(
       (member) => isFinalMemberStatus(member.status) && !member.released && member.taskId !== null,
     ).length;
-    // No message to the architect: a Stop or a cancelled wake is the user's own action, and any
-    // server message would start an architect turn and undo it (an idle thread starts what is
-    // queued). The swarm's status records the outcome for swarm_status and the panel.
+    // No message: one would start the architect turn the user just stopped. The outcome is a
+    // notice for its next turn, and the swarm's status, for swarm_status and the panel.
+    const plural = (count: number, one: string, many: string) =>
+      `${count} ${count === 1 ? one : many}`;
+    if (outcome === "stopped") {
+      yield* notifyArchitect(swarm, {
+        kind: "stopped",
+        key: "1",
+        text: `Swarm ${swarm.swarmId} was cancelled by your Stop: ${plural(queued, "queued member", "queued members")} did not start and running members were stopped. Results: swarm_collect.`,
+      });
+    } else if (outcome === "detached") {
+      yield* notifyArchitect(swarm, {
+        kind: "detached",
+        key: "1",
+        text: `Swarm ${swarm.swarmId} was detached because its wake was cancelled: ${plural(queued, "queued member", "queued members")} did not start, ${plural(running, "running member continues", "running members continue")} unmanaged, and ${plural(undelivered, "result was", "results were")} not delivered. Results: swarm_collect.`,
+      });
+    }
     yield* Effect.logInfo("swarm.closing", {
       swarmId: swarm.swarmId,
       outcome,
@@ -3209,9 +3181,7 @@ const make = Effect.gen(function* () {
         yield* notifyArchitect(swarm, {
           kind: "stop_failed",
           key: `${member.memberKey}:${member.attempt}`,
-          summary: "A swarm member could not be stopped",
           text: `Swarm ${swarm.swarmId}: member ${member.memberKey} could not be stopped after ${MAX_STOP_ATTEMPTS} tries. It may still be running; stop its thread yourself.`,
-          routine: false,
         });
       }
     }

@@ -32,6 +32,7 @@ import { makeInstructionTurnContextContributor } from "../instructions/instructi
 import * as SwarmStore from "../swarm/SwarmStore.ts";
 import {
   makeSwarmMemberContributor,
+  makeSwarmNoticesContributor,
   makeSwarmSharedContributor,
 } from "../swarm/swarmTurnContext.ts";
 import { buildTurnContext } from "@t3tools/provider-core/server/turnContext";
@@ -173,6 +174,7 @@ export const layer: Layer.Layer<
     const swarmStore = yield* Effect.serviceOption(SwarmStore.SwarmStore);
     const turnContextContributors = Option.isSome(swarmStore)
       ? [
+          makeSwarmNoticesContributor(swarmStore.value),
           makeSwarmMemberContributor(swarmStore.value),
           instructionContributor,
           makeSwarmSharedContributor(swarmStore.value),
