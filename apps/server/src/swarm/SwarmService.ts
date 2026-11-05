@@ -1803,7 +1803,8 @@ const make = Effect.gen(function* () {
       yield* notifyArchitect(swarm, {
         kind: "undelivered",
         key: `${member.memberKey}:${member.attempt}`,
-        text: `Swarm ${swarm.swarmId}: member ${member.memberKey}'s result could not be delivered; read it with swarm_collect.`,
+        // Member keys are architect-chosen: quoted as JSON strings so a key reads as data.
+        text: `Swarm ${swarm.swarmId}: the result of member ${encodeSpecJson(member.memberKey)} could not be delivered; read it with swarm_collect.`,
       });
     });
     for (const { member, digest } of releases) {
@@ -3228,7 +3229,7 @@ const make = Effect.gen(function* () {
         yield* notifyArchitect(swarm, {
           kind: "stop_failed",
           key: `${member.memberKey}:${member.attempt}`,
-          text: `Swarm ${swarm.swarmId}: member ${member.memberKey} could not be stopped after ${MAX_STOP_ATTEMPTS} tries. It may still be running; stop its thread yourself.`,
+          text: `Swarm ${swarm.swarmId}: member ${encodeSpecJson(member.memberKey)} could not be stopped after ${MAX_STOP_ATTEMPTS} tries. It may still be running; stop its thread yourself.`,
         });
       }
     }
