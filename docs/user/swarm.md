@@ -85,6 +85,8 @@ Windows, run `.cmd` scripts through `["cmd", "/c", …]`.
 - The command stops after `timeoutMs` (10 minutes by default). It also stops if someone sends the
   member a message while the check runs; the check then runs again once that turn ends.
 - Members that share one checkout are checked one at a time.
+- If the command cannot start at all, for example `["npm", "test"]` on Windows, where npm is
+  `npm.cmd`, the member fails at once with no retries. Use `["cmd", "/c", "npm", "test"]` there.
 
 Because the server runs the command itself, outside the provider's sandbox and approval review,
 `verify` needs the **Full access** runtime mode for both the agent that starts the swarm and the

@@ -21,6 +21,8 @@ export interface SwarmVerifyOutcome {
   readonly passed: boolean;
   readonly exitCode: number | null;
   readonly timedOut: boolean;
+  /** The command could not be started at all; a retry would fail the same way. */
+  readonly notStarted: boolean;
   /** stdout, then stderr, cut to the last 4,096 characters. */
   readonly outputTail: string;
 }
@@ -82,6 +84,7 @@ const make = Effect.gen(function* () {
         passed: outcome.exitCode === 0 && !outcome.timedOut && !outcome.cancelled,
         exitCode: outcome.exitCode,
         timedOut: outcome.timedOut,
+        notStarted: outcome.spawnFailed,
         outputTail: tailOf(outcome),
       })),
       Effect.catchTags({
@@ -90,7 +93,8 @@ const make = Effect.gen(function* () {
             passed: false,
             exitCode: null,
             timedOut: false,
-            outputTail: "The verify command could not be started.",
+            notStarted: true,
+            outputTail: "",
           }),
       }),
     );
