@@ -115,6 +115,7 @@ import {
   isBufferedProviderNotification,
   isUndeliveredMailboxSteer,
 } from "./NotificationMailbox.ts";
+import { delegatedCompletionWakeDetail } from "./delegatedCompletionWake.ts";
 import { EventSinkV2 } from "./EventSink.ts";
 import {
   decideGuestMessageSend,
@@ -684,30 +685,6 @@ function legacyPullRequestLink(
     },
     existing?.watch,
   );
-}
-
-const DELEGATED_RESULT_INLINE_BYTES = 16_000;
-
-function delegatedCompletionWakeDetail(
-  taskIds: ReadonlyArray<string>,
-  tasks: ReadonlyArray<OrchestrationV2Subagent>,
-): string {
-  let remainingBytes = DELEGATED_RESULT_INLINE_BYTES;
-  return taskIds
-    .map((taskId) => {
-      const task = tasks.find((candidate) => candidate.id === taskId);
-      const label = `Delegated task ${taskId}${task?.title == null ? "" : ` (${task.title})`}${task === undefined ? " reached a terminal state" : ` [${task.status}]`}`;
-      if (task?.result != null) {
-        const detail = `${label}:\n${task.result}`;
-        const bytes = Buffer.byteLength(detail);
-        if (bytes <= remainingBytes) {
-          remainingBytes -= bytes;
-          return detail;
-        }
-      }
-      return `${label}. Use task_status with taskId ${taskId} to read the result.`;
-    })
-    .join("\n\n");
 }
 
 function isTerminalDelegatedTaskStatus(status: OrchestrationV2Subagent["status"]): boolean {
@@ -8122,12 +8099,12 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     command: Extract<OrchestrationV2Command, { readonly type: "delegated_task.wake-policy" }>,
     events: Ref.Ref<Array<OrchestrationV2DomainEvent>>,
   ) {
-    // The contract carries them for swarm release; until the orchestrator honors them, refuse.
-    if (command.completionWake === "held" || command.completionDetail !== undefined) {
+    // A task is held only from its launch; the server releases it with "always".
+    if (command.completionWake === "held") {
       return yield* new OrchestratorDispatchError({
         commandId: command.commandId,
         commandType: command.type,
-        cause: "Held wakes and completion details are not supported by this server yet.",
+        cause: "A delegated task is held only from its launch.",
       });
     }
     const parentProjection = yield* projectionStore
@@ -8152,6 +8129,14 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       });
     }
     if (task.completionWake === command.completionWake) {
+      // A repeated release (same detail) is a no-op, so a crash between release and its
+      // bookkeeping can release again safely.
+      if (
+        command.completionDetail !== undefined &&
+        command.completionDetail === task.completionDetail
+      ) {
+        return;
+      }
       return yield* new OrchestratorDispatchError({
         commandId: command.commandId,
         commandType: command.type,
@@ -8163,6 +8148,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     const updatedTask: OrchestrationV2Subagent = {
       ...task,
       completionWake: command.completionWake,
+      ...(command.completionDetail === undefined
+        ? {}
+        : { completionDetail: command.completionDetail }),
       updatedAt: now,
     };
     // Finalization already offered for ended parent runs; another offer would duplicate the wake.
@@ -8170,11 +8158,13 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       task.runId === null
         ? undefined
         : parentProjection.runs.find((candidate) => candidate.id === task.runId);
+    // A released held task was never planned, so it plans now whether or not the parent runs.
+    const releasedHeld = task.completionWake === "held" && task.completionDelivery === undefined;
     const completionPlan =
       command.completionWake === "always" &&
       isTerminalDelegatedTaskStatus(task.status) &&
       parentRun !== undefined &&
-      hasLiveRun({ runs: [parentRun] })
+      (releasedHeld || hasLiveRun({ runs: [parentRun] }))
         ? yield* planDelegatedCompletionDelivery({
             parentProjection,
             parentRun,
@@ -11788,6 +11778,16 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         offer: false,
       };
     }
+    // A held task (a swarm member) plans no wake until the server releases it; its delivery
+    // stays unset, never pending, so no collector picks it up.
+    if (input.task.completionWake === "held") {
+      return {
+        task: input.updatedTask,
+        parentRun: undefined,
+        message: undefined,
+        offer: false,
+      };
+    }
     // settled_only relies on a blocking wait that ends with the spawning turn; later results need another delivery path.
     if (
       (input.task.completionWake ?? "settled_only") === "settled_only" &&
@@ -12327,6 +12327,25 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     }
   });
 
+  /** Task ids in the order of their subagent cards on the parent thread. */
+  const sortByCardOrdinal = Effect.fnUntraced(function* (
+    threadId: ThreadId,
+    taskIds: ReadonlyArray<OrchestrationV2Subagent["id"]>,
+  ) {
+    const { turnItems } = yield* projectionStore.getThreadRecords(threadId, ["turnItems"], {
+      turnItemTypes: ["subagent"],
+    });
+    const ordinals = new Map<string, number>();
+    for (const item of turnItems) {
+      if (item.type === "subagent") ordinals.set(item.subagentId, item.ordinal);
+    }
+    return taskIds.toSorted(
+      (left, right) =>
+        (ordinals.get(left) ?? Number.MAX_SAFE_INTEGER) -
+        (ordinals.get(right) ?? Number.MAX_SAFE_INTEGER),
+    );
+  });
+
   const finalizeDelegatedCompletionDelivery = Effect.fn(
     "Orchestrator.finalizeDelegatedCompletionDelivery",
   )(function* (threadId: ThreadId, runId: RunId) {
@@ -12383,16 +12402,23 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         observedByRunId: null,
       });
     }
-    const pendingTaskIds = projection.subagents
+    const collected = projection.subagents
       .filter(
         (task) =>
           task.origin === "app_owned" &&
           task.runId === parentRun.id &&
+          task.completionWake !== "held" &&
           isTerminalDelegatedTaskStatus(task.status) &&
           (task.completionDelivery?.state === "pending" ||
             nextTaskStates.get(task.id)?.state === "pending"),
       )
       .map((task) => task.id);
+    // A swarm's collected wake lists members in launch order, not task-id order (rev 3.4);
+    // other cohorts keep today's order.
+    const pendingTaskIds =
+      (cohort.swarmIds?.length ?? 0) > 0 && collected.length > 1
+        ? yield* sortByCardOrdinal(threadId, collected)
+        : collected;
     const canReserveFollowUp =
       cohort.disposition === "open" &&
       projection.thread.archivedAt === null &&
@@ -12505,6 +12531,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
                 task.origin === "app_owned" &&
                 task.runId === parentRun.id &&
                 task.completionDelivery?.state === "pending" &&
+                task.completionWake !== "held" &&
                 isTerminalDelegatedTaskStatus(task.status) &&
                 (!parentIsLive || task.completionWake === "always"),
             )
@@ -13037,6 +13064,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           planned.events.length > 0 ||
           command.type === "thread.background-work.settle" ||
           command.type === "thread.stop" ||
+          // A repeated swarm release is an idempotent no-op.
+          command.type === "delegated_task.wake-policy" ||
           command.type === "subagent.stop" ||
           // Closing a share again, or after it ended, is not an error.
           command.type === "thread.guest-share.close",

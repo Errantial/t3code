@@ -13,6 +13,8 @@ import {
   type ServerSettings as ServerSettingsValue,
   type SwarmAddMembersInput,
   type SwarmCreateInput,
+  type SwarmEnvelope,
+  SwarmWakeBatch,
   type SwarmMap,
   type SwarmCreateResult,
   SwarmId,
@@ -47,9 +49,22 @@ import type * as Orchestrator from "../orchestration-v2/Orchestrator.ts";
 import * as ThreadLaunchService from "../orchestration-v2/ThreadLaunchService.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
 import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
+import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
+import {
+  DELEGATED_RESULT_INLINE_BYTES,
+  delegatedCompletionWakeEntryBytes,
+} from "../orchestration-v2/delegatedCompletionWake.ts";
+import { subagentResultForRun } from "@t3tools/provider-core/server/subagentProjection";
 import * as ServerSettings from "../serverSettings.ts";
 import * as SwarmStore from "./SwarmStore.ts";
 import { expandSwarmMap } from "./swarmMap.ts";
+import {
+  capChangedPaths,
+  type FinalMemberStatus,
+  matchesAnyGlob,
+  parseSwarmResult,
+  swarmDigest,
+} from "./swarmEnvelope.ts";
 import {
   type SwarmCaps,
   type SwarmMemberSpec,
@@ -61,6 +76,7 @@ import {
   narrowerRuntimeMode,
   ownsPathsOverlapWarnings,
   planAdmissions,
+  readyForRelease,
   serialInstanceWarnings,
   sharedWriterRefusal,
   type WriterCandidate,
@@ -194,13 +210,16 @@ const FAILURE_MESSAGES: Readonly<Record<AdmissionFailureKind, string>> = {
 
 /** Swarm fields a later task owns; until then they fail explicitly rather than being ignored. */
 const unsupportedSwarmFields = (input: SwarmCreateInput): string | undefined => {
-  if (input.dataShape !== undefined) return "`dataShape`";
-  if (input.wakeBatch !== undefined || (input.wakePolicy ?? "group") !== "group") {
-    return "A `wakePolicy` other than 'group'";
-  }
   if (input.maxTotalTurns !== undefined) return "`maxTotalTurns`";
   return undefined;
 };
+
+const WakeBatchJson = Schema.fromJsonString(SwarmWakeBatch);
+const decodeWakeBatchJson = Schema.decodeOption(WakeBatchJson);
+const decodeWakeBatch = (json: string | null) =>
+  json === null ? {} : Option.getOrElse(decodeWakeBatchJson(json), () => ({}));
+const encodeWakeBatch = Schema.encodeSync(WakeBatchJson);
+const decodeEnvelope = (json: string) => decodeSpecJson(json) as SwarmEnvelope;
 
 /** The same for member fields, checked after a `map` expands. */
 const unsupportedMemberFields = (members: ReadonlyArray<SwarmMemberInput>): string | undefined => {
@@ -223,6 +242,8 @@ const make = Effect.gen(function* () {
   const threadLaunch = yield* ThreadLaunchService.ThreadLaunchService;
   const settingsService = yield* ServerSettings.ServerSettingsService;
   const providerRegistry = yield* ProviderRegistry.ProviderRegistry;
+  // Envelope artifacts read the member's worktree; without git they stay empty.
+  const gitDriver = yield* Effect.serviceOption(GitVcsDriver.GitVcsDriver);
   // Admission passes run one at a time, so a create and a tick never admit the same row twice.
   const passLock = yield* Semaphore.make(1);
   const wakes = yield* Queue.sliding<void>(1);
@@ -427,16 +448,100 @@ const make = Effect.gen(function* () {
         ),
       );
 
+  const childRecords = (threadId: ThreadId) =>
+    threads
+      .getThreadRecords(threadId, ["runs", "messages", "turnItems"], {
+        turnItemTypes: ["assistant_message"],
+        messageRoles: ["assistant"],
+      })
+      .pipe(
+        Effect.mapError(() => failure("orchestration_error", "Unable to read a member thread.")),
+      );
+
+  /** Git facts of a worktree member's checkout; empty when there is no checkout or no git. */
+  const worktreeArtifacts = Effect.fn("SwarmService.worktreeArtifacts")(function* (
+    cwd: string,
+    baseCommit: string | null,
+  ) {
+    if (Option.isNone(gitDriver)) return undefined;
+    const git = (args: ReadonlyArray<string>) =>
+      gitDriver.value
+        .execute({ operation: "SwarmService.envelope", cwd, args, timeoutMs: 15_000 })
+        .pipe(
+          Effect.map((result) => result.stdout),
+          Effect.orElseSucceed(() => ""),
+        );
+    const lines = (text: string) => text.split("\n").filter((line) => line.trim().length > 0);
+    const branch = (yield* git(["rev-parse", "--abbrev-ref", "HEAD"])).trim();
+    const commit = (yield* git(["rev-parse", "HEAD"])).trim();
+    const committed =
+      baseCommit === null ? [] : lines(yield* git(["diff", "--name-only", `${baseCommit}..HEAD`]));
+    const uncommitted = lines(yield* git(["status", "--porcelain"])).map((line) => line.slice(3));
+    return {
+      branch,
+      commit,
+      paths: [...committed, ...uncommitted],
+      uncommittedCount: uncommitted.length,
+    };
+  });
+
+  /** The member's envelope from its bound run's final text (SW-A5). Stored, never logged. */
+  const buildEnvelope = Effect.fn("SwarmService.buildEnvelope")(function* (input: {
+    readonly swarm: SwarmStore.SwarmRecord;
+    readonly member: SwarmStore.SwarmMemberRecord;
+    readonly child: Pick<OrchestrationV2ThreadProjection, "thread" | "messages" | "turnItems">;
+    readonly run: OrchestrationV2Run;
+    readonly status: FinalMemberStatus;
+    readonly testPathGlobs: ReadonlyArray<string>;
+  }) {
+    const { swarm, member, child, run, status } = input;
+    const spec = parseSpec(member.specJson);
+    const parsed = parseSwarmResult(subagentResultForRun(child, run).text);
+    const worktree =
+      spec.isolation === "worktree" && child.thread.worktreePath !== null
+        ? yield* worktreeArtifacts(child.thread.worktreePath, swarm.baseCommit)
+        : undefined;
+    const paths = capChangedPaths(worktree?.paths ?? []);
+    const prUrl = child.thread.pullRequests?.[0]?.url;
+    const envelope: SwarmEnvelope = {
+      status,
+      attempt: member.attempt,
+      followup: member.followups,
+      structured: parsed.structured,
+      summary: parsed.summary,
+      decisions: parsed.decisions,
+      assumptions: parsed.assumptions,
+      ...(parsed.data === undefined ? {} : { data: parsed.data }),
+      dataDropped: parsed.dataDropped,
+      artifacts: {
+        ...(worktree?.branch ? { branch: worktree.branch } : {}),
+        ...(worktree?.commit ? { commit: worktree.commit } : {}),
+        ...paths,
+        changedPathsTracked: worktree !== undefined,
+        uncommittedCount: worktree?.uncommittedCount ?? 0,
+        ...(prUrl === undefined ? {} : { prUrl }),
+      },
+      testFilesChanged: paths.changedPaths.some((path) =>
+        matchesAnyGlob(path, input.testPathGlobs),
+      ),
+      ...(status === "failed"
+        ? { failure: { class: "unknown" as const, message: "The member's run failed." } }
+        : {}),
+    };
+    return envelope;
+  });
+
   /**
-   * Seam for SW-A5/A6/A8, which must replace it before `"held"` is honored: until envelopes,
-   * verify, and failure classes land, a member whose first run ended is final by its run status.
+   * The member terminal path (SW-A5; SW-A6 adds verify, SW-A8 real failure classes): when the
+   * bound run ends, the member becomes final with its envelope, ready for release.
    */
   const reconcileMember = Effect.fn("SwarmService.reconcileMember")(function* (
     swarm: SwarmStore.SwarmRecord,
     member: SwarmStore.SwarmMemberRecord,
+    settings: ServerSettingsValue,
   ) {
     if (member.childThreadId === null || member.childRunId === null) return;
-    const child = yield* loadRuns(member.childThreadId);
+    const child = yield* childRecords(member.childThreadId);
     const run = child.runs.find((candidate) => candidate.id === member.childRunId);
     if (run === undefined) return;
     const updatedAt = yield* nowIso;
@@ -448,20 +553,29 @@ const make = Effect.gen(function* () {
       });
       return;
     }
-    const ended =
+    const ended: FinalMemberStatus | undefined =
       run.status === "completed"
-        ? ("claimed_done" as const)
+        ? "claimed_done"
         : run.status === "failed"
-          ? ("failed" as const)
+          ? "failed"
           : run.status === "cancelled" || run.status === "interrupted"
-            ? ("cancelled" as const)
+            ? "cancelled"
             : undefined;
     if (ended === undefined) return;
+    const envelope = yield* buildEnvelope({
+      swarm,
+      member,
+      child,
+      run,
+      status: ended,
+      testPathGlobs: settings.swarmTestPathGlobs,
+    });
     yield* store.updateMember({
       swarmId: swarm.swarmId,
       memberKey: member.memberKey,
       patch: {
         status: ended,
+        envelopeJson: encodeSpecJson(envelope),
         ...(ended === "failed"
           ? {
               failureClass: "unknown",
@@ -473,6 +587,135 @@ const make = Effect.gen(function* () {
         endedAt: updatedAt,
         updatedAt,
       },
+    });
+  });
+
+  /**
+   * Releases ready members to the architect (SW-A5): the gate is evaluated once per pass, then
+   * the longest ordinal prefix whose rendered wake entries fit DELEGATED_RESULT_INLINE_BYTES
+   * with what the delivery already holds; when not even one fits, one member goes alone.
+   */
+  const releasePass = Effect.fn("SwarmService.releasePass")(function* (
+    swarm: SwarmStore.SwarmRecord,
+    members: ReadonlyArray<SwarmStore.SwarmMemberRecord>,
+  ) {
+    const now = yield* nowIso;
+    // A row that never launched has no task to wake with; it counts as released once final.
+    for (const member of members) {
+      if (member.taskId === null && !member.released && isFinalMemberStatus(member.status)) {
+        yield* store.updateMember({
+          swarmId: swarm.swarmId,
+          memberKey: member.memberKey,
+          patch: { released: true, updatedAt: now },
+        });
+      }
+    }
+    const ready = readyForRelease({
+      wakePolicy: swarm.wakePolicy,
+      wakeBatch: decodeWakeBatch(swarm.wakeBatchJson),
+      members,
+      nowMillis: Date.parse(now),
+    });
+    if (ready.length === 0) return;
+    const parent = yield* threads
+      .getThreadRecords(swarm.parentThreadId, ["runs", "subagents", "messages"], {
+        messageRoles: ["user"],
+      })
+      .pipe(Effect.mapError(() => failure("orchestration_error", "Unable to read the architect.")));
+    const anchor = parent.runs.find((run) => run.id === swarm.anchorRunId);
+    const cohort = anchor?.delegatedCompletion;
+    if (cohort?.disposition !== "open") return;
+    const delivery = cohort.delivery;
+    const deliveryRun =
+      delivery === null
+        ? undefined
+        : parent.runs.find(
+            (run) =>
+              run.id ===
+              parent.messages.find((message) => message.id === delivery.messageId)?.runId,
+          );
+    const releasedTaskIds = new Set(
+      members.flatMap((member) =>
+        member.released && member.taskId !== null ? [member.taskId] : [],
+      ),
+    );
+    // The gate (rev 3.2): closed while a delivery with no run yet, or a queued one, already
+    // holds a released swarm task.
+    if (
+      delivery !== null &&
+      (deliveryRun === undefined || deliveryRun.status === "queued") &&
+      delivery.taskIds.some((taskId) => releasedTaskIds.has(taskId))
+    ) {
+      return;
+    }
+    const tasks = new Map(parent.subagents.map((task) => [String(task.id), task]));
+    const committed = [
+      ...(delivery?.taskIds ?? []),
+      ...(deliveryRun !== undefined && deliveryRun.status !== "queued"
+        ? parent.subagents
+            .filter(
+              (task) =>
+                task.runId === swarm.anchorRunId && task.completionDelivery?.state === "pending",
+            )
+            .map((task) => task.id)
+        : []),
+    ].reduce((bytes, taskId) => {
+      const task = tasks.get(String(taskId));
+      return task === undefined ? bytes : bytes + delegatedCompletionWakeEntryBytes(taskId, task);
+    }, 0);
+    let used = committed;
+    const releases: Array<{
+      readonly member: SwarmStore.SwarmMemberRecord;
+      readonly digest: string;
+    }> = [];
+    for (const member of ready) {
+      const task = tasks.get(String(member.taskId));
+      if (task === undefined) continue;
+      const digest = swarmDigest({
+        key: member.memberKey,
+        envelope: decodeEnvelope(member.envelopeJson!),
+      });
+      const bytes = delegatedCompletionWakeEntryBytes(member.taskId!, {
+        ...task,
+        completionDetail: digest,
+      });
+      if (used + bytes > DELEGATED_RESULT_INLINE_BYTES && releases.length > 0) break;
+      releases.push({ member, digest });
+      used += bytes;
+      // Progress: one member that does not fit still goes, alone (it may arrive as a pointer).
+      if (used > DELEGATED_RESULT_INLINE_BYTES) break;
+    }
+    for (const { member, digest } of releases) {
+      const released = yield* threads
+        .dispatch({
+          type: "delegated_task.wake-policy",
+          commandId: CommandId.make(
+            `swarm-release:${swarm.swarmId}:${member.memberKey}:${member.attempt}`,
+          ),
+          parentThreadId: swarm.parentThreadId,
+          taskId: member.taskId!,
+          completionWake: "always",
+          completionDetail: digest,
+        })
+        .pipe(Effect.result);
+      if (Result.isFailure(released)) {
+        yield* Effect.logWarning("swarm.release-failed", {
+          swarmId: swarm.swarmId,
+          memberKey: member.memberKey,
+          errorTag: storageOrDispatchTag(released.failure),
+        });
+        continue;
+      }
+      yield* store.updateMember({
+        swarmId: swarm.swarmId,
+        memberKey: member.memberKey,
+        patch: { released: true, updatedAt: yield* nowIso },
+      });
+    }
+    yield* Effect.logInfo("swarm.released", {
+      swarmId: swarm.swarmId,
+      members: releases.length,
+      ready: ready.length,
     });
   });
 
@@ -566,7 +809,7 @@ const make = Effect.gen(function* () {
               member.childThreadId !== null &&
               (member.status === "launching" || member.status === "running")
             ) {
-              yield* reconcileMember(swarm, member).pipe(
+              yield* reconcileMember(swarm, member, settings).pipe(
                 logged("swarm.reconcile-error", {
                   swarmId: swarm.swarmId,
                   memberKey: member.memberKey,
@@ -599,6 +842,12 @@ const make = Effect.gen(function* () {
             }
           }
           members = yield* store.listMembers(swarm.swarmId);
+          if (swarm.status === "active" && state === "open") {
+            yield* releasePass(swarm, members).pipe(
+              logged("swarm.release-error", { swarmId: swarm.swarmId }),
+            );
+            members = yield* store.listMembers(swarm.swarmId);
+          }
           membersBySwarm.set(swarm.swarmId, members);
           admits.set(swarm.swarmId, swarm.status === "active" && state === "open");
           watched.add(swarm.parentThreadId);
@@ -1086,6 +1335,9 @@ const make = Effect.gen(function* () {
     }
     const unsupported = unsupportedSwarmFields(input);
     if (unsupported !== undefined) return yield* notYet(unsupported);
+    if (input.wakeBatch !== undefined && input.wakePolicy !== "batch") {
+      return yield* failure("invalid_request", "`wakeBatch` needs wakePolicy: 'batch'.");
+    }
     if (
       input.sharedContext !== undefined &&
       utf8.encode(input.sharedContext).length > SHARED_CONTEXT_MAX_BYTES
@@ -1164,12 +1416,12 @@ const make = Effect.gen(function* () {
       baseCommit,
       title: input.title,
       wakePolicy: input.wakePolicy ?? "group",
-      wakeBatchJson: null,
+      wakeBatchJson: input.wakeBatch === undefined ? null : encodeWakeBatch(input.wakeBatch),
       maxConcurrent: input.maxConcurrent ?? null,
       maxTotalTurns: null,
       verifyJson: null,
       sharedContext: input.sharedContext ?? null,
-      dataShape: null,
+      dataShape: input.dataShape ?? null,
       allowSharedWriters: input.allowSharedWriters === true,
       budgetExhausted: false,
       status: "active",

@@ -1254,6 +1254,18 @@ export const ServerSettings = Schema.Struct({
   swarmInstanceCaps: Schema.Record(Schema.String, SwarmCapSetting).pipe(
     Schema.withDecodingDefault(Effect.succeed({})),
   ),
+  /** Swarm v2: paths that count as test files in a member's result (`testFilesChanged`). */
+  swarmTestPathGlobs: Schema.Array(TrimmedNonEmptyString).pipe(
+    Schema.withDecodingDefault(
+      Effect.succeed([
+        "**/*.test.*",
+        "**/*.spec.*",
+        "**/test/**",
+        "**/tests/**",
+        "**/__tests__/**",
+      ]),
+    ),
+  ),
   /**
    * What a linked environment may run here, separate from orchestration access.
    * Set only on the machine being executed on. Defaults to off.
@@ -1619,6 +1631,7 @@ export const ServerSettingsPatch = Schema.Struct({
   swarmMaxConcurrent: Schema.optionalKey(SwarmCapSetting),
   swarmMaxConcurrentPerInstance: Schema.optionalKey(SwarmCapSetting),
   swarmInstanceCaps: Schema.optionalKey(Schema.Record(Schema.String, SwarmCapSetting)),
+  swarmTestPathGlobs: Schema.optionalKey(Schema.Array(TrimmedNonEmptyString)),
   peerExecGrant: Schema.optionalKey(PeerExecGrant),
   peerExecRoots: Schema.optionalKey(Schema.Array(Schema.String)),
   backgroundActivity: Schema.optionalKey(
