@@ -12,7 +12,6 @@ import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import { squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
 import { useEffect, useState } from "react";
 
-import { requestConfirmDialog } from "~/confirmDialog";
 import { cn } from "../../lib/utils";
 import { readEnvironmentScope } from "../../state/session";
 import { swarmActCommand, swarmListForThreadCommand } from "../../state/swarm";
@@ -21,6 +20,7 @@ import { buildThreadRouteParams } from "../../threadRoutes";
 import { Button } from "../ui/button";
 import { stackedThreadToast, toastManager } from "../ui/toast";
 import { swarmV2EnabledAtom } from "./swarmAvailability";
+import { confirmSwarmAction } from "./swarmConfirm";
 import { ThreadDetailsSection } from "./ThreadDetailsSection";
 import {
   filterSwarmMembers,
@@ -106,8 +106,7 @@ export function ThreadSwarmPanel(props: {
   const act = async (input: SwarmActInput, confirmMessage?: string) => {
     if (busy || !canOperate) return;
     if (confirmMessage !== undefined) {
-      const confirmed = (await requestConfirmDialog(confirmMessage)) ?? true;
-      if (!confirmed) return;
+      if (!(await confirmSwarmAction(confirmMessage))) return;
     }
     setBusy(true);
     const result = await actCommand({ environmentId: props.environmentId, input });

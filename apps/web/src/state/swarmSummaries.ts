@@ -101,9 +101,20 @@ export function useSwarmSummariesPolling() {
         ),
     );
     let cancelled = false;
-    const timers: Array<ReturnType<typeof setTimeout>> = [];
+    // One timer per environment; none while the page is hidden.
+    const timers = new Map<EnvironmentId, ReturnType<typeof setTimeout>>();
+    const schedule = (environmentId: EnvironmentId, delay: number) => {
+      const previous = timers.get(environmentId);
+      if (previous !== undefined) clearTimeout(previous);
+      timers.set(
+        environmentId,
+        setTimeout(() => void poll(environmentId), delay),
+      );
+    };
     const poll = async (environmentId: EnvironmentId) => {
+      timers.delete(environmentId);
       if (cancelled || unsupportedEnvironments.has(environmentId)) return;
+      if (document.visibilityState === "hidden") return;
       const result = await summariesCommand({ environmentId });
       if (cancelled) return;
       let summaries: ReadonlyArray<SwarmSummary> = [];
@@ -114,14 +125,21 @@ export function useSwarmSummariesPolling() {
       }
       setSummaries((current) => mergeSwarmSummaries(current, environmentId, summaries));
       if (unsupportedEnvironments.has(environmentId)) return;
-      timers.push(
-        setTimeout(() => void poll(environmentId), nextSwarmPollDelay(summaries.length > 0)),
-      );
+      schedule(environmentId, nextSwarmPollDelay(summaries.length > 0));
     };
+    const onVisibilityChange = () => {
+      if (document.visibilityState !== "visible") return;
+      // Back in view: poll at once, then on the usual cadence.
+      for (const environmentId of environmentIds) {
+        if (!unsupportedEnvironments.has(environmentId)) schedule(environmentId, 0);
+      }
+    };
+    document.addEventListener("visibilitychange", onVisibilityChange);
     for (const environmentId of environmentIds) void poll(environmentId);
     return () => {
       cancelled = true;
-      for (const timer of timers) clearTimeout(timer);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+      for (const timer of timers.values()) clearTimeout(timer);
     };
     // oxlint-disable-next-line react/exhaustive-effect-dependencies -- the command and setter are stable; the enabled environments select what to poll.
   }, [enabledKey]);
