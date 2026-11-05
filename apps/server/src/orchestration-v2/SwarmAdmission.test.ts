@@ -4087,6 +4087,176 @@ it.layer(layerSwarm)("status, cancel, retry, collect, and follow-up (SW-A7)", (i
     }),
   );
 
+  it.effect("refuses every SW-A7 tool to a thread other than the architect", () =>
+    Effect.gen(function* () {
+      const { threadId } = yield* seedArchitect("a7-owner");
+      const { threadId: other } = yield* seedArchitect("a7-owner-other");
+      const result = yield* createSwarm(threadId, {
+        members: members(1, { interactionMode: "plan" }),
+      });
+      const swarmId = result.swarmId;
+      const refusals = [
+        yield* statusOf(other, { swarmId }).pipe(Effect.flip),
+        yield* cancelIn(other, { swarmId }).pipe(Effect.flip),
+        yield* retryIn(other, { swarmId, keys: ["m0"] }).pipe(Effect.flip),
+        yield* collectIn(other, { swarmId }).pipe(Effect.flip),
+        yield* followupIn(other, { swarmId, key: "m0", message: "More." }).pipe(Effect.flip),
+      ];
+      assert.deepEqual(
+        refusals.map((refusal) => refusal.code),
+        Array(5).fill("capability_denied"),
+      );
+      for (const [index, tool] of [
+        "swarm_status",
+        "swarm_cancel",
+        "swarm_retry",
+        "swarm_collect",
+        "swarm_followup",
+      ].entries()) {
+        assert.include(refusals[index]!.message, tool);
+      }
+      // Nothing changed.
+      assert.notEqual((yield* rows(swarmId))[0]!.status, "cancelled");
+      yield* retire(swarmId);
+    }),
+  );
+
+  it.effect("refuses a follow-up in every state that does not allow one", () =>
+    Effect.gen(function* () {
+      const store = yield* SwarmStore.SwarmStore;
+      const { threadId, anchor } = yield* seedArchitect("a7-followup-states");
+      const result = yield* createSwarm(threadId, {
+        members: members(1, { interactionMode: "plan" }),
+      });
+      yield* endRun({ threadId, runId: anchor.id });
+      const set = (patch: Omit<SwarmStore.SwarmMemberPatch, "updatedAt">) =>
+        Effect.gen(function* () {
+          yield* store.updateMember({
+            swarmId: result.swarmId,
+            memberKey: "m0",
+            patch: { ...patch, updatedAt: DateTime.formatIso(yield* DateTime.now) },
+          });
+        });
+      const refusalFor = (patch: Omit<SwarmStore.SwarmMemberPatch, "updatedAt">) =>
+        Effect.gen(function* () {
+          yield* set(patch);
+          return yield* followupIn(threadId, {
+            swarmId: result.swarmId,
+            key: "m0",
+            message: "More.",
+          }).pipe(Effect.flip);
+        });
+      for (const status of ["queued", "launching", "running", "verifying", "limit_wait"] as const) {
+        const refused = yield* refusalFor({ status });
+        assert.include(refused.message, "follow up once it has finished", status);
+      }
+      for (const [status, failureClass] of [
+        ["cancelled", null],
+        ["detached", null],
+        ["failed", "provider_error"],
+        ["failed", "launch"],
+      ] as const) {
+        const refused = yield* refusalFor({ status, failureClass });
+        assert.include(refused.message, "use swarm_retry instead", `${status} ${failureClass}`);
+      }
+      const tooMany = yield* refusalFor({ status: "verified", failureClass: null, followups: 5 });
+      assert.include(tooMany.message, "already had 5 follow-ups");
+      const notFound = yield* followupIn(threadId, {
+        swarmId: result.swarmId,
+        key: "nope",
+        message: "More.",
+      }).pipe(Effect.flip);
+      assert.include(notFound.message, "has no member 'nope'");
+      yield* retire(result.swarmId);
+    }),
+  );
+
+  it.effect("re-checks shared writers on retry and follow-up", () =>
+    Effect.gen(function* () {
+      const store = yield* SwarmStore.SwarmStore;
+      const swarms = yield* SwarmService.SwarmService;
+      const { threadId, anchor } = yield* seedArchitect("a7-writers");
+      const result = yield* createSwarm(threadId, {
+        allowSharedWriters: true,
+        members: members(2).map((member) => ({ ...member, ownsPaths: [`src/${member.key}`] })),
+      });
+      yield* endRun({ threadId, runId: anchor.id });
+      const [m0, m1] = yield* rows(result.swarmId);
+      yield* finishRow(threadId, m0!, "m0 failed", "failed");
+      yield* swarms.tick;
+      // m1 lost its ownsPaths since: two shared writers without them are refused.
+      const spec = JSON.parse(m1!.specJson) as Record<string, unknown>;
+      const { ownsPaths: _ownsPaths, ...withoutPaths } = spec;
+      yield* store.updateMember({
+        swarmId: result.swarmId,
+        memberKey: "m1",
+        patch: {
+          specJson: JSON.stringify(withoutPaths),
+          updatedAt: DateTime.formatIso(yield* DateTime.now),
+        },
+      });
+      const retry = yield* retryIn(threadId, { swarmId: result.swarmId, keys: ["m0"] }).pipe(
+        Effect.flip,
+      );
+      assert.equal(retry.code, "invalid_request");
+      assert.include(retry.message, "would edit the same checkout");
+      yield* store.updateMember({
+        swarmId: result.swarmId,
+        memberKey: "m0",
+        patch: {
+          status: "claimed_done",
+          failureClass: null,
+          updatedAt: DateTime.formatIso(yield* DateTime.now),
+        },
+      });
+      const followup = yield* followupIn(threadId, {
+        swarmId: result.swarmId,
+        key: "m0",
+        message: "More.",
+      }).pipe(Effect.flip);
+      assert.include(followup.message, "would edit the same checkout");
+      assert.equal((yield* rows(result.swarmId))[0]!.attempt, 1, "nothing was requeued");
+      yield* retire(result.swarmId);
+    }),
+  );
+
+  it.effect("a retry reopens a completed swarm, and the 48 attempts cap refuses one", () =>
+    Effect.gen(function* () {
+      const store = yield* SwarmStore.SwarmStore;
+      const swarms = yield* SwarmService.SwarmService;
+      const { threadId, anchor } = yield* seedArchitect("a7-retry-cap");
+      const result = yield* createSwarm(threadId, {
+        members: members(1, { interactionMode: "plan" }),
+      });
+      yield* endRun({ threadId, runId: anchor.id });
+      yield* finishRow(threadId, (yield* rows(result.swarmId))[0]!, "m0 failed", "failed");
+      yield* swarms.tick;
+      yield* drainWakes(threadId, anchor.id);
+      yield* swarms.tick;
+      assert.equal(Option.getOrThrow(yield* store.getSwarm(result.swarmId)).status, "completed");
+      // D5: 48 members, retries included. Attempt 48 leaves no room.
+      yield* store.updateMember({
+        swarmId: result.swarmId,
+        memberKey: "m0",
+        patch: { attempt: 48, updatedAt: DateTime.formatIso(yield* DateTime.now) },
+      });
+      const capped = yield* retryIn(threadId, { swarmId: result.swarmId, keys: ["m0"] }).pipe(
+        Effect.flip,
+      );
+      assert.include(capped.message, "at most 48 members, retries included");
+      assert.equal(Option.getOrThrow(yield* store.getSwarm(result.swarmId)).status, "completed");
+      yield* store.updateMember({
+        swarmId: result.swarmId,
+        memberKey: "m0",
+        patch: { attempt: 1, updatedAt: DateTime.formatIso(yield* DateTime.now) },
+      });
+      const retried = yield* retryIn(threadId, { swarmId: result.swarmId, keys: ["m0"] });
+      assert.equal(retried.members[0]!.attempt, 2);
+      assert.equal(Option.getOrThrow(yield* store.getSwarm(result.swarmId)).status, "active");
+      yield* retire(result.swarmId);
+    }),
+  );
+
   it.effect("a failed stop leaves the member as it was, retries, and gives up with a note", () =>
     Effect.gen(function* () {
       const orchestrator = yield* Orchestrator.OrchestratorV2;

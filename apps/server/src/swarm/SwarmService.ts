@@ -678,7 +678,6 @@ const make = Effect.gen(function* () {
     return envelope;
   });
 
-  /** Only `auto` and `full-access` run commands without approval, so only they allow verify. */
   /**
    * A server-run verify bypasses provider sandboxes and approval review, so only `full-access`
    * allows it (decision 2026-11-04): `auto` still sandboxes or reviews commands in each driver.
@@ -3257,6 +3256,7 @@ const make = Effect.gen(function* () {
     }
     return {
       swarmId: swarm.swarmId,
+      trust: "data" as const,
       envelopes,
       nextCursor: last === undefined ? (input.since ?? null) : encodeCursor(last),
     };
