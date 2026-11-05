@@ -167,10 +167,11 @@ it.effect("reserves the swarm records migration id", () =>
   Effect.gen(function* () {
     yield* Effect.void;
     assert.deepStrictEqual(
-      migrationManifest.filter(([id]) => id === 76 || id === 77),
+      migrationManifest.filter(([id]) => id >= 76),
       [
         [76, "SwarmRecords"],
         [77, "SwarmVerifyProcess"],
+        [78, "SwarmNotices"],
       ],
     );
   }),

@@ -145,6 +145,24 @@ export interface SwarmNoteRecord {
   readonly createdAt: string;
 }
 
+export interface SwarmNotice {
+  readonly swarmId: SwarmId;
+  readonly noticeKey: string;
+  readonly kind: string;
+  readonly text: string;
+  readonly createdAt: string;
+  readonly deliveredAt: string | null;
+}
+
+const noticeOf = (row: Row): SwarmNotice => ({
+  swarmId: row.swarm_id as SwarmId,
+  noticeKey: String(row.notice_key),
+  kind: String(row.kind),
+  text: String(row.text),
+  createdAt: String(row.created_at),
+  deliveredAt: nullableString(row.delivered_at),
+});
+
 export interface SwarmInstancePause {
   readonly providerInstanceId: ProviderInstanceId;
   readonly pauseClass: SwarmPauseClass;
@@ -348,6 +366,27 @@ export class SwarmStore extends Context.Service<
       readonly since: string;
       readonly classes: ReadonlyArray<SwarmFailureClass>;
     }) => Effect.Effect<number, OrchestratorMcpFailure>;
+    /**
+     * A notice for the architect's next turn (migration 078). Replaces the pending one with the
+     * same key; an unchanged notice keeps its delivery. Returns whether anything changed.
+     */
+    readonly putNotice: (notice: {
+      readonly swarmId: SwarmId;
+      readonly parentThreadId: ThreadId;
+      readonly noticeKey: string;
+      readonly kind: string;
+      readonly text: string;
+      readonly createdAt: string;
+    }) => Effect.Effect<boolean, OrchestratorMcpFailure>;
+    /** The thread's pending notices, oldest first, marked delivered in the same transaction. */
+    readonly takeNotices: (input: {
+      readonly parentThreadId: ThreadId;
+      readonly deliveredAt: string;
+    }) => Effect.Effect<ReadonlyArray<SwarmNotice>, OrchestratorMcpFailure>;
+    /** Every notice of a thread, delivered or not (the panel and tests). */
+    readonly listNotices: (
+      parentThreadId: ThreadId,
+    ) => Effect.Effect<ReadonlyArray<SwarmNotice>, OrchestratorMcpFailure>;
     /** Runs store calls in one transaction (SW-A8: a failure, its pause, and its retry). */
     readonly transaction: <A, R>(
       effect: Effect.Effect<A, OrchestratorMcpFailure, R>,
@@ -556,10 +595,63 @@ const make = Effect.gen(function* () {
       Effect.catch(storageFailure("countRecentInstanceFailures")),
     );
 
+  const putNotice: SwarmStore["Service"]["putNotice"] = (notice) =>
+    sql
+      .withTransaction(
+        Effect.gen(function* () {
+          const existing = yield* sql<Row>`
+            SELECT text FROM swarm_notices
+            WHERE swarm_id = ${notice.swarmId} AND notice_key = ${notice.noticeKey}
+          `;
+          if (existing[0] !== undefined && String(existing[0].text) === notice.text) return false;
+          yield* sql`
+            INSERT INTO swarm_notices
+              (swarm_id, notice_key, parent_thread_id, kind, text, created_at, delivered_at)
+            VALUES (${notice.swarmId}, ${notice.noticeKey}, ${notice.parentThreadId},
+              ${notice.kind}, ${notice.text}, ${notice.createdAt}, NULL)
+            ON CONFLICT (swarm_id, notice_key) DO UPDATE SET
+              text = excluded.text, created_at = excluded.created_at, delivered_at = NULL
+          `;
+          return true;
+        }),
+      )
+      .pipe(Effect.catch(storageFailure("putNotice")));
+
+  const takeNotices: SwarmStore["Service"]["takeNotices"] = (input) =>
+    sql
+      .withTransaction(
+        Effect.gen(function* () {
+          const rows = yield* sql<Row>`
+            SELECT * FROM swarm_notices
+            WHERE parent_thread_id = ${input.parentThreadId} AND delivered_at IS NULL
+            ORDER BY created_at ASC, notice_key ASC
+          `;
+          if (rows.length === 0) return [];
+          yield* sql`
+            UPDATE swarm_notices SET delivered_at = ${input.deliveredAt}
+            WHERE parent_thread_id = ${input.parentThreadId} AND delivered_at IS NULL
+          `;
+          return rows.map(noticeOf);
+        }),
+      )
+      .pipe(Effect.catch(storageFailure("takeNotices")));
+
+  const listNotices: SwarmStore["Service"]["listNotices"] = (parentThreadId) =>
+    sql<Row>`
+      SELECT * FROM swarm_notices WHERE parent_thread_id = ${parentThreadId}
+      ORDER BY created_at ASC, notice_key ASC
+    `.pipe(
+      Effect.map((rows) => rows.map(noticeOf)),
+      Effect.catch(storageFailure("listNotices")),
+    );
+
   const transaction: SwarmStore["Service"]["transaction"] = (effect) =>
     sql.withTransaction(effect).pipe(Effect.catchTags({ SqlError: storageFailure("transaction") }));
 
   return SwarmStore.of({
+    putNotice,
+    takeNotices,
+    listNotices,
     countRecentInstanceFailures,
     transaction,
     createSwarm,

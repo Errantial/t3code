@@ -3,6 +3,7 @@ import type {
   TurnContextContributor,
   TurnContextEntry,
 } from "@t3tools/provider-core/server/turnContext";
+import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
@@ -147,4 +148,45 @@ export const makeSwarmSharedContributor = (
   maxBytes: SWARM_SHARED_MAX_BYTES,
   build: (turn): Effect.Effect<TurnContextEntry | undefined> =>
     buildEntry(store, turn.threadId).pipe(Effect.orElseSucceed(() => undefined)),
+});
+
+const SWARM_NOTICES_KEY = "swarm_notices";
+const SWARM_NOTICES_PRIORITY = 90;
+const SWARM_NOTICES_MAX_BYTES = 4_096;
+
+/** Server-authored notices about the architect's swarms, as one entry. */
+const formatSwarmNotices = (notices: ReadonlyArray<{ readonly text: string }>): string =>
+  ["Swarm updates since your last turn:", ...notices.map((notice) => `- ${notice.text}`)].join(
+    "\n",
+  );
+
+const buildNoticesEntry = Effect.fn("SwarmTurnContext.buildNotices")(function* (
+  store: SwarmStore.SwarmStore["Service"],
+  threadId: string,
+) {
+  const notices = yield* store.takeNotices({
+    parentThreadId: ThreadId.make(threadId),
+    deliveredAt: DateTime.formatIso(yield* DateTime.now),
+  });
+  if (notices.length === 0) return undefined;
+  return {
+    key: SWARM_NOTICES_KEY,
+    trust: "trusted",
+    text: formatSwarmNotices(notices),
+  } satisfies TurnContextEntry;
+});
+
+/**
+ * The architect's pending swarm notices (Stop, detach, pauses, approvals, budget): delivered
+ * once, with its next turn, so a notice never starts a turn of its own.
+ */
+export const makeSwarmNoticesContributor = (
+  store: SwarmStore.SwarmStore["Service"],
+): TurnContextContributor<{ readonly threadId: string }> => ({
+  key: SWARM_NOTICES_KEY,
+  trust: "trusted",
+  priority: SWARM_NOTICES_PRIORITY,
+  maxBytes: SWARM_NOTICES_MAX_BYTES,
+  build: (turn): Effect.Effect<TurnContextEntry | undefined> =>
+    buildNoticesEntry(store, turn.threadId).pipe(Effect.orElseSucceed(() => undefined)),
 });

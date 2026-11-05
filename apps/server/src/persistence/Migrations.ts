@@ -81,6 +81,7 @@ import Migration0074 from "./Migrations/074_PeerExecReceipts.ts";
 import Migration0075 from "./Migrations/075_ProjectionProjectsEnvironmentRoots.ts";
 import Migration0076 from "./Migrations/076_SwarmRecords.ts";
 import Migration0077 from "./Migrations/077_SwarmVerifyProcess.ts";
+import Migration0078 from "./Migrations/078_SwarmNotices.ts";
 
 const migrationEntries = [
   [1, "OrchestrationEvents", Migration0001],
@@ -164,6 +165,7 @@ const migrationEntries = [
   [75, "ProjectionProjectsEnvironmentRoots", Migration0075],
   [76, "SwarmRecords", Migration0076],
   [77, "SwarmVerifyProcess", Migration0077],
+  [78, "SwarmNotices", Migration0078],
 ] as const;
 
 export const migrationManifest = migrationEntries.map(([id, name]) => [id, name] as const);
