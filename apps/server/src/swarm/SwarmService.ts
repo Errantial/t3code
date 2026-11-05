@@ -269,12 +269,14 @@ type SwarmNoteKind =
   | "instance_paused"
   | "approvals"
   | "delivery_stalled"
-  | "undelivered";
+  | "undelivered"
+  | "stop_failed";
 
 const NOTE_WINDOW_MS = 30_000;
 const FOLLOWUP_COALESCE_MS = 5_000;
 const DELIVERY_STALL_MS = 10 * 60_000;
 const MAX_RELEASE_ATTEMPTS = 5;
+const MAX_STOP_ATTEMPTS = 5;
 const VERIFY_DEFAULT_TIMEOUT_MS = 600_000;
 const MAX_FOLLOWUPS = 5;
 const STATUS_MAX_INSTANCES = 8;
@@ -381,6 +383,8 @@ const make = Effect.gen(function* () {
   const sentNotes = new Set<string>();
   const stalledSince = new Map<string, number>();
   const releaseAttempts = new Map<string, number>();
+  const stopAttempts = new Map<string, number>();
+  const abandonedStops = new Set<string>();
   const wakes = yield* Queue.sliding<void>(1);
 
   const nowIso = DateTime.now.pipe(Effect.map(DateTime.formatIso));
@@ -1946,6 +1950,11 @@ const make = Effect.gen(function* () {
               }
             }
           }
+          if (swarm.status === "cancelled") {
+            yield* retryStops(swarm, yield* store.listMembers(swarm.swarmId), state, settings).pipe(
+              logged("swarm.stop-retry-error", { swarmId: swarm.swarmId }),
+            );
+          }
           members = yield* store.listMembers(swarm.swarmId);
           // A swarm cancelled by swarm_cancel keeps releasing while its cohort is open; one
           // cancelled by Stop has a stopped cohort and releases nothing (D12).
@@ -2502,10 +2511,9 @@ const make = Effect.gen(function* () {
   });
 
   /**
-   * Stops a launched member (SW-A7): an internal path with no MCP scope, used by swarm_cancel,
-   * the architect's Stop, and closing a swarm. A `limit_wait` member's armed continuation is
-   * disarmed first; then the child and its subtree are stopped, as task_cancel does. The member
-   * ends `cancelled` with an envelope, which a swarm with an open cohort releases as its digest.
+   * Stops a launched member (no MCP scope): disarms a `limit_wait` continuation, stops the child
+   * and its subtree, and only then marks it `cancelled` with an envelope. Returns false, leaving
+   * the member as it was, when the stop could not be dispatched.
    */
   const stopMember = Effect.fn("SwarmService.stopMember")(function* (
     swarm: SwarmStore.SwarmRecord,
@@ -2514,7 +2522,7 @@ const make = Effect.gen(function* () {
     settings: ServerSettingsValue,
   ) {
     const childThreadId = member.childThreadId;
-    if (childThreadId === null) return;
+    if (childThreadId === null) return false;
     const ids = { swarmId: swarm.swarmId, memberKey: member.memberKey, reason };
     const stopReason =
       reason === "cancel"
@@ -2531,7 +2539,7 @@ const make = Effect.gen(function* () {
           .dispatch({
             type: "thread.metadata.update",
             commandId: CommandId.make(
-              `swarm-disarm:${swarm.swarmId}:${member.memberKey}:${member.attempt}`,
+              `swarm-disarm:${swarm.swarmId}:${member.memberKey}:${member.attempt}:${thread.latestRunId}`,
             ),
             threadId: childThreadId,
             limitRecovery: {
@@ -2547,7 +2555,7 @@ const make = Effect.gen(function* () {
     const commandId = CommandId.make(
       `swarm-stop:${swarm.swarmId}:${member.memberKey}:${member.attempt}`,
     );
-    yield* threads
+    const stopped = yield* threads
       .dispatch({
         type: "thread.stop",
         commandId,
@@ -2559,8 +2567,20 @@ const make = Effect.gen(function* () {
         Effect.andThen(
           threads.stopDelegatedTasks({ threadId: childThreadId, commandId, reason: stopReason }),
         ),
-        logged("swarm.stop-error", ids),
+        Effect.result,
       );
+    const ref = memberRef(member);
+    if (Result.isFailure(stopped)) {
+      const attempts = (stopAttempts.get(ref) ?? 0) + 1;
+      stopAttempts.set(ref, attempts);
+      yield* Effect.logWarning("swarm.stop-failed", {
+        ...ids,
+        attempt: attempts,
+        errorTag: storageOrDispatchTag(stopped.failure),
+      });
+      return false;
+    }
+    stopAttempts.delete(ref);
     const now = yield* nowIso;
     const child = yield* childRecords(childThreadId).pipe(Effect.option);
     const run = Option.isNone(child) ? undefined : boundRunOf(member, child.value.runs);
@@ -2606,6 +2626,49 @@ const make = Effect.gen(function* () {
       },
     });
     yield* Effect.logInfo("swarm.member-stopped", ids);
+    return true;
+  });
+
+  /**
+   * A cancelled swarm's launched members whose stop failed are stopped again each pass; after
+   * MAX_STOP_ATTEMPTS the swarm gives up on them, says so once while the cohort is open (a note
+   * after a Stop would start the turn the user stopped), and leaves them as they are.
+   */
+  const retryStops = Effect.fn("SwarmService.retryStops")(function* (
+    swarm: SwarmStore.SwarmRecord,
+    members: ReadonlyArray<SwarmStore.SwarmMemberRecord>,
+    state: ReturnType<typeof anchorStateOf>,
+    settings: ServerSettingsValue,
+  ) {
+    for (const member of members) {
+      if (
+        member.childThreadId === null ||
+        isFinalMemberStatus(member.status) ||
+        abandonedStops.has(memberRef(member))
+      ) {
+        continue;
+      }
+      const reason =
+        state === "stopped" ? "stop" : state === "closed_thread" ? "closed_thread" : "cancel";
+      if (yield* stopMember(swarm, member, reason, settings)) continue;
+      const ref = memberRef(member);
+      if ((stopAttempts.get(ref) ?? 0) < MAX_STOP_ATTEMPTS) continue;
+      abandonedStops.add(ref);
+      stopAttempts.delete(ref);
+      yield* Effect.logWarning("swarm.stop-abandoned", {
+        swarmId: swarm.swarmId,
+        memberKey: member.memberKey,
+      });
+      if (state === "open") {
+        yield* notifyArchitect(swarm, {
+          kind: "stop_failed",
+          key: `${member.memberKey}:${member.attempt}`,
+          summary: "A swarm member could not be stopped",
+          text: `Swarm ${swarm.swarmId}: member ${member.memberKey} could not be stopped after ${MAX_STOP_ATTEMPTS} tries. It may still be running; stop its thread yourself.`,
+          routine: false,
+        });
+      }
+    }
   });
 
   const neverLaunched = (member: SwarmStore.SwarmMemberRecord) =>
@@ -2662,8 +2725,15 @@ const make = Effect.gen(function* () {
               });
               continue;
             }
-            yield* stopMember(swarm, row, "cancel", settings);
-            cancelled.push(key);
+            if (yield* stopMember(swarm, row, "cancel", settings)) {
+              cancelled.push(key);
+            } else {
+              notCancelled.push({
+                key,
+                code: "stop_failed",
+                message: `Member '${key}' could not be stopped. Try again, or stop its thread.`,
+              });
+            }
           }
         }
         if (input.keys === undefined && swarm.status !== "cancelled") {
