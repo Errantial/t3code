@@ -11,6 +11,8 @@ export const THREAD_DETAILS_ITEMS = [
   { id: "servers", label: "Servers", defaultVisible: true },
   { id: "automations", label: "Automations", defaultVisible: true },
   { id: "lineage", label: "Lineage", defaultVisible: true },
+  // Swarm v2: listed only while an environment has its Labs setting on.
+  { id: "swarm", label: "Swarm", defaultVisible: true },
   { id: "usage", label: "Usage", defaultVisible: false },
 ] as const;
 
