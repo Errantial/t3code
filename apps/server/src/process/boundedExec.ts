@@ -157,8 +157,10 @@ export interface BoundedExecInput {
   /** argv[0] is the program; no shell is involved. */
   readonly argv: ReadonlyArray<string>;
   readonly cwd: string;
-  /** Merged over the server's environment. */
+  /** Merged over the server's environment, unless `inheritEnv` is false. */
   readonly env?: Readonly<Record<string, string>>;
+  /** False: the process gets only `env`, nothing of the server's own environment. */
+  readonly inheritEnv?: boolean;
   readonly timeoutMs: number;
   /** Each of stdout and stderr keeps its last `maxOutputBytes` bytes. */
   readonly maxOutputBytes: number;
@@ -173,7 +175,7 @@ const startBounded = (
     try: () => {
       const child = NodeChildProcess.spawn(input.argv[0] as string, input.argv.slice(1), {
         cwd: input.cwd,
-        env: { ...process.env, ...input.env },
+        env: input.inheritEnv === false ? { ...input.env } : { ...process.env, ...input.env },
         windowsHide: true,
         stdio: ["ignore", "pipe", "pipe"],
         detached: input.platform !== "win32",

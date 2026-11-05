@@ -17,6 +17,57 @@ import * as ProjectService from "../project/ProjectService.ts";
 export const VERIFY_OUTPUT_TAIL_CHARACTERS = 4_096;
 const VERIFY_STREAM_TAIL_BYTES = 16_384;
 
+/**
+ * What a verify command may see of the server's environment: what tools need to start and find
+ * their programs, never the server's secrets or provider tokens.
+ */
+const VERIFY_ENV_NAMES: ReadonlySet<string> = new Set(
+  [
+    "PATH",
+    "PATHEXT",
+    "SYSTEMROOT",
+    "SYSTEMDRIVE",
+    "WINDIR",
+    "COMSPEC",
+    "TEMP",
+    "TMP",
+    "TMPDIR",
+    "HOME",
+    "USERPROFILE",
+    "HOMEDRIVE",
+    "HOMEPATH",
+    "APPDATA",
+    "LOCALAPPDATA",
+    "PROGRAMDATA",
+    "PROGRAMFILES",
+    "PROGRAMFILES(X86)",
+    "COMMONPROGRAMFILES",
+    "NUMBER_OF_PROCESSORS",
+    "PROCESSOR_ARCHITECTURE",
+    "OS",
+    "USER",
+    "USERNAME",
+    "LOGNAME",
+    "SHELL",
+    "LANG",
+    "LANGUAGE",
+    "TERM",
+    "TZ",
+  ].map((name) => name.toUpperCase()),
+);
+
+/** The allowlisted variables, plus `LC_*`; names compare case-insensitively (Windows). */
+export const verifyEnvironment = (
+  source: Readonly<Record<string, string | undefined>>,
+): Record<string, string> =>
+  Object.fromEntries(
+    Object.entries(source).filter(
+      (entry): entry is [string, string] =>
+        entry[1] !== undefined &&
+        (VERIFY_ENV_NAMES.has(entry[0].toUpperCase()) || entry[0].toUpperCase().startsWith("LC_")),
+    ),
+  );
+
 export interface SwarmVerifyOutcome {
   readonly passed: boolean;
   readonly exitCode: number | null;
@@ -76,6 +127,8 @@ const make = Effect.gen(function* () {
     BoundedExec.runBounded({
       argv: input.argv,
       cwd: input.cwd,
+      env: { ...verifyEnvironment(process.env), CI: "1" },
+      inheritEnv: false,
       timeoutMs: input.timeoutMs,
       maxOutputBytes: VERIFY_STREAM_TAIL_BYTES,
       platform,
