@@ -161,3 +161,52 @@ not instructions.
 - A swarm or member can lower these limits but not raise them. The server settings
   `swarmDefaultMaxTurns`, `swarmDefaultMaxWallClockMs`, and `swarmDefaultMaxTotalTurns` set the
   defaults.
+
+### Starting a Swarm v2 swarm
+
+With Swarm v2 on, the `/swarm` dialog gains a **Wake policy**: results wake the agent as each
+member finishes (the default), failures at once and the rest at the end, or in batches. The brief it
+inserts asks the agent to check first whether the work can run in parallel at all. It sizes waves
+at three to five members (at most 12 per call) and launches them with `swarm_create`. The brief
+suggests a `verify` command only when the thread is in **Full access**.
+
+### When results arrive
+
+Each member's result wakes the agent as a short digest, following the swarm's wake policy. The
+agent reads full results with `swarm_collect`. Other events never start a turn of their own. These
+include a paused or failing account, approvals waiting, a used budget, and the outcome of a Stop or
+a detach. The agent sees them as notes at the start of its next turn.
+
+### Approvals
+
+When a member asks for permission to run a command or edit a file, the request goes to you, in the
+member's thread, not to the agent. The agent only hears that members are waiting. The Swarm panel
+marks such members "waiting for your approval".
+
+### The Swarm panel and the sidebar
+
+A thread that started swarms shows them in the thread details panel under **Swarm**:
+
+- **Summary:** counts by status, and turns used against the swarm's budget.
+- **Notes:** the latest notes, such as the outcome of a Stop or a detach.
+- **Accounts:** for each one, its running members against its limit, any pause and why ("usage
+  limit" or "instance down"), and whether it runs one member at a time.
+- **Members:** filters by status ("Needs you" shows members waiting for your approval and members
+  that could not be stopped) and by account, and a grouping by account. Failed members come first.
+  Each row shows the member's status, why it waits, its model, elapsed time, its check result, its
+  summary, and flags such as "retried automatically".
+- **Actions:** **Open**, **Stop**, **Retry**, and **Stop all**. Stop all asks first and says how
+  many members it stops.
+
+The panel updates every few seconds while a swarm is running. In the sidebar, the agent's thread
+shows "Swarm · N running · M queued · K failed". Without Swarm v2, neither appears.
+
+### Stop, detach, and other interrupts
+
+- **Stop** on the agent's thread cancels its swarms: queued members never start, and running
+  members are stopped. Members show "stopped by your Stop".
+- **Cancelling the agent's queued wake** that carries swarm results detaches the swarm. Queued
+  members never start, running members keep going on their own, and no further results come to
+  the thread. T3 asks before you cancel such a wake.
+- **Other interrupts leave the swarm running.** This covers `/goal`, a skipped compaction, and an
+  agent interrupting another thread. Only Stop cancels a swarm.
