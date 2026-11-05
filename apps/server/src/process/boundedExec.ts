@@ -148,6 +148,9 @@ export class BoundedExecSpawnError extends Data.TaggedError("BoundedExecSpawnErr
 
 /** A started process. `await` interrupted cancels it (tree kill). */
 export interface BoundedProcess {
+  /** The OS process id, when the spawn got one, and when it was spawned (epoch ms). */
+  readonly pid: number | undefined;
+  readonly startedAtMs: number;
   readonly await: Effect.Effect<BoundedExecOutcome>;
   /** Marks the process cancelled, kills its tree, and settles `await` at once. */
   readonly cancel: () => void;
@@ -168,7 +171,7 @@ export interface BoundedExecInput {
 }
 
 /** Spawns `argv` and arms its timeout. */
-const startBounded = (
+export const startBounded = (
   input: BoundedExecInput,
 ): Effect.Effect<BoundedProcess, BoundedExecSpawnError> =>
   Effect.try({
@@ -248,13 +251,66 @@ const startBounded = (
           }
         });
       });
-      return { await: awaitOutcome, cancel } satisfies BoundedProcess;
+      return {
+        pid: child.pid,
+        startedAtMs: state.startedAt,
+        await: awaitOutcome,
+        cancel,
+      } satisfies BoundedProcess;
     },
     catch: () => new BoundedExecSpawnError(),
   });
 
-/** Starts `argv` and waits for it; interrupting the wait kills the process tree. */
-export const runBounded = (
-  input: BoundedExecInput,
-): Effect.Effect<BoundedExecOutcome, BoundedExecSpawnError> =>
-  startBounded(input).pipe(Effect.flatMap((process) => process.await));
+/** When the OS started `pid` (epoch ms), or undefined when it is not running or unreadable. */
+const processStartMs = (pid: number, platform: NodeJS.Platform): number | undefined => {
+  const read =
+    platform === "win32"
+      ? NodeChildProcess.spawnSync(
+          "powershell",
+          [
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            `(Get-Process -Id ${pid} -ErrorAction Stop).StartTime.ToUniversalTime().ToString('o')`,
+          ],
+          { windowsHide: true, encoding: "utf8", timeout: 15_000 },
+        )
+      : NodeChildProcess.spawnSync("ps", ["-o", "lstart=", "-p", String(pid)], {
+          encoding: "utf8",
+          timeout: 15_000,
+        });
+  if (read.status !== 0) return undefined;
+  const started = Date.parse(read.stdout.trim());
+  return Number.isFinite(started) ? started : undefined;
+};
+
+/**
+ * Kills a process tree left by an earlier server process, but only if `pid` still names the
+ * process started at `startedAtMs` (within 5 s), so a reused pid is never killed.
+ */
+export const killStaleTree = (input: {
+  readonly pid: number;
+  readonly startedAtMs: number;
+  readonly platform: NodeJS.Platform;
+}): Effect.Effect<boolean> =>
+  Effect.sync(() => {
+    const started = processStartMs(input.pid, input.platform);
+    if (started === undefined || Math.abs(started - input.startedAtMs) > 5_000) return false;
+    if (input.platform === "win32") {
+      NodeChildProcess.spawnSync("taskkill", ["/PID", String(input.pid), "/T", "/F"], {
+        windowsHide: true,
+        stdio: "ignore",
+      });
+      return true;
+    }
+    try {
+      process.kill(-input.pid, "SIGKILL");
+    } catch {
+      try {
+        process.kill(input.pid, "SIGKILL");
+      } catch {
+        return false;
+      }
+    }
+    return true;
+  });

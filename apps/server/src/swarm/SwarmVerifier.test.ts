@@ -14,6 +14,7 @@ import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 
+import * as BoundedExec from "../process/boundedExec.ts";
 import * as ProjectService from "../project/ProjectService.ts";
 import * as SwarmVerifier from "./SwarmVerifier.ts";
 
@@ -109,6 +110,43 @@ it.live("runs argv in the checkout and reports a pass, a failure, and the output
       expect(unknownProject._tag).toBe("SwarmVerifyCheckoutError");
     }).pipe(Effect.provide(layerFor(repo))),
   ),
+);
+
+it.live.skipIf(HostProcess.Platform.defaultValue() !== "win32")(
+  "kills a stale process tree only when its start time matches",
+  () =>
+    withRepo((repo) =>
+      Effect.gen(function* () {
+        const verifier = yield* SwarmVerifier.SwarmVerifier;
+        const pidFile = NodePath.join(repo, "stale.pid");
+        const written = yield* Deferred.make<void>();
+        const watcher = NodeFS.watch(repo, (_event, filename) => {
+          if (filename === "stale.pid") Deferred.doneUnsafe(written, Effect.void);
+        });
+        // Spawned through the bounded core, which records its own start time.
+        const started = yield* BoundedExec.startBounded({
+          argv: spawnsGrandchild(pidFile),
+          cwd: repo,
+          timeoutMs: 120_000,
+          maxOutputBytes: 1_024,
+          platform: "win32",
+        });
+        const parent = { pid: started.pid };
+        const startedAtMs = started.startedAtMs;
+        yield* Deferred.await(written);
+        watcher.close();
+        const grandchild = Number(yield* Effect.promise(() => NodeFSP.readFile(pidFile, "utf8")));
+        // Another start time: a reused pid, never killed.
+        expect(
+          yield* verifier.killStale({ pid: parent.pid!, startedAtMs: startedAtMs - 120_000 }),
+        ).toBe(false);
+        expect(alive(parent.pid!)).toBe(true);
+        expect(yield* verifier.killStale({ pid: parent.pid!, startedAtMs })).toBe(true);
+        expect(alive(parent.pid!)).toBe(false);
+        expect(alive(grandchild)).toBe(false);
+        started.cancel();
+      }).pipe(Effect.provide(layerFor(repo))),
+    ),
 );
 
 it("passes verify only an allowlisted environment, without the server's secrets", () => {
