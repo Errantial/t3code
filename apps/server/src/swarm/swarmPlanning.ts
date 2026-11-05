@@ -13,6 +13,13 @@ import { interactionModeRank, runtimeModeRank } from "../mcp/delegatedTaskModes.
 // Pure Swarm v2 planning: what a member may run as, who may write where, and who is admitted
 // next under the caps. No I/O, so the scheduler and its tests share it exactly.
 
+/** One instance an `anyOf` member may run on. */
+export interface SwarmPlacementOption {
+  readonly modelSelection: ModelSelection;
+  readonly supportedRuntimeModes?: ReadonlyArray<RuntimeMode>;
+  readonly driver: ProviderDriverKind;
+}
+
 /** What `swarm_members.spec_json` holds for a member. Task text is stored, never logged. */
 export interface SwarmMemberSpec {
   readonly key: string;
@@ -26,6 +33,11 @@ export interface SwarmMemberSpec {
   readonly modelSelection: ModelSelection;
   readonly supportedRuntimeModes?: ReadonlyArray<RuntimeMode>;
   readonly driver: ProviderDriverKind;
+  /**
+   * `target.anyOf` (SW-A3b): each listed instance resolved at create, in `anyOf` order. The
+   * member is placed on one at admission and stays there; `modelSelection` is the first.
+   */
+  readonly anyOf?: ReadonlyArray<SwarmPlacementOption>;
   /** The modes resolved at create are ceilings; an admission never runs above them. */
   readonly runtimeCeiling: RuntimeMode;
   readonly interactionCeiling: ProviderInteractionMode;
@@ -164,10 +176,19 @@ export interface PlannedMember {
   readonly status: SwarmMemberStatus;
   readonly providerInstanceId: string | null;
   readonly driver: ProviderDriverKind | undefined;
+  /** An unplaced `anyOf` member: the instances it may be placed on, in `anyOf` order. */
+  readonly anyOf?: ReadonlyArray<string>;
+  /** Placement avoids this instance whenever another candidate qualifies (a failed retry). */
+  readonly avoidInstanceId?: string | undefined;
+}
+
+export interface PlannedAdmission extends PlannedMember {
+  /** The instance the member runs on: its own, or the one placement chose. */
+  readonly placedInstanceId: string | null;
 }
 
 export interface AdmissionPlan {
-  readonly admit: ReadonlyArray<PlannedMember>;
+  readonly admit: ReadonlyArray<PlannedAdmission>;
   /** The queue reason for every queued member that is not admitted. */
   readonly queueReasons: ReadonlyMap<string, string>;
 }
@@ -186,6 +207,10 @@ export const planAdmissions = (input: {
   /** Paused instances and the ISO time their pause ends. */
   readonly pauses: ReadonlyMap<string, string>;
   readonly now: string;
+  /** Instances placement may use: not `error`/`disabled` and not signed out. */
+  readonly healthy?: ReadonlySet<string>;
+  /** Failures per instance in the last 10 minutes; placement's tie-break. */
+  readonly recentFailures?: ReadonlyMap<string, number>;
 }): AdmissionPlan => {
   const active = input.members.filter((member) => holdsSlot(member.status));
   let globalActive = active.length;
@@ -200,7 +225,33 @@ export const planAdmissions = (input: {
     }
     perSwarm.set(member.swarmId, (perSwarm.get(member.swarmId) ?? 0) + 1);
   }
-  const admit: Array<PlannedMember> = [];
+  const admit: Array<PlannedAdmission> = [];
+  const isPaused = (instanceId: string) => {
+    const until = input.pauses.get(instanceId);
+    return until !== undefined && until > input.now;
+  };
+  const hasRoom = (instanceId: string, driver: ProviderDriverKind | undefined) =>
+    (perInstance.get(instanceId) ?? 0) < instanceCap(input.caps, instanceId, driver);
+  /** The least busy qualifying instance, then fewer recent failures, then `anyOf` order. */
+  const place = (member: PlannedMember, anyOf: ReadonlyArray<string>) => {
+    const candidates = anyOf.filter(
+      (instanceId) =>
+        !isPaused(instanceId) &&
+        (input.healthy?.has(instanceId) ?? true) &&
+        hasRoom(instanceId, member.driver),
+    );
+    const preferred =
+      member.avoidInstanceId !== undefined &&
+      candidates.some((instanceId) => instanceId !== member.avoidInstanceId)
+        ? candidates.filter((instanceId) => instanceId !== member.avoidInstanceId)
+        : candidates;
+    return preferred.toSorted(
+      (left, right) =>
+        (perInstance.get(left) ?? 0) - (perInstance.get(right) ?? 0) ||
+        (input.recentFailures?.get(left) ?? 0) - (input.recentFailures?.get(right) ?? 0) ||
+        anyOf.indexOf(left) - anyOf.indexOf(right),
+    )[0];
+  };
   const queueReasons = new Map<string, string>();
   const swarms = input.swarms.toSorted(
     (left, right) =>
@@ -221,24 +272,31 @@ export const planAdmissions = (input: {
         queueReasons.set(memberRef(member), "swarm_cap");
         continue;
       }
-      const instanceId = member.providerInstanceId;
-      if (instanceId !== null) {
-        const until = input.pauses.get(instanceId);
-        if (until !== undefined && until > input.now) {
-          queueReasons.set(memberRef(member), `instance_paused:${instanceId}:${until}`);
+      let instanceId = member.providerInstanceId;
+      if (instanceId === null && member.anyOf !== undefined) {
+        const placed = place(member, member.anyOf);
+        if (placed === undefined) {
+          queueReasons.set(memberRef(member), "any_of_unavailable");
           continue;
         }
-        if (
-          (perInstance.get(instanceId) ?? 0) >= instanceCap(input.caps, instanceId, member.driver)
-        ) {
+        instanceId = placed;
+      } else if (instanceId !== null) {
+        if (isPaused(instanceId)) {
+          queueReasons.set(
+            memberRef(member),
+            `instance_paused:${instanceId}:${input.pauses.get(instanceId)}`,
+          );
+          continue;
+        }
+        if (!hasRoom(instanceId, member.driver)) {
           queueReasons.set(memberRef(member), `instance_cap:${instanceId}`);
           continue;
         }
-        perInstance.set(instanceId, (perInstance.get(instanceId) ?? 0) + 1);
       }
+      if (instanceId !== null) perInstance.set(instanceId, (perInstance.get(instanceId) ?? 0) + 1);
       globalActive += 1;
       perSwarm.set(swarm.swarmId, (perSwarm.get(swarm.swarmId) ?? 0) + 1);
-      admit.push(member);
+      admit.push({ ...member, placedInstanceId: instanceId });
     }
   }
   return { admit, queueReasons };

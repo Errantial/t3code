@@ -11,12 +11,14 @@ import {
   NodeId,
   type OrchestrationV2Command,
   type OrchestratorMcpFailure,
+  OrchestratorMcpFailure as OrchestratorMcpFailureClass,
   type OrchestrationV2Run,
   ProjectId,
   ProviderDriverKind,
   ProviderInstanceId,
   ProviderThreadId,
   RunId,
+  type ServerProvider,
   SwarmId,
   type SwarmCreateInput,
   type SwarmMemberInput,
@@ -40,6 +42,7 @@ import * as ProjectEnrichmentService from "../project/ProjectEnrichmentService.t
 import * as ProjectService from "../project/ProjectService.ts";
 import type { ProviderInstance } from "@t3tools/provider-core/server/driver";
 import * as ProviderInstanceRegistry from "../provider/ProviderInstanceRegistry.ts";
+import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as SwarmService from "../swarm/SwarmService.ts";
 import * as SwarmStore from "../swarm/SwarmStore.ts";
@@ -1406,6 +1409,8 @@ it.layer(layerTest)("swarm release and the shared wake budget (SW-A0 Q7)", (it) 
 // driven by `tick`, and child completion by terminal run events.
 
 const prepareRuns: Array<string> = [];
+/** What placement reads as provider health; tests change it. */
+let providerHealth: ReadonlyArray<ServerProvider> = [];
 const layerSwarm = SwarmService.layer.pipe(
   Layer.provideMerge(SwarmStore.layer.pipe(Layer.provide(SqlitePersistence.layerMemory))),
   Layer.provide(
@@ -1416,19 +1421,38 @@ const layerSwarm = SwarmService.layer.pipe(
         }),
     } as unknown as ThreadLaunchService.ThreadLaunchService["Service"]),
   ),
+  Layer.provide(
+    Layer.succeed(ProviderRegistry.ProviderRegistry, {
+      getProviders: Effect.sync(() => providerHealth),
+    } as unknown as ProviderRegistry.ProviderRegistry["Service"]),
+  ),
   Layer.provideMerge(ServerSettings.layerTest({ swarmV2Enabled: true, swarmMaxConcurrent: 2 })),
   Layer.provideMerge(layerTest),
 );
 
 const resolverCalls: Array<string> = [];
+const instanceIds = (...names: ReadonlyArray<string>) =>
+  names.map((name) => ProviderInstanceId.make(name));
+
+// Instance "claude-*" uses another driver, and "no-model" does not offer the model.
 const resolver: SwarmService.SwarmTargetResolver = {
   resolveTarget: (_parent, target) =>
-    Effect.sync(() => {
+    Effect.gen(function* () {
       resolverCalls.push(JSON.stringify(target ?? null));
+      const instanceId = target?.providerInstanceId ?? modelSelection.instanceId;
+      if (instanceId === "no-model") {
+        return yield* new OrchestratorMcpFailureClass({
+          code: "model_unavailable",
+          message: `Model ${target?.model} is not advertised by provider ${instanceId}.`,
+        });
+      }
       return {
-        modelSelection: { ...modelSelection, model: target?.model ?? modelSelection.model },
+        modelSelection: {
+          instanceId: ProviderInstanceId.make(instanceId),
+          model: target?.model ?? modelSelection.model,
+        },
         supportedRuntimeModes: undefined,
-        driver,
+        driver: instanceId.startsWith("claude") ? ProviderDriverKind.make("claudeAgent") : driver,
       };
     }),
   resolveWorktreeBase: () => Effect.succeed("0000000000000000000000000000000000000000"),
@@ -1897,6 +1921,95 @@ it.layer(layerSwarm)("swarm_create, admission, and the scheduler (SW-A3)", (it) 
       assert.deepEqual(
         (yield* rows(result.swarmId)).map((row) => row.status),
         ["claimed_done", "launching"],
+      );
+      yield* retire(result.swarmId);
+    }),
+  );
+
+  it.effect("validates anyOf targets at create", () =>
+    Effect.gen(function* () {
+      const { threadId } = yield* seedArchitect("a3b-validation");
+      const plan = { interactionMode: "plan" as const };
+      const refused = (target: SwarmMemberInput["target"]) =>
+        createError(threadId, { members: members(1, { ...plan, target }) });
+      const mixed = yield* refused({ anyOf: instanceIds("codex", "claude-1"), model: "m" });
+      assert.equal(mixed.code, "invalid_request");
+      assert.include(mixed.message, "claude-1");
+      const missing = yield* refused({ anyOf: instanceIds("codex", "no-model"), model: "m" });
+      assert.equal(missing.code, "invalid_request");
+      assert.include(missing.message, "no-model");
+      const noModel = yield* refused({ anyOf: instanceIds("codex", "codex-2") });
+      assert.include(noModel.message, "requires target.model");
+      const pinned = yield* refused({
+        anyOf: instanceIds("codex", "codex-2"),
+        model: "m",
+        providerInstanceId: ProviderInstanceId.make("codex"),
+      });
+      assert.include(pinned.message, "excludes target.providerInstanceId");
+    }),
+  );
+
+  it.effect("places an anyOf member on a healthy instance before dispatch and keeps it there", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const { threadId } = yield* seedArchitect("a3b-place");
+      providerHealth = [
+        {
+          instanceId: "codex-down",
+          enabled: true,
+          status: "error",
+          auth: { status: "authenticated" },
+        },
+        { instanceId: "codex", enabled: true, status: "ready", auth: { status: "authenticated" } },
+        {
+          instanceId: "codex-out",
+          enabled: true,
+          status: "ready",
+          auth: { status: "unauthenticated" },
+        },
+      ] as unknown as ReadonlyArray<ServerProvider>;
+      resolverCalls.length = 0;
+      const result = yield* createSwarm(threadId, {
+        maxConcurrent: 1,
+        members: members(2, {
+          interactionMode: "plan",
+          target: { anyOf: instanceIds("codex-down", "codex", "codex-out"), model: "m" },
+        }),
+      });
+      // Each listed instance resolves once per call, not once per member.
+      assert.equal(resolverCalls.length, 3);
+      assert.deepEqual(
+        result.members.map((row) => [row.status, row.providerInstanceId]),
+        [
+          ["launching", "codex"],
+          ["queued", null],
+        ],
+      );
+      assert.deepEqual(result.members[0]?.anyOf?.map(String), ["codex-down", "codex", "codex-out"]);
+      const child = yield* orchestrator.getThreadProjection(result.members[0]!.childThreadId!);
+      assert.equal(child.thread.modelSelection.instanceId, "codex");
+      // The placement was written with the command id, so recovery reuses it.
+      const [row] = yield* rows(result.swarmId);
+      assert.equal(row?.providerInstanceId, "codex");
+      assert.isNotNull(row?.commandId ?? null);
+      providerHealth = [];
+      yield* retire(result.swarmId);
+    }),
+  );
+
+  it.effect("queues anyOf members as any_of_unavailable when no instance qualifies", () =>
+    Effect.gen(function* () {
+      const { threadId } = yield* seedArchitect("a3b-unavailable");
+      providerHealth = [];
+      const result = yield* createSwarm(threadId, {
+        members: members(1, {
+          interactionMode: "plan",
+          target: { anyOf: instanceIds("codex", "codex-2"), model: "m" },
+        }),
+      });
+      assert.deepEqual(
+        result.members.map((row) => [row.status, row.queueReason, row.providerInstanceId]),
+        [["queued", "any_of_unavailable", null]],
       );
       yield* retire(result.swarmId);
     }),
