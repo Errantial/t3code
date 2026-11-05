@@ -1151,6 +1151,11 @@ export type StorageCleanupSettings = typeof StorageCleanupSettings.Type;
 
 /** Swarm v2 concurrency caps accept 1-48, so raising them is a settings change (D5). */
 const SwarmCapSetting = Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 48 }));
+const SwarmTurnsSetting = Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 50 }));
+const SwarmWallClockSetting = Schema.Int.check(
+  Schema.isBetween({ minimum: 60_000, maximum: 86_400_000 }),
+);
+const SwarmTotalTurnsSetting = Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 2_400 }));
 
 export const ServerSettings = Schema.Struct({
   // Null means unmigrated; empty is authoritative and must not resurrect cleared preferences.
@@ -1253,6 +1258,18 @@ export const ServerSettings = Schema.Struct({
   /** Swarm v2: per-instance overrides of the per-instance cap. */
   swarmInstanceCaps: Schema.Record(Schema.String, SwarmCapSetting).pipe(
     Schema.withDecodingDefault(Effect.succeed({})),
+  ),
+  /** Swarm v2: retry a member once, after a backoff, when its run fails on a transient error. */
+  swarmAutoRetryTransient: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
+  /** Swarm v2: turns per member when the member sets none; a member value can only lower it. */
+  swarmDefaultMaxTurns: SwarmTurnsSetting.pipe(Schema.withDecodingDefault(Effect.succeed(20))),
+  /** Swarm v2: wall-clock time per member when the member sets none (ms). */
+  swarmDefaultMaxWallClockMs: SwarmWallClockSetting.pipe(
+    Schema.withDecodingDefault(Effect.succeed(7_200_000)),
+  ),
+  /** Swarm v2: turns for a whole swarm when it sets none; a swarm value can only lower it. */
+  swarmDefaultMaxTotalTurns: SwarmTotalTurnsSetting.pipe(
+    Schema.withDecodingDefault(Effect.succeed(240)),
   ),
   /** Swarm v2: paths that count as test files in a member's result (`testFilesChanged`). */
   swarmTestPathGlobs: Schema.Array(TrimmedNonEmptyString).pipe(
@@ -1631,6 +1648,10 @@ export const ServerSettingsPatch = Schema.Struct({
   swarmMaxConcurrent: Schema.optionalKey(SwarmCapSetting),
   swarmMaxConcurrentPerInstance: Schema.optionalKey(SwarmCapSetting),
   swarmInstanceCaps: Schema.optionalKey(Schema.Record(Schema.String, SwarmCapSetting)),
+  swarmAutoRetryTransient: Schema.optionalKey(Schema.Boolean),
+  swarmDefaultMaxTurns: Schema.optionalKey(SwarmTurnsSetting),
+  swarmDefaultMaxWallClockMs: Schema.optionalKey(SwarmWallClockSetting),
+  swarmDefaultMaxTotalTurns: Schema.optionalKey(SwarmTotalTurnsSetting),
   swarmTestPathGlobs: Schema.optionalKey(Schema.Array(TrimmedNonEmptyString)),
   peerExecGrant: Schema.optionalKey(PeerExecGrant),
   peerExecRoots: Schema.optionalKey(Schema.Array(Schema.String)),

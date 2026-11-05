@@ -4493,3 +4493,417 @@ it.layer(layerSwarm)("status, cancel, retry, collect, and follow-up (SW-A7)", (i
     }),
   );
 });
+
+// SW-A8: failure classes, usage limits, instance health, and the automatic retry. TestClock
+// starts at 0 in every test and failures are counted across swarms, so each test first moves
+// the clock to its own hour.
+
+const providerFailure = (
+  failureClass: "usage_limit" | "provider_error" | "transport_error" | "validation_error",
+  extra: { readonly retryable?: boolean | null; readonly resetAt?: string } = {},
+) => ({
+  class: failureClass,
+  message: `Failed with ${failureClass}.`,
+  code: null,
+  retryable: extra.retryable ?? null,
+  ...(extra.resetAt === undefined ? {} : { resetAt: extra.resetAt }),
+});
+
+/** Fails a member thread's run with a root provider failure, and waits for its task. */
+const failRun = (input: {
+  readonly childThreadId: ThreadId;
+  readonly runId: RunId;
+  readonly taskId?: NodeId | null;
+  readonly failure: ReturnType<typeof providerFailure>;
+}) =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const sink = yield* EventSink.EventSinkV2;
+    const now = yield* DateTime.now;
+    const run = (yield* orchestrator.getThreadProjection(input.childThreadId)).runs.find(
+      (candidate) => candidate.id === input.runId,
+    )!;
+    const afterSequence = yield* sink.latestSequence();
+    yield* sink.write({
+      events: [
+        {
+          id: EventId.make(`event:fail:${run.id}`),
+          type: "run.updated",
+          threadId: input.childThreadId,
+          runId: run.id,
+          occurredAt: now,
+          payload: { ...run, status: "failed", startedAt: now, completedAt: now },
+        },
+        {
+          id: EventId.make(`event:fail-item:${run.id}`),
+          type: "turn-item.updated",
+          threadId: input.childThreadId,
+          runId: run.id,
+          occurredAt: now,
+          payload: {
+            id: TurnItemId.make(`turn-item:fail:${run.id}`),
+            type: "error",
+            threadId: input.childThreadId,
+            runId: run.id,
+            nodeId: run.rootNodeId,
+            providerThreadId: null,
+            providerTurnId: null,
+            nativeItemRef: null,
+            parentItemId: null,
+            ordinal: 2,
+            status: "failed",
+            title: "Provider failure",
+            startedAt: now,
+            completedAt: now,
+            updatedAt: now,
+            failure: input.failure,
+          },
+        },
+      ],
+    });
+    if (input.taskId == null) return;
+    yield* sink.stream({ afterSequence, eventType: "subagent.updated" }).pipe(
+      Stream.filter(
+        (stored) =>
+          stored.event.type === "subagent.updated" &&
+          stored.event.payload.id === input.taskId &&
+          stored.event.payload.status === "failed",
+      ),
+      Stream.take(1),
+      Stream.runDrain,
+      Effect.timeout(Duration.seconds(10)),
+    );
+  });
+
+const failRow = (row: SwarmStore.SwarmMemberRecord, failure: ReturnType<typeof providerFailure>) =>
+  failRun({
+    childThreadId: row.childThreadId!,
+    runId: row.childRunId!,
+    taskId: row.taskId,
+    failure,
+  });
+
+const pauseOf = (instanceId: string) =>
+  Effect.gen(function* () {
+    const store = yield* SwarmStore.SwarmStore;
+    return (yield* store.listInstancePauses).find(
+      (pause) => pause.providerInstanceId === instanceId,
+    );
+  });
+
+/** Clears every pause and puts the retry and auto-resume settings back. */
+const resetHealth = Effect.gen(function* () {
+  const store = yield* SwarmStore.SwarmStore;
+  const settings = yield* ServerSettings.ServerSettingsService;
+  for (const pause of yield* store.listInstancePauses) {
+    yield* store.clearInstancePause(pause.providerInstanceId);
+  }
+  yield* settings.updateSettings({
+    swarmAutoRetryTransient: true,
+    autoResumeLimitedThreads: false,
+  });
+});
+
+const atHour = (hour: number) => TestClock.adjust(Duration.hours(hour));
+
+it.layer(layerSwarm)("failures, usage limits, and instance health (SW-A8)", (it) => {
+  it.effect("records the real class and retries a transient failure once, after the backoff", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const swarms = yield* SwarmService.SwarmService;
+      yield* atHour(1);
+      const { threadId, anchor } = yield* seedArchitect("a8-retry");
+      const result = yield* createSwarm(threadId, {
+        members: members(1, { interactionMode: "plan" }),
+      });
+      yield* endRun({ threadId, runId: anchor.id });
+      const first = (yield* rows(result.swarmId))[0]!;
+      yield* failRow(first, providerFailure("provider_error"));
+      yield* swarms.tick;
+      const queued = (yield* rows(result.swarmId))[0]!;
+      assert.equal(queued.status, "queued");
+      assert.equal(queued.attempt, 2);
+      assert.equal(queued.autoRetries, 1);
+      assert.equal(queued.lastFailureClass, "provider_error");
+      assert.isTrue(queued.queueReason?.startsWith("retry_after:"));
+      // The earlier attempt's held task is disposed, never woken.
+      const earlier = (yield* orchestrator.getThreadProjection(threadId)).subagents.find(
+        (task) => task.id === first.taskId,
+      );
+      assert.equal(earlier?.completionWake, "settled_only");
+      // Not before the 30 s backoff (plus up to 15 s of jitter).
+      yield* TestClock.adjust(Duration.seconds(29));
+      yield* swarms.tick;
+      assert.equal((yield* rows(result.swarmId))[0]!.status, "queued");
+      yield* TestClock.adjust(Duration.seconds(17));
+      yield* swarms.tick;
+      const second = (yield* rows(result.swarmId))[0]!;
+      assert.equal(second.status, "launching");
+      assert.notEqual(second.taskId, first.taskId);
+      const child = yield* orchestrator.getThreadProjection(second.childThreadId!);
+      assert.include(
+        child.messages.find((message) => message.role === "user")?.text ?? "",
+        `"failureClass":"provider_error"`,
+      );
+      // Only once: the retry failing again ends the member, with its class.
+      yield* failRow(second, providerFailure("provider_error"));
+      yield* swarms.tick;
+      const failed = (yield* rows(result.swarmId))[0]!;
+      assert.equal(failed.status, "failed");
+      assert.equal(failed.failureClass, "provider_error");
+      assert.include(failed.envelopeJson ?? "", `"class":"provider_error"`);
+      yield* resetHealth;
+      yield* retire(result.swarmId);
+    }),
+  );
+
+  it.effect(
+    "does not retry retryable: false, validation_error, with the setting off, or at 48",
+    () =>
+      Effect.gen(function* () {
+        const swarms = yield* SwarmService.SwarmService;
+        const store = yield* SwarmStore.SwarmStore;
+        const settings = yield* ServerSettings.ServerSettingsService;
+        yield* atHour(2);
+        const { threadId, anchor } = yield* seedArchitect("a8-no-retry");
+        yield* endRun({ threadId, runId: anchor.id });
+        const cases = [
+          {
+            name: "not-retryable",
+            failure: providerFailure("provider_error", { retryable: false }),
+          },
+          { name: "validation", failure: providerFailure("validation_error") },
+          { name: "setting-off", failure: providerFailure("transport_error") },
+          { name: "no-room", failure: providerFailure("transport_error") },
+        ];
+        for (const entry of cases) {
+          // Over a minute apart, so transient failures do not add up to an instance pause.
+          yield* TestClock.adjust(Duration.minutes(2));
+          yield* settings.updateSettings({
+            swarmAutoRetryTransient: entry.name !== "setting-off",
+          });
+          const { threadId: architect, anchor: run } = yield* seedArchitect(
+            `a8-no-retry-${entry.name}`,
+          );
+          const result = yield* createSwarm(architect, {
+            members: members(1, { interactionMode: "plan" }),
+          });
+          yield* endRun({ threadId: architect, runId: run.id });
+          const row = (yield* rows(result.swarmId))[0]!;
+          if (entry.name === "no-room") {
+            yield* store.updateMember({
+              swarmId: result.swarmId,
+              memberKey: "m0",
+              patch: { attempt: 48, updatedAt: DateTime.formatIso(yield* DateTime.now) },
+            });
+          }
+          yield* failRow(row, entry.failure);
+          yield* swarms.tick;
+          const after = (yield* rows(result.swarmId))[0]!;
+          assert.equal(after.status, "failed", entry.name);
+          assert.equal(after.autoRetries, 0, entry.name);
+          assert.equal(after.failureClass, entry.failure.class, entry.name);
+          yield* retire(result.swarmId);
+        }
+        assert.isUndefined(yield* pauseOf(String(modelSelection.instanceId)));
+        yield* resetHealth;
+      }),
+  );
+
+  it.effect("pauses an instance after two failures within 60 s, not 61 s apart, then 15 min", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const swarms = yield* SwarmService.SwarmService;
+      const settings = yield* ServerSettings.ServerSettingsService;
+      yield* atHour(3);
+      yield* settings.updateSettings({ swarmAutoRetryTransient: false });
+      const instanceId = String(modelSelection.instanceId);
+      const twoMembers = (name: string) =>
+        Effect.gen(function* () {
+          const { threadId, anchor } = yield* seedArchitect(name);
+          const result = yield* createSwarm(threadId, {
+            members: members(2, { interactionMode: "plan" }),
+          });
+          yield* endRun({ threadId, runId: anchor.id });
+          return { threadId, result, rows: yield* rows(result.swarmId) };
+        });
+
+      // 61 s apart: no pause.
+      const apart = yield* twoMembers("a8-down-apart");
+      yield* failRow(apart.rows[0]!, providerFailure("transport_error"));
+      yield* swarms.tick;
+      yield* TestClock.adjust(Duration.seconds(61));
+      yield* failRow(apart.rows[1]!, providerFailure("transport_error"));
+      yield* swarms.tick;
+      assert.isUndefined(yield* pauseOf(instanceId));
+      yield* retire(apart.result.swarmId);
+
+      // Within 60 s: paused for 5 minutes.
+      yield* TestClock.adjust(Duration.minutes(2));
+      const down = yield* twoMembers("a8-down");
+      const both = down.rows.filter((row) => row.childThreadId !== null);
+      assert.equal(both.length, 2);
+      const before = DateTime.formatIso(yield* DateTime.now);
+      yield* failRow(both[0]!, providerFailure("transport_error"));
+      yield* failRow(both[1]!, providerFailure("provider_error"));
+      yield* swarms.tick;
+      const pause = yield* pauseOf(instanceId);
+      assert.equal(pause?.pauseClass, "instance_down");
+      assert.equal(Date.parse(pause!.until) - Date.parse(before), 5 * 60_000, "five minutes");
+      yield* retire(down.result.swarmId);
+
+      // Again within 5 minutes after that pause ended: 15 minutes.
+      yield* TestClock.adjust(Duration.minutes(6));
+      const again = yield* twoMembers("a8-down-again");
+      const relaunched = again.rows.filter((row) => row.childThreadId !== null);
+      assert.equal(relaunched.length, 2);
+      const second = DateTime.formatIso(yield* DateTime.now);
+      yield* failRow(relaunched[0]!, providerFailure("transport_error"));
+      yield* failRow(relaunched[1]!, providerFailure("transport_error"));
+      yield* swarms.tick;
+      const repeat = yield* pauseOf(instanceId);
+      assert.equal(Date.parse(repeat!.until) - Date.parse(second), 15 * 60_000, "fifteen");
+      yield* retire(again.result.swarmId);
+      assert.isFalse(
+        (yield* orchestrator.getThreadProjection(down.threadId)).messages.some((message) =>
+          message.text.includes("looks down"),
+        ),
+        "no note to a swarm with nothing left on the instance",
+      );
+      yield* resetHealth;
+    }),
+  );
+
+  it.effect("counts a requeued member's failure toward an instance being down", () =>
+    Effect.gen(function* () {
+      const swarms = yield* SwarmService.SwarmService;
+      yield* atHour(4);
+      const { threadId, anchor } = yield* seedArchitect("a8-requeued");
+      const result = yield* createSwarm(threadId, {
+        members: members(2, { interactionMode: "plan" }),
+      });
+      yield* endRun({ threadId, runId: anchor.id });
+      const [m0, m1] = yield* rows(result.swarmId);
+      yield* failRow(m0!, providerFailure("transport_error"));
+      yield* swarms.tick;
+      assert.equal((yield* rows(result.swarmId))[0]!.status, "queued", "m0 was requeued");
+      assert.isUndefined(yield* pauseOf(String(modelSelection.instanceId)));
+      yield* TestClock.adjust(Duration.seconds(10));
+      yield* failRow(m1!, providerFailure("transport_error"));
+      yield* swarms.tick;
+      assert.equal(
+        (yield* pauseOf(String(modelSelection.instanceId)))?.pauseClass,
+        "instance_down",
+        "m0's failure history survived its requeue",
+      );
+      const after = yield* rows(result.swarmId);
+      assert.deepEqual(
+        after.map((row) => row.status),
+        ["queued", "queued"],
+      );
+      assert.isTrue(after[1]!.queueReason?.startsWith("retry_after:"));
+      // The note reaches this swarm: it has members waiting on the instance.
+      const parent = yield* (yield* Orchestrator.OrchestratorV2).getThreadProjection(threadId);
+      assert.equal(
+        parent.messages.filter((message) => message.text.includes("failed repeatedly")).length,
+        1,
+      );
+      yield* resetHealth;
+      yield* retire(result.swarmId);
+    }),
+  );
+
+  it.effect("a usage limit with auto-resume waits in limit_wait and follows the continuation", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const swarms = yield* SwarmService.SwarmService;
+      const settings = yield* ServerSettings.ServerSettingsService;
+      yield* atHour(5);
+      yield* settings.updateSettings({ autoResumeLimitedThreads: true });
+      const { threadId, anchor } = yield* seedArchitect("a8-limit");
+      const result = yield* createSwarm(threadId, {
+        members: members(3, { interactionMode: "plan" }),
+      });
+      yield* endRun({ threadId, runId: anchor.id });
+      const m0 = (yield* rows(result.swarmId))[0]!;
+      const resetAt = DateTime.formatIso(DateTime.add(yield* DateTime.now, { minutes: 5 }));
+      yield* failRow(m0, providerFailure("usage_limit", { resetAt }));
+      yield* swarms.tick;
+      const waiting = yield* rows(result.swarmId);
+      assert.equal(waiting[0]!.status, "limit_wait");
+      assert.isNull(waiting[0]!.failureClass, "not failed");
+      assert.equal((yield* pauseOf(String(modelSelection.instanceId)))?.until, resetAt);
+      // limit_wait gave up its global slot: m2 now waits for the paused instance, not the cap.
+      assert.isTrue(waiting[2]!.queueReason?.startsWith("instance_paused:"));
+      const status = yield* statusOf(threadId, { swarmId: result.swarmId });
+      assert(!("members" in status));
+      assert.equal(status.byStatus.limit_wait, 1);
+
+      // The continuation: armed, then dispatched once the window resets.
+      const shellOf = Effect.gen(function* () {
+        return (yield* orchestrator.getShellSnapshot()).threads.find(
+          (thread) => thread.id === m0.childThreadId,
+        )!;
+      });
+      const now = yield* DateTime.now;
+      const arm = limitRecoveryCommand(yield* shellOf, true, DateTime.toEpochMillis(now));
+      assert(arm?.type === "thread.metadata.update");
+      yield* orchestrator.dispatch(arm);
+      yield* TestClock.adjust(Duration.minutes(6));
+      const resume = limitRecoveryCommand(
+        yield* shellOf,
+        true,
+        DateTime.toEpochMillis(yield* DateTime.now),
+      );
+      assert(resume?.type === "message.dispatch");
+      yield* orchestrator.dispatch(resume);
+      const continuation = (yield* orchestrator.getThreadProjection(m0.childThreadId!)).runs.find(
+        (run) => run.userMessageId === resume.messageId,
+      )!;
+      assert.isDefined(continuation);
+      yield* swarms.tick;
+      const bound = (yield* rows(result.swarmId))[0]!;
+      assert.equal(bound.boundRunId, continuation.id, "bound through limit-resume:");
+      yield* endRun({
+        threadId: m0.childThreadId!,
+        runId: continuation.id,
+        text: resultText({ summary: "done after the reset" }),
+      });
+      yield* swarms.tick;
+      const done = (yield* rows(result.swarmId))[0]!;
+      assert.equal(done.status, "claimed_done");
+      assert.include(done.envelopeJson ?? "", "done after the reset");
+      yield* drainWakes(threadId, anchor.id);
+      const task = (yield* orchestrator.getThreadProjection(threadId)).subagents.find(
+        (candidate) => candidate.id === m0.taskId,
+      );
+      assert.include(task?.completionDetail ?? "", "done after the reset");
+      yield* resetHealth;
+      yield* retire(result.swarmId);
+    }),
+  );
+
+  it.effect("a usage limit without auto-resume fails the member and pauses the instance", () =>
+    Effect.gen(function* () {
+      const swarms = yield* SwarmService.SwarmService;
+      yield* atHour(6);
+      const { threadId, anchor } = yield* seedArchitect("a8-limit-off");
+      const result = yield* createSwarm(threadId, {
+        members: members(1, { interactionMode: "plan" }),
+      });
+      yield* endRun({ threadId, runId: anchor.id });
+      const now = yield* DateTime.now;
+      yield* failRow((yield* rows(result.swarmId))[0]!, providerFailure("usage_limit"));
+      yield* swarms.tick;
+      const failed = (yield* rows(result.swarmId))[0]!;
+      assert.equal(failed.status, "failed");
+      assert.equal(failed.failureClass, "usage_limit");
+      // No resetAt: paused for 15 minutes.
+      const pause = yield* pauseOf(String(modelSelection.instanceId));
+      assert.equal(pause?.pauseClass, "usage_limit");
+      assert.equal(Date.parse(pause!.until) - DateTime.toEpochMillis(now), 15 * 60_000);
+      yield* resetHealth;
+      yield* retire(result.swarmId);
+    }),
+  );
+});
