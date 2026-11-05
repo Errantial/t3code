@@ -33,6 +33,11 @@ export interface SwarmMemberSpec {
   /** SW-A6: with `verifyArgv`; defaults 600,000 ms and 2 retries. */
   readonly verifyTimeoutMs?: number;
   readonly verifyMaxRetries?: number;
+  /** swarm_retry: the previous attempt's result, wrapped as data, put before the task. */
+  readonly previousAttempt?: string;
+  /** swarm_followup: the latest follow-up's text and request key, for re-dispatch and replays. */
+  readonly followupText?: string;
+  readonly followupRequestKey?: string;
   /** swarm_add_members: the request key of the call that added this member, for replays. */
   readonly addRequestKey?: string;
   readonly isolation: "shared" | "worktree";

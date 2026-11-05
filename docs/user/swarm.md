@@ -94,3 +94,24 @@ member. **Auto** is not enough, because providers still sandbox or review comman
 that asks for `verify` in another mode is refused. If either thread's mode is lowered below Full
 access before a check runs, or the member is switched to plan mode, the check is skipped, and the
 member is reported as done but unchecked.
+
+### Managing a running swarm
+
+The agent that started a swarm manages it with these tools. Other threads cannot see or change
+it.
+
+- `swarm_status` shows counts by status, queue reason, and account (at most 8 accounts), or a
+  page of members with `view: "members"`.
+- `swarm_cancel` cancels some members by key, or the whole swarm. Queued members never start.
+  Running members are stopped, along with any tasks they started, and their results so far still
+  reach the agent. A member whose mode you raised above the agent's own is not stopped this way;
+  stop it yourself.
+- `swarm_retry` runs failed or cancelled members again, optionally on another model or account.
+  The new attempt is told what the previous one reported. Retries count toward the swarm's 48
+  members.
+- `swarm_collect` reads full results, page by page, with `keys` and `fields` to narrow them.
+- `swarm_followup` sends a finished member more work in its own thread, at most 5 times. Its new
+  result reaches the agent like the first one did.
+
+When you press Stop on the agent, the swarm is cancelled: queued members never start, and
+running members are stopped.

@@ -92,6 +92,7 @@ export type NewSwarmMember = Pick<
   Partial<Pick<SwarmMemberRecord, "status" | "queueReason" | "providerInstanceId" | "writer">>;
 
 const MEMBER_PATCH_COLUMNS = {
+  specJson: "spec_json",
   status: "status",
   queueReason: "queue_reason",
   attempt: "attempt",
