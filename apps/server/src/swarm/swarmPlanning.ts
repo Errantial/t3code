@@ -26,6 +26,10 @@ export interface SwarmMemberSpec {
   readonly title: string;
   /** The prompt the child receives, with its role applied. */
   readonly task: string;
+  /** Architect-written fields `swarm_shared` carries (SW-A3c); untrusted. */
+  readonly role?: string;
+  readonly doneCriteria?: string;
+  readonly verifyArgv?: ReadonlyArray<string>;
   readonly isolation: "shared" | "worktree";
   readonly ownsPaths?: ReadonlyArray<string>;
   readonly allowNestedSwarm?: boolean;

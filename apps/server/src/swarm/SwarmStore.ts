@@ -126,7 +126,7 @@ export type SwarmMemberPatch = Partial<
   Pick<SwarmMemberRecord, keyof typeof MEMBER_PATCH_COLUMNS>
 > & { readonly updatedAt: string };
 
-export type SwarmPatch = Partial<Pick<SwarmRecord, "status" | "budgetExhausted">> & {
+export type SwarmPatch = Partial<Pick<SwarmRecord, "status" | "budgetExhausted" | "baseCommit">> & {
   readonly updatedAt: string;
 };
 
@@ -405,6 +405,7 @@ const make = Effect.gen(function* () {
       ...(patch.budgetExhausted === undefined
         ? {}
         : { budget_exhausted: sqlBoolean(patch.budgetExhausted) }),
+      ...(patch.baseCommit === undefined ? {} : { base_commit: patch.baseCommit }),
     };
     return sql`UPDATE swarms SET ${sql.update(row)} WHERE swarm_id = ${swarmId}`.pipe(
       Effect.asVoid,

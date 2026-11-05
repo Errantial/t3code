@@ -11,7 +11,9 @@ import {
   type OrchestrationV2ThreadProjection,
   type OrchestratorMcpTarget,
   type ServerSettings as ServerSettingsValue,
+  type SwarmAddMembersInput,
   type SwarmCreateInput,
+  type SwarmMap,
   type SwarmCreateResult,
   SwarmId,
   type SwarmMemberInput,
@@ -47,6 +49,7 @@ import * as ThreadManagementService from "../orchestration-v2/ThreadManagementSe
 import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as SwarmStore from "./SwarmStore.ts";
+import { expandSwarmMap } from "./swarmMap.ts";
 import {
   type SwarmCaps,
   type SwarmMemberSpec,
@@ -88,6 +91,11 @@ export interface SwarmTargetResolver {
   readonly resolveWorktreeBase: (
     parent: Pick<OrchestrationV2ThreadProjection, "thread">,
   ) => Effect.Effect<string, OrchestratorMcpFailure>;
+  /** Commits on the architect's checkout since `baseCommit` (`git rev-list --count`). */
+  readonly countCommitsSince: (
+    parent: Pick<OrchestrationV2ThreadProjection, "thread">,
+    baseCommit: string,
+  ) => Effect.Effect<number, OrchestratorMcpFailure>;
 }
 
 export class SwarmService extends Context.Service<
@@ -96,6 +104,12 @@ export class SwarmService extends Context.Service<
     readonly create: (input: {
       readonly scope: McpInvocationScope;
       readonly input: SwarmCreateInput;
+      readonly resolver: SwarmTargetResolver;
+    }) => Effect.Effect<SwarmCreateResult, OrchestratorMcpFailure>;
+    /** swarm_add_members: more members for a swarm, admitted against its anchor. */
+    readonly addMembers: (input: {
+      readonly scope: McpInvocationScope;
+      readonly input: SwarmAddMembersInput;
       readonly resolver: SwarmTargetResolver;
     }) => Effect.Effect<SwarmCreateResult, OrchestratorMcpFailure>;
     /** One scheduler pass: reconcile launched members, then admit what the caps allow. */
@@ -178,22 +192,30 @@ const FAILURE_MESSAGES: Readonly<Record<AdmissionFailureKind, string>> = {
   unknown: "The member could not start. The server log has details.",
 };
 
-/** Fields a later task owns; until then they fail explicitly rather than being ignored. */
-const unsupportedFields = (input: SwarmCreateInput): string | undefined => {
-  if (input.map !== undefined) return "`map`";
-  if (input.sharedContext !== undefined) return "`sharedContext`";
+/** Swarm fields a later task owns; until then they fail explicitly rather than being ignored. */
+const unsupportedSwarmFields = (input: SwarmCreateInput): string | undefined => {
   if (input.dataShape !== undefined) return "`dataShape`";
   if (input.wakeBatch !== undefined || (input.wakePolicy ?? "group") !== "group") {
     return "A `wakePolicy` other than 'group'";
   }
   if (input.maxTotalTurns !== undefined) return "`maxTotalTurns`";
-  for (const member of input.members ?? []) {
+  return undefined;
+};
+
+/** The same for member fields, checked after a `map` expands. */
+const unsupportedMemberFields = (members: ReadonlyArray<SwarmMemberInput>): string | undefined => {
+  for (const member of members) {
     if (member.doneCriteria !== undefined) return "`doneCriteria`";
     if (member.maxTurns !== undefined) return "`maxTurns`";
     if (member.maxWallClockMs !== undefined) return "`maxWallClockMs`";
   }
   return undefined;
 };
+
+/** D5: members per swarm, retries included. */
+const SWARM_MAX_MEMBERS_TOTAL = 48;
+const SHARED_CONTEXT_MAX_BYTES = 16_384;
+const utf8 = new TextEncoder();
 
 const make = Effect.gen(function* () {
   const store = yield* SwarmStore.SwarmStore;
@@ -779,69 +801,65 @@ const make = Effect.gen(function* () {
       })),
     );
 
-  const create: SwarmService["Service"]["create"] = Effect.fn("SwarmService.create")(function* ({
-    scope,
-    input,
-    resolver,
+  /** The roster a call asks for: its `members`, or its expanded `map` (exactly one). */
+  const rosterOf = Effect.fn("SwarmService.rosterOf")(function* (input: {
+    readonly members?: ReadonlyArray<SwarmMemberInput> | undefined;
+    readonly map?: SwarmMap | undefined;
   }) {
-    const caller = scope.thread;
-    if (caller === undefined) {
-      return yield* failure("invalid_request", "swarm_create needs an agent inside a T3 thread.");
+    if ((input.members === undefined) === (input.map === undefined)) {
+      return yield* failure("invalid_request", "Give exactly one of `members` and `map`.");
     }
-    const unsupported = unsupportedFields(input);
+    if (input.members !== undefined) return input.members;
+    const expanded = expandSwarmMap(input.map!);
+    if (!expanded.ok) return yield* failure("invalid_request", expanded.message);
+    return expanded.members;
+  });
+
+  /**
+   * Validates and resolves a roster for swarm_create and swarm_add_members alike: keys, remote
+   * and project targets, targets once per distinct target, mode ceilings, verify, writers, and
+   * warnings. Writers count the architect's other active swarms; overlaps count `swarm`'s own.
+   */
+  const prepareRoster = Effect.fn("SwarmService.prepareRoster")(function* (input: {
+    readonly caller: NonNullable<McpInvocationScope["thread"]>;
+    readonly architect: Pick<OrchestrationV2ThreadProjection, "thread">;
+    readonly members: ReadonlyArray<SwarmMemberInput>;
+    readonly existingKeys: ReadonlySet<string>;
+    readonly existingWriters: ReadonlyArray<WriterCandidate>;
+    readonly verify: SwarmCreateInput["verify"];
+    readonly allowSharedWriters: boolean;
+    readonly settings: ServerSettingsValue;
+    readonly resolver: SwarmTargetResolver;
+  }) {
+    const { architect, members, resolver } = input;
+    const unsupported = unsupportedMemberFields(members);
     if (unsupported !== undefined) return yield* notYet(unsupported);
-    const members: ReadonlyArray<SwarmMemberInput> = input.members ?? [];
-    if (members.length === 0) {
-      return yield* failure("invalid_request", "Give `members`: at least one member.");
-    }
     const keys = new Set<string>();
     for (const member of members) {
-      if (keys.has(member.key)) {
+      if (keys.has(member.key) || input.existingKeys.has(member.key)) {
         return yield* failure(
           "invalid_request",
           `Swarm member key '${member.key}' is repeated. Give every member a unique key.`,
         );
       }
       keys.add(member.key);
-      if (member.target?.environmentId !== undefined) {
+      if (member.target?.environmentId !== undefined && member.target.anyOf === undefined) {
         return yield* failure(
           "capability_denied",
           "Swarm members run on this machine in this build; remove `target.environmentId`.",
         );
       }
-      if (member.target?.projectId !== undefined) {
+      if (member.target?.projectId !== undefined && member.target.anyOf === undefined) {
         return yield* failure(
           "invalid_request",
           "A swarm member runs in this thread's project. Omit target.projectId.",
         );
       }
     }
-    const settings = yield* readSettings;
-    if (input.maxConcurrent !== undefined && input.maxConcurrent > settings.swarmMaxConcurrent) {
+    if (input.existingKeys.size + members.length > SWARM_MAX_MEMBERS_TOTAL) {
       return yield* failure(
         "invalid_request",
-        `maxConcurrent ${input.maxConcurrent} is above this machine's cap of ${settings.swarmMaxConcurrent}.`,
-      );
-    }
-    // Nesting depth 1 (D10): a member starts its own swarm only when its architect allowed it.
-    const asMember = yield* store.findMemberByChildThread(caller.threadId);
-    if (Option.isSome(asMember) && parseSpec(asMember.value.specJson).allowNestedSwarm !== true) {
-      return yield* failure(
-        "capability_denied",
-        "This swarm member may not start a swarm: its architect did not set allowNestedSwarm.",
-      );
-    }
-
-    const requestKey = `${scope.requestNamespace}:swarm_create:${input.clientRequestId ?? NodeCrypto.randomUUID()}`;
-    const existing = yield* store.getSwarmByRequestKey(requestKey);
-    if (Option.isSome(existing)) return yield* swarmResult(scope, existing.value, []);
-
-    const architect = yield* loadRuns(caller.threadId);
-    const anchor = liveRunOf(architect, caller.providerInstanceId);
-    if (anchor === undefined || anchor.rootNodeId === null) {
-      return yield* failure(
-        "parent_not_active",
-        "swarm_create requires an active run owned by this MCP provider session.",
+        `A swarm has at most ${SWARM_MAX_MEMBERS_TOTAL} members, retries included; this call would make ${input.existingKeys.size + members.length}.`,
       );
     }
 
@@ -961,6 +979,7 @@ const make = Effect.gen(function* () {
           task: member.task,
           ...(member.role === undefined ? {} : { role: member.role }),
         }),
+        ...(member.role === undefined ? {} : { role: member.role }),
         isolation: member.isolation ?? "shared",
         ...(member.ownsPaths === undefined ? {} : { ownsPaths: member.ownsPaths }),
         ...(member.allowNestedSwarm === undefined
@@ -982,7 +1001,7 @@ const make = Effect.gen(function* () {
     const others: Array<WriterCandidate> = [];
     for (const swarm of yield* store.listSwarms({
       statuses: ["active"],
-      parentThreadId: caller.threadId,
+      parentThreadId: input.caller.threadId,
     })) {
       for (const member of yield* store.listMembers(swarm.swarmId)) {
         if (isFinalMemberStatus(member.status)) continue;
@@ -996,23 +1015,20 @@ const make = Effect.gen(function* () {
         });
       }
     }
-    const candidates: ReadonlyArray<WriterCandidate> = [
-      ...specs.map((spec) => ({
-        key: spec.key,
-        isolation: spec.isolation,
-        writer: spec.writer,
-        ownsPaths: spec.ownsPaths,
-      })),
-      ...others,
-    ];
+    const added: ReadonlyArray<WriterCandidate> = specs.map((spec) => ({
+      key: spec.key,
+      isolation: spec.isolation,
+      writer: spec.writer,
+      ownsPaths: spec.ownsPaths,
+    }));
     const refusal = sharedWriterRefusal({
-      members: candidates,
-      allowSharedWriters: input.allowSharedWriters === true,
+      members: [...added, ...others],
+      allowSharedWriters: input.allowSharedWriters,
     });
     if (refusal !== undefined) return yield* failure("invalid_request", refusal);
-    const caps = capsOf(settings);
+    const total = input.existingKeys.size + specs.length;
     const warnings: ReadonlyArray<SwarmWarning> = [
-      ...ownsPathsOverlapWarnings(candidates.slice(0, specs.length)),
+      ...ownsPathsOverlapWarnings([...added, ...input.existingWriters]),
       ...serialInstanceWarnings({
         members: specs.flatMap((spec) =>
           (spec.anyOf ?? [spec]).map((option) => ({
@@ -1021,9 +1037,104 @@ const make = Effect.gen(function* () {
             driver: option.driver,
           })),
         ),
-        caps,
+        caps: capsOf(input.settings),
       }),
+      ...(total >= SWARM_MAX_MEMBERS_TOTAL
+        ? [
+            {
+              kind: "no_retry_room" as const,
+              message: `This swarm now has ${total} members, the most a swarm can hold, so no member can be retried.`,
+            },
+          ]
+        : []),
     ];
+    return { specs, warnings };
+  });
+
+  const memberRows = (
+    specs: ReadonlyArray<SwarmMemberSpec & { readonly writer: boolean }>,
+    firstOrdinal: number,
+    now: string,
+  ) =>
+    specs.map(({ writer, ...spec }, index) => ({
+      memberKey: spec.key,
+      ordinal: firstOrdinal + index,
+      specJson: encodeSpecJson(spec),
+      queuedAt: now,
+      writer,
+      providerInstanceId: rowInstanceId(spec),
+    }));
+
+  const admitNow = (swarmId: SwarmId, settings: ServerSettingsValue) =>
+    pass(settings).pipe(
+      Effect.catchCause((cause) =>
+        Effect.logWarning("swarm.admission-pass-error", {
+          swarmId,
+          causeKind: storageOrDispatchTag(Cause.squash(cause)),
+        }),
+      ),
+    );
+
+  const create: SwarmService["Service"]["create"] = Effect.fn("SwarmService.create")(function* ({
+    scope,
+    input,
+    resolver,
+  }) {
+    const caller = scope.thread;
+    if (caller === undefined) {
+      return yield* failure("invalid_request", "swarm_create needs an agent inside a T3 thread.");
+    }
+    const unsupported = unsupportedSwarmFields(input);
+    if (unsupported !== undefined) return yield* notYet(unsupported);
+    if (
+      input.sharedContext !== undefined &&
+      utf8.encode(input.sharedContext).length > SHARED_CONTEXT_MAX_BYTES
+    ) {
+      return yield* failure(
+        "invalid_request",
+        `sharedContext is ${utf8.encode(input.sharedContext).length} bytes; the limit is ${SHARED_CONTEXT_MAX_BYTES}.`,
+      );
+    }
+    const members = yield* rosterOf(input);
+    const settings = yield* readSettings;
+    if (input.maxConcurrent !== undefined && input.maxConcurrent > settings.swarmMaxConcurrent) {
+      return yield* failure(
+        "invalid_request",
+        `maxConcurrent ${input.maxConcurrent} is above this machine's cap of ${settings.swarmMaxConcurrent}.`,
+      );
+    }
+    // Nesting depth 1 (D10): a member starts its own swarm only when its architect allowed it.
+    const asMember = yield* store.findMemberByChildThread(caller.threadId);
+    if (Option.isSome(asMember) && parseSpec(asMember.value.specJson).allowNestedSwarm !== true) {
+      return yield* failure(
+        "capability_denied",
+        "This swarm member may not start a swarm: its architect did not set allowNestedSwarm.",
+      );
+    }
+
+    const requestKey = `${scope.requestNamespace}:swarm_create:${input.clientRequestId ?? NodeCrypto.randomUUID()}`;
+    const existing = yield* store.getSwarmByRequestKey(requestKey);
+    if (Option.isSome(existing)) return yield* swarmResult(scope, existing.value, []);
+
+    const architect = yield* loadRuns(caller.threadId);
+    const anchor = liveRunOf(architect, caller.providerInstanceId);
+    if (anchor === undefined || anchor.rootNodeId === null) {
+      return yield* failure(
+        "parent_not_active",
+        "swarm_create requires an active run owned by this MCP provider session.",
+      );
+    }
+    const { specs, warnings } = yield* prepareRoster({
+      caller,
+      architect,
+      members,
+      existingKeys: new Set(),
+      existingWriters: [],
+      verify: input.verify,
+      allowSharedWriters: input.allowSharedWriters === true,
+      settings,
+      resolver,
+    });
 
     const baseCommit = specs.some((spec) => spec.isolation === "worktree")
       ? yield* resolver.resolveWorktreeBase(architect)
@@ -1057,7 +1168,7 @@ const make = Effect.gen(function* () {
       maxConcurrent: input.maxConcurrent ?? null,
       maxTotalTurns: null,
       verifyJson: null,
-      sharedContext: null,
+      sharedContext: input.sharedContext ?? null,
       dataShape: null,
       allowSharedWriters: input.allowSharedWriters === true,
       budgetExhausted: false,
@@ -1066,17 +1177,7 @@ const make = Effect.gen(function* () {
       updatedAt: now,
     };
     const created = yield* store
-      .createSwarm({
-        swarm,
-        members: specs.map(({ writer, ...spec }, ordinal) => ({
-          memberKey: spec.key,
-          ordinal,
-          specJson: encodeSpecJson(spec),
-          queuedAt: now,
-          writer,
-          providerInstanceId: rowInstanceId(spec),
-        })),
-      })
+      .createSwarm({ swarm, members: memberRows(specs, 0, now) })
       .pipe(Effect.result);
     if (Result.isFailure(created)) {
       // A concurrent call with the same clientRequestId won the unique request_key.
@@ -1084,20 +1185,137 @@ const make = Effect.gen(function* () {
       if (Option.isSome(winner)) return yield* swarmResult(scope, winner.value, []);
       return yield* created.failure;
     }
-    yield* Effect.logInfo("swarm.created", { swarmId, members: specs.length });
+    yield* Effect.logInfo("swarm.created", {
+      swarmId,
+      members: specs.length,
+      shape: input.map === undefined ? "members" : "map",
+    });
     // Immediate admission: what fits the caps starts inside this call, on the live anchor.
-    yield* pass(settings).pipe(
-      Effect.catchCause((cause) =>
-        Effect.logWarning("swarm.create-admission-error", {
-          swarmId,
-          causeKind: storageOrDispatchTag(Cause.squash(cause)),
-        }),
-      ),
-    );
+    yield* admitNow(swarmId, settings);
     return yield* swarmResult(scope, swarm, warnings);
   });
 
-  return SwarmService.of({ create, tick, wake, start });
+  const addMembers: SwarmService["Service"]["addMembers"] = Effect.fn("SwarmService.addMembers")(
+    function* ({ scope, input, resolver }) {
+      const caller = scope.thread;
+      if (caller === undefined) {
+        return yield* failure(
+          "invalid_request",
+          "swarm_add_members needs an agent inside a T3 thread.",
+        );
+      }
+      const found = yield* store.getSwarm(input.swarmId);
+      if (Option.isNone(found) || found.value.parentThreadId !== caller.threadId) {
+        // The same answer for a swarm that is not this thread's, so ids cannot be probed.
+        return yield* failure(
+          "capability_denied",
+          `Only the thread that created swarm ${input.swarmId} can add members to it.`,
+        );
+      }
+      const swarm = found.value;
+      if (swarm.status !== "active" && swarm.status !== "completed") {
+        return yield* failure(
+          "invalid_request",
+          `Swarm ${input.swarmId} is ${swarm.status} and takes no more members.`,
+        );
+      }
+      if (swarm.budgetExhausted) {
+        return yield* failure(
+          "invalid_request",
+          `Swarm ${input.swarmId} used its turn budget and takes no more members.`,
+        );
+      }
+      const members = yield* rosterOf(input);
+      const existing = yield* store.listMembers(swarm.swarmId);
+      // A retried call adds nothing twice: every key it names already exists from the first.
+      if (
+        input.clientRequestId !== undefined &&
+        members.every((member) => existing.some((row) => row.memberKey === member.key))
+      ) {
+        return yield* swarmResult(scope, swarm, []);
+      }
+      const settings = yield* readSettings;
+      const architect = yield* loadRuns(caller.threadId);
+      // §4.3: adding reopens a completed swarm only while its anchor still admits members.
+      const anchor = architect.runs.find((run) => run.id === swarm.anchorRunId);
+      if (anchor?.delegatedCompletion?.disposition !== "open") {
+        return yield* failure(
+          "invalid_request",
+          `The anchor turn of swarm ${input.swarmId} no longer admits members.`,
+        );
+      }
+      const { specs, warnings } = yield* prepareRoster({
+        caller,
+        architect,
+        members,
+        existingKeys: new Set(existing.map((row) => row.memberKey)),
+        existingWriters: existing
+          .filter((row) => !isFinalMemberStatus(row.status))
+          .map((row) => {
+            const spec = parseSpec(row.specJson);
+            return {
+              key: row.memberKey,
+              isolation: spec.isolation,
+              writer: row.writer,
+              ownsPaths: spec.ownsPaths,
+            };
+          }),
+        verify: undefined,
+        allowSharedWriters: swarm.allowSharedWriters,
+        settings,
+        resolver,
+      });
+      const now = yield* nowIso;
+      let baseCommit = swarm.baseCommit;
+      const extra: Array<SwarmWarning> = [];
+      if (specs.some((spec) => spec.isolation === "worktree")) {
+        if (baseCommit === null) {
+          baseCommit = yield* resolver.resolveWorktreeBase(architect);
+        } else {
+          // Added members start from the swarm's base, which may be behind the architect now.
+          const behind = yield* resolver
+            .countCommitsSince(architect, baseCommit)
+            .pipe(Effect.orElseSucceed(() => 0));
+          if (behind > 0) {
+            extra.push({
+              kind: "base_behind_head",
+              message: `Added worktree members start from the swarm's base commit, ${behind} commit${behind === 1 ? "" : "s"} behind your checkout.`,
+            });
+          }
+        }
+      }
+      yield* store.addMembers({
+        swarmId: swarm.swarmId,
+        members: memberRows(
+          specs,
+          existing.reduce((next, row) => Math.max(next, row.ordinal + 1), 0),
+          now,
+        ),
+        updatedAt: now,
+      });
+      if (swarm.status === "completed" || baseCommit !== swarm.baseCommit) {
+        yield* store.updateSwarm(swarm.swarmId, {
+          status: "active",
+          ...(baseCommit === swarm.baseCommit ? {} : { baseCommit }),
+          updatedAt: now,
+        });
+      }
+      yield* Effect.logInfo("swarm.members-added", {
+        swarmId: swarm.swarmId,
+        members: specs.length,
+      });
+      // Added members always go through the swarm-admission path against the anchor.
+      yield* admitNow(swarm.swarmId, settings);
+      const updated = yield* store.getSwarm(swarm.swarmId);
+      return yield* swarmResult(
+        scope,
+        Option.getOrElse(updated, () => swarm),
+        [...warnings, ...extra],
+      );
+    },
+  );
+
+  return SwarmService.of({ create, addMembers, tick, wake, start });
 });
 
 export const layer = Layer.effect(SwarmService, make);

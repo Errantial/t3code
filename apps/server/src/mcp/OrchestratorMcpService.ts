@@ -227,6 +227,11 @@ export interface OrchestratorMcpServiceShape {
   readonly resolveWorktreeBase: (
     parent: Pick<OrchestrationV2ThreadProjection, "thread">,
   ) => Effect.Effect<string, OrchestratorMcpFailure>;
+  /** Swarm v2 (internal): commits on the parent checkout since `baseCommit`. */
+  readonly countCommitsSince: (
+    parent: Pick<OrchestrationV2ThreadProjection, "thread">,
+    baseCommit: string,
+  ) => Effect.Effect<number, OrchestratorMcpFailure>;
 }
 
 export class OrchestratorMcpService extends Context.Service<
@@ -1463,6 +1468,26 @@ const make = Effect.gen(function* () {
     return base.commitSha;
   });
 
+  const countCommitsSince: OrchestratorMcpServiceShape["countCommitsSince"] = Effect.fn(
+    "OrchestratorMcpService.countCommitsSince",
+  )(function* (parent, baseCommit) {
+    const project = yield* requireProject(parent.thread.projectId);
+    const result = yield* gitDriver
+      .execute({
+        operation: "OrchestratorMcpService.countCommitsSince",
+        cwd: parent.thread.worktreePath ?? project.workspaceRoot,
+        args: ["rev-list", "--count", `${baseCommit}..HEAD`],
+        timeoutMs: 10_000,
+      })
+      .pipe(
+        Effect.mapError(() =>
+          failure("orchestration_error", "Unable to compare the swarm base with the checkout."),
+        ),
+      );
+    const count = Number.parseInt(result.stdout.trim(), 10);
+    return Number.isFinite(count) ? count : 0;
+  });
+
   const resolveSwarmTarget: OrchestratorMcpServiceShape["resolveSwarmTarget"] = (parent, target) =>
     loadProviders.pipe(
       Effect.flatMap((providers) => resolveTargetRechecking({ parent, target, providers })),
@@ -1951,6 +1976,7 @@ const make = Effect.gen(function* () {
   return OrchestratorMcpService.of({
     resolveSwarmTarget,
     resolveWorktreeBase,
+    countCommitsSince,
     scheduleTask: Effect.fn("OrchestratorMcpService.scheduleTask")(function* (scope, input) {
       const { parent, limits } = yield* loadCaller(scope);
       const projectId = yield* resolveProjectTarget(parent, input.projectId);
