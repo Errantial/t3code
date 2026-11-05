@@ -1,4 +1,6 @@
+import { useAtomValue } from "@effect/atom-react";
 import { useComposerTypingGuard } from "./useComposerTypingGuard";
+import { swarmV2EnabledAtom } from "./swarmAvailability";
 import { insertAttachmentReferencesForDraft } from "./composerAttachmentReferences";
 import { DESKTOP_PASTE_AS_TEXT_EVENT } from "../../lib/desktopPasteAsText";
 import {
@@ -1009,6 +1011,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   const [isComposerPrimaryActionsCompact, setIsComposerPrimaryActionsCompact] = useState(false);
   const [isComposerModelPickerOpen, setIsComposerModelPickerOpen] = useState(false);
   const [isSwarmDialogOpen, setIsSwarmDialogOpen] = useState(false);
+  // Swarm v2: the dialog builds the version 2 brief only while this environment has it on.
+  const swarmV2Enabled = useAtomValue(swarmV2EnabledAtom(environmentId));
   const isMobileViewport = useMediaQuery("max-sm");
   const isSoftwareKeyboardOpen = useSoftwareKeyboardOpen();
   const [isComposerFocused, setIsComposerFocused] = useState(false);
@@ -3569,6 +3573,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         open={isSwarmDialogOpen}
         onOpenChange={setIsSwarmDialogOpen}
         onSubmit={addSwarmBrief}
+        {...(swarmV2Enabled
+          ? { swarmV2: { architectFullAccess: runtimeMode === "full-access" } }
+          : {})}
       />
     </form>
   );
