@@ -156,6 +156,8 @@ not instructions.
     retry;
   - members waiting on a usage limit are stopped and do not resume;
   - `swarm_add_members`, `swarm_followup`, and `swarm_retry` are refused.
+- A turn here is one run of the member's thread (its first run, each verify retry, each
+  follow-up, and any message you send it), not each request the agent makes to its provider.
 - A swarm or member can lower these limits but not raise them. The server settings
   `swarmDefaultMaxTurns`, `swarmDefaultMaxWallClockMs`, and `swarmDefaultMaxTotalTurns` set the
   defaults.

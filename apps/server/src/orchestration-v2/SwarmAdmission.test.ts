@@ -27,6 +27,7 @@ import {
   ThreadId,
   TurnItemId,
 } from "@t3tools/contracts";
+import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
@@ -1493,22 +1494,31 @@ const layerFailingStops = Layer.effect(
   }),
 );
 
+/** What SwarmService needs besides the store, settings, and orchestrator: test doubles. */
+const layerSwarmStubs = Layer.mergeAll(
+  Layer.succeed(ThreadLaunchService.ThreadLaunchService, {
+    prepareRun: (input: { readonly threadId: ThreadId }) =>
+      Effect.sync(() => {
+        prepareRuns.push(input.threadId);
+      }),
+  } as unknown as ThreadLaunchService.ThreadLaunchService["Service"]),
+  Layer.succeed(ProviderRegistry.ProviderRegistry, {
+    getProviders: Effect.sync(() => providerHealth),
+  } as unknown as ProviderRegistry.ProviderRegistry["Service"]),
+  layerFakeVerifier,
+);
+
+/** A second SwarmService over the same store: a server restart, with no in-memory state. */
+const restartedSwarms = Effect.gen(function* () {
+  const context = yield* Layer.build(
+    SwarmService.layer.pipe(Layer.provide(layerSwarmStubs), Layer.provide(layerFailingStops)),
+  );
+  return Context.get(context, SwarmService.SwarmService);
+});
+
 const layerSwarm = SwarmService.layer.pipe(
   Layer.provideMerge(SwarmStore.layer.pipe(Layer.provide(SqlitePersistence.layerMemory))),
-  Layer.provide(
-    Layer.succeed(ThreadLaunchService.ThreadLaunchService, {
-      prepareRun: (input: { readonly threadId: ThreadId }) =>
-        Effect.sync(() => {
-          prepareRuns.push(input.threadId);
-        }),
-    } as unknown as ThreadLaunchService.ThreadLaunchService["Service"]),
-  ),
-  Layer.provide(
-    Layer.succeed(ProviderRegistry.ProviderRegistry, {
-      getProviders: Effect.sync(() => providerHealth),
-    } as unknown as ProviderRegistry.ProviderRegistry["Service"]),
-  ),
-  Layer.provide(layerFakeVerifier),
+  Layer.provide(layerSwarmStubs),
   Layer.provide(layerFailingStops),
   Layer.provideMerge(ServerSettings.layerTest({ swarmV2Enabled: true, swarmMaxConcurrent: 2 })),
   Layer.provideMerge(layerTest),
@@ -4429,6 +4439,8 @@ it.layer(layerSwarm)("status, cancel, retry, collect, and follow-up (SW-A7)", (i
       }).pipe(Effect.flip);
       assert.equal(refused.code, "invalid_request");
       assert.include(refused.message, "no longer admits work");
+      // Completed swarms are checked once a minute.
+      yield* TestClock.adjust(Duration.seconds(61));
       yield* swarms.tick;
       assert.equal(Option.getOrThrow(yield* store.getSwarm(result.swarmId)).status, "cancelled");
       yield* retire(result.swarmId);
@@ -5083,6 +5095,88 @@ it.layer(layerSwarm)("failures, usage limits, and instance health (SW-A8)", (it)
       )!;
       assert.isNull(limitRecoveryCommand(later, true, DateTime.toEpochMillis(yield* DateTime.now)));
       yield* resetHealth;
+      yield* retire(result.swarmId);
+    }),
+  );
+
+  it.effect(
+    "a restarted server keeps limit_wait and retry_after members waiting, then resumes",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const orchestrator = yield* Orchestrator.OrchestratorV2;
+          const swarms = yield* SwarmService.SwarmService;
+          const settings = yield* ServerSettings.ServerSettingsService;
+          yield* atHour(10);
+          yield* settings.updateSettings({ autoResumeLimitedThreads: true });
+          const { threadId, anchor } = yield* seedArchitect("a8-restart");
+          const result = yield* createSwarm(threadId, {
+            members: members(2, { interactionMode: "plan" }),
+          });
+          yield* endRun({ threadId, runId: anchor.id });
+          const [m0, m1] = yield* rows(result.swarmId);
+          const resetAt = DateTime.formatIso(DateTime.add(yield* DateTime.now, { minutes: 5 }));
+          yield* failRow(m0!, providerFailure("usage_limit", { resetAt }));
+          yield* failRow(m1!, providerFailure("transport_error"));
+          yield* swarms.tick;
+          const shellOf = Effect.gen(function* () {
+            return (yield* orchestrator.getShellSnapshot()).threads.find(
+              (thread) => thread.id === m0!.childThreadId,
+            )!;
+          });
+          const arm = limitRecoveryCommand(
+            yield* shellOf,
+            true,
+            DateTime.toEpochMillis(yield* DateTime.now),
+          );
+          assert(arm?.type === "thread.metadata.update");
+          yield* orchestrator.dispatch(arm);
+
+          // The server restarts: a fresh service with nothing in memory, over the same store.
+          const restarted = yield* restartedSwarms;
+          yield* restarted.tick;
+          yield* restarted.tick;
+          const waiting = yield* rows(result.swarmId);
+          assert.equal(waiting[0]!.status, "limit_wait");
+          assert.equal(waiting[1]!.status, "queued");
+          assert.equal(waiting[1]!.attempt, 2);
+          // Past the reset and the backoff: the retry starts, and the continuation is followed.
+          yield* TestClock.adjust(Duration.minutes(6));
+          yield* restarted.tick;
+          assert.equal((yield* rows(result.swarmId))[1]!.status, "launching");
+          const resume = limitRecoveryCommand(
+            yield* shellOf,
+            true,
+            DateTime.toEpochMillis(yield* DateTime.now),
+          );
+          assert(resume?.type === "message.dispatch");
+          yield* orchestrator.dispatch(resume);
+          const continuation = (yield* orchestrator.getThreadProjection(
+            m0!.childThreadId!,
+          )).runs.find((run) => run.userMessageId === resume.messageId)!;
+          yield* restarted.tick;
+          assert.equal((yield* rows(result.swarmId))[0]!.boundRunId, continuation.id);
+          yield* resetHealth;
+          yield* retire(result.swarmId);
+        }),
+      ),
+  );
+
+  it.effect("lowers member limits above the settings, with a limit_lowered warning", () =>
+    Effect.gen(function* () {
+      yield* atHour(11);
+      const { threadId } = yield* seedArchitect("a9-lowered");
+      const result = yield* createSwarm(threadId, {
+        members: [
+          { key: "big", title: "Big", task: "Do it.", interactionMode: "plan", maxTurns: 30 },
+          { key: "fine", title: "Fine", task: "Do it.", interactionMode: "plan", maxTurns: 5 },
+        ],
+      });
+      const lowered = result.warnings.filter((warning) => warning.kind === "limit_lowered");
+      assert.equal(lowered.length, 1);
+      assert.deepEqual(lowered[0]!.keys, ["big"]);
+      assert.include(lowered[0]!.message, "maxTurns to 20");
+      assert.include((yield* rows(result.swarmId))[0]!.specJson, `"maxTurns":20`);
       yield* retire(result.swarmId);
     }),
   );

@@ -309,6 +309,7 @@ const FOLLOWUP_COALESCE_MS = 5_000;
 const DELIVERY_STALL_MS = 10 * 60_000;
 const MAX_RELEASE_ATTEMPTS = 5;
 const MAX_STOP_ATTEMPTS = 5;
+const COMPLETED_CHECK_MS = 60_000;
 /** SW-A8: classes that may be retried automatically and count toward an instance being down. */
 const TRANSIENT_FAILURE_CLASSES: ReadonlyArray<SwarmFailureClass> = [
   "transport_error",
@@ -430,6 +431,7 @@ const make = Effect.gen(function* () {
   const stalledSince = new Map<string, number>();
   const releaseAttempts = new Map<string, number>();
   const stopAttempts = new Map<string, number>();
+  let lastCompletedCheckMs = Number.NEGATIVE_INFINITY;
   const abandonedStops = new Set<string>();
   const wakes = yield* Queue.sliding<void>(1);
   // Per-instance counters since this process started (SW-A8 instrumentation; counts only).
@@ -2277,12 +2279,16 @@ const make = Effect.gen(function* () {
             })
             .pipe(logged("swarm.verify-pid-error", ids));
         }
-        // Cancelled and detached swarms are followed until their launched members end:
-        // cancelled ones still hold slots and release while their anchor is open, detached
-        // ones only collect envelopes.
-        // A completed swarm is listed too, so a Stop or detach after completion is noticed.
+        // Cancelled and detached swarms are followed until their launched members end;
+        // completed ones are read once a minute, to notice a Stop or detach after completion.
+        const passMs = DateTime.toEpochMillis(yield* DateTime.now);
+        const checkCompleted =
+          passMs - lastCompletedCheckMs >= COMPLETED_CHECK_MS || passMs < lastCompletedCheckMs;
+        if (checkCompleted) lastCompletedCheckMs = passMs;
         const swarms = yield* store.listSwarms({
-          statuses: ["active", "completed", "cancelled", "detached"],
+          statuses: checkCompleted
+            ? ["active", "completed", "cancelled", "detached"]
+            : ["active", "cancelled", "detached"],
         });
         const membersBySwarm = new Map<string, ReadonlyArray<SwarmStore.SwarmMemberRecord>>();
         const architects = new Map<
@@ -2865,6 +2871,27 @@ const make = Effect.gen(function* () {
           })),
         ),
         caps: capsOf(input.settings),
+      }),
+      // A member's limits above the server settings are lowered to them, and said so.
+      ...members.flatMap((member) => {
+        const lowered = [
+          ...(member.maxTurns !== undefined && member.maxTurns > input.settings.swarmDefaultMaxTurns
+            ? [`maxTurns to ${input.settings.swarmDefaultMaxTurns}`]
+            : []),
+          ...(member.maxWallClockMs !== undefined &&
+          member.maxWallClockMs > input.settings.swarmDefaultMaxWallClockMs
+            ? [`maxWallClockMs to ${input.settings.swarmDefaultMaxWallClockMs}`]
+            : []),
+        ];
+        return lowered.length === 0
+          ? []
+          : [
+              {
+                kind: "limit_lowered" as const,
+                keys: [member.key],
+                message: `Member '${member.key}': lowered ${lowered.join(" and ")}, this machine's limit.`,
+              },
+            ];
       }),
       ...(total >= SWARM_MAX_MEMBERS_TOTAL
         ? [
