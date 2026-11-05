@@ -33,6 +33,14 @@ import {
   FleetUpdateResult,
 } from "./fleetUpdate.ts";
 import {
+  SwarmActInput,
+  SwarmActResult,
+  SwarmListForThreadInput,
+  SwarmListForThreadResult,
+  SwarmRpcError,
+  SwarmSummariesResult,
+} from "./swarm.ts";
+import {
   ChatGptReconnectProfileInput,
   ChatGptReconnectProfile,
   ChatGptImportProfileInput,
@@ -502,6 +510,9 @@ export const WS_METHODS = {
   serverCommitDesktopUpdate: "server.commitDesktopUpdate",
   fleetStatus: "fleet.status",
   fleetUpdate: "fleet.update",
+  swarmListForThread: "swarm.listForThread",
+  swarmAct: "swarm.act",
+  swarmSummaries: "swarm.summaries",
   serverUpsertKeybinding: "server.upsertKeybinding",
   serverRemoveKeybinding: "server.removeKeybinding",
   serverRunStorageCleanup: "server.runStorageCleanup",
@@ -777,6 +788,25 @@ const WsFleetUpdateRpc = Rpc.make(WS_METHODS.fleetUpdate, {
   payload: FleetUpdateInput,
   success: FleetUpdateResult,
   error: Schema.Union([FleetUpdateError, EnvironmentAuthorizationError]),
+});
+
+// Swarm v2 (SW-A10): the architect thread's panel, and the sidebar chip.
+const WsSwarmListForThreadRpc = Rpc.make(WS_METHODS.swarmListForThread, {
+  payload: SwarmListForThreadInput,
+  success: SwarmListForThreadResult,
+  error: Schema.Union([SwarmRpcError, EnvironmentAuthorizationError]),
+});
+
+const WsSwarmActRpc = Rpc.make(WS_METHODS.swarmAct, {
+  payload: SwarmActInput,
+  success: SwarmActResult,
+  error: Schema.Union([SwarmRpcError, EnvironmentAuthorizationError]),
+});
+
+const WsSwarmSummariesRpc = Rpc.make(WS_METHODS.swarmSummaries, {
+  payload: Schema.Struct({}),
+  success: SwarmSummariesResult,
+  error: Schema.Union([SwarmRpcError, EnvironmentAuthorizationError]),
 });
 
 const WsServerRunStorageCleanupRpc = Rpc.make(WS_METHODS.serverRunStorageCleanup, {
@@ -1987,6 +2017,9 @@ export const WsRpcGroup = RpcGroup.make(
   WsServerCommitDesktopUpdateRpc,
   WsFleetStatusRpc,
   WsFleetUpdateRpc,
+  WsSwarmListForThreadRpc,
+  WsSwarmActRpc,
+  WsSwarmSummariesRpc,
   WsServerUpsertKeybindingRpc,
   WsServerRemoveKeybindingRpc,
   WsServerRunStorageCleanupRpc,

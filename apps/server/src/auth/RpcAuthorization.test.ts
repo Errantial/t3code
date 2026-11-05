@@ -89,6 +89,12 @@ it("requires operate permission for tool updates even alongside a read-only chec
   expect(requiredScopeForDeviceList({ updateTool: "hub" })).toBe(AuthOrchestrationOperateScope);
 });
 
+it("reads swarms with read scope and acts on them only with operate scope", () => {
+  expect(RPC_REQUIRED_SCOPES[WS_METHODS.swarmListForThread]).toBe(AuthOrchestrationReadScope);
+  expect(RPC_REQUIRED_SCOPES[WS_METHODS.swarmSummaries]).toBe(AuthOrchestrationReadScope);
+  expect(RPC_REQUIRED_SCOPES[WS_METHODS.swarmAct]).toBe(AuthOrchestrationOperateScope);
+});
+
 describe("RPC scope middleware", () => {
   const tested = [WS_METHODS.serverProbe, WS_METHODS.serverRetryResourceTelemetry] as const;
   const group = WsRpcGroup.omit(

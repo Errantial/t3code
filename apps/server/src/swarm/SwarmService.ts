@@ -15,6 +15,12 @@ import {
   type ServerSettings as ServerSettingsValue,
   type SwarmAddMembersInput,
   type SwarmCancelInput,
+  type SwarmActInput,
+  type SwarmActResult,
+  type SwarmListForThreadResult,
+  type SwarmMemberView,
+  type SwarmSummariesResult,
+  type SwarmThreadView,
   type SwarmCancelResult,
   type SwarmCollectInput,
   type SwarmCollectResult,
@@ -35,7 +41,7 @@ import {
   type SwarmMemberInput,
   type SwarmMemberResult,
   type SwarmWarning,
-  type ThreadId,
+  ThreadId,
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
@@ -172,6 +178,14 @@ export class SwarmService extends Context.Service<
       readonly memberKey: string;
       readonly followup: number;
     }) => Effect.Effect<void, OrchestratorMcpFailure>;
+    /** SW-A10: the architect thread's swarms for its panel. */
+    readonly listForThread: (
+      threadId: ThreadId,
+    ) => Effect.Effect<SwarmListForThreadResult, OrchestratorMcpFailure>;
+    /** SW-A10: the user's panel actions on a swarm of `threadId`. */
+    readonly act: (input: SwarmActInput) => Effect.Effect<SwarmActResult, OrchestratorMcpFailure>;
+    /** SW-A10: per-architect counts of active swarms, for the sidebar chip. */
+    readonly summaries: Effect.Effect<SwarmSummariesResult, OrchestratorMcpFailure>;
     /** orchestrator_capabilities' `swarm`: caps, live slots and queues, and counters. */
     readonly capacity: Effect.Effect<OrchestratorMcpSwarmCapacity, OrchestratorMcpFailure>;
     /** One scheduler pass: reconcile launched members, then admit what the caps allow. */
@@ -310,6 +324,8 @@ const DELIVERY_STALL_MS = 10 * 60_000;
 const MAX_RELEASE_ATTEMPTS = 5;
 const MAX_STOP_ATTEMPTS = 5;
 const COMPLETED_CHECK_MS = 60_000;
+/** The panel shows a thread's newest swarms. */
+const PANEL_MAX_SWARMS = 10;
 /** SW-A8: classes that may be retried automatically and count toward an instance being down. */
 const TRANSIENT_FAILURE_CLASSES: ReadonlyArray<SwarmFailureClass> = [
   "transport_error",
@@ -3234,7 +3250,26 @@ const make = Effect.gen(function* () {
     }
     const settings = yield* readSettings;
     const architect = yield* loadRuns(swarm.parentThreadId);
-    const result = yield* passLock.withPermits(1)(
+    const result = yield* cancelMembers({ swarm, keys: input.keys, architect, settings });
+    // Cancelled members are released with their digests by the next pass, while the cohort is
+    // open.
+    yield* wake;
+    return result;
+  });
+
+  /**
+   * Cancels members by key, or the whole swarm without keys: queued rows are cancelled and
+   * launched ones stopped. With `architect`, an MCP caller's mode check applies (task_cancel's);
+   * the user's panel passes none.
+   */
+  const cancelMembers = Effect.fn("SwarmService.cancelMembers")(function* (input: {
+    readonly swarm: SwarmStore.SwarmRecord;
+    readonly keys: ReadonlyArray<string> | undefined;
+    readonly architect: Pick<OrchestrationV2ThreadProjection, "thread"> | undefined;
+    readonly settings: ServerSettingsValue;
+  }) {
+    const { swarm, architect, settings } = input;
+    return yield* passLock.withPermits(1)(
       Effect.gen(function* () {
         const members = yield* store.listMembers(swarm.swarmId);
         const keys = input.keys === undefined ? members.map((row) => row.memberKey) : input.keys;
@@ -3261,9 +3296,10 @@ const make = Effect.gen(function* () {
             });
             cancelled.push(key);
           } else {
-            const stoppable = yield* assertStoppable(architect, row.childThreadId!).pipe(
-              Effect.result,
-            );
+            const stoppable =
+              architect === undefined
+                ? Result.succeed(undefined)
+                : yield* assertStoppable(architect, row.childThreadId!).pipe(Effect.result);
             if (Result.isFailure(stoppable)) {
               notCancelled.push({
                 key,
@@ -3298,10 +3334,6 @@ const make = Effect.gen(function* () {
         return { cancelled, notCancelled };
       }),
     );
-    // Cancelled members are released with their digests by the next pass, while the cohort is
-    // open.
-    yield* wake;
-    return result;
   });
 
   /** The previous attempt's result, wrapped as data for the retry's task (rev 3.1). */
@@ -3332,17 +3364,34 @@ const make = Effect.gen(function* () {
     input,
     resolver,
   }) {
-    const { swarm, caller } = yield* ownedSwarm(scope, input.swarmId, "swarm_retry");
+    const { swarm } = yield* ownedSwarm(scope, input.swarmId, "swarm_retry");
+    yield* retryMembers({ swarm, keys: input.keys, target: input.target, resolver });
+    const updated = yield* store.getSwarm(swarm.swarmId);
+    return yield* swarmResult(
+      scope,
+      Option.getOrElse(updated, () => swarm),
+      [],
+    );
+  });
+
+  /** Runs failed or cancelled members again as a new attempt (swarm_retry and the panel). */
+  const retryMembers = Effect.fn("SwarmService.retryMembers")(function* (input: {
+    readonly swarm: SwarmStore.SwarmRecord;
+    readonly keys: ReadonlyArray<string>;
+    readonly target: SwarmRetryInput["target"];
+    readonly resolver: SwarmTargetResolver | undefined;
+  }) {
+    const { swarm, resolver } = input;
     if (swarm.status !== "active" && swarm.status !== "completed") {
       return yield* failure(
         "invalid_request",
-        `Swarm ${input.swarmId} is ${swarm.status}; its members cannot be retried.`,
+        `Swarm ${swarm.swarmId} is ${swarm.status}; its members cannot be retried.`,
       );
     }
     if (swarm.budgetExhausted) {
       return yield* failure(
         "invalid_request",
-        `Swarm ${input.swarmId}: swarm turn budget used; no member is retried.`,
+        `Swarm ${swarm.swarmId}: swarm turn budget used; no member is retried.`,
       );
     }
     const target = input.target;
@@ -3359,16 +3408,21 @@ const make = Effect.gen(function* () {
       );
     }
     const settings = yield* readSettings;
-    const architect = yield* loadRuns(caller.threadId);
+    const architect = yield* loadRuns(swarm.parentThreadId);
     const anchor = architect.runs.find((run) => run.id === swarm.anchorRunId);
     if (anchor?.delegatedCompletion?.disposition !== "open") {
       return yield* failure(
         "invalid_request",
-        `The anchor turn of swarm ${input.swarmId} no longer admits members.`,
+        `The anchor turn of swarm ${swarm.swarmId} no longer admits members.`,
       );
     }
+    if (target !== undefined && resolver === undefined) {
+      return yield* failure("invalid_request", "A retry with a new target needs the swarm tools.");
+    }
     const resolved =
-      target === undefined ? undefined : yield* resolver.resolveTarget(architect, target);
+      target === undefined || resolver === undefined
+        ? undefined
+        : yield* resolver.resolveTarget(architect, target);
     yield* passLock.withPermits(1)(
       Effect.gen(function* () {
         const members = yield* store.listMembers(swarm.swarmId);
@@ -3379,7 +3433,7 @@ const make = Effect.gen(function* () {
           if (row === undefined) {
             return yield* failure(
               "invalid_request",
-              `Swarm ${input.swarmId} has no member '${key}'.`,
+              `Swarm ${swarm.swarmId} has no member '${key}'.`,
             );
           }
           if (row.status !== "failed" && row.status !== "cancelled") {
@@ -3466,12 +3520,6 @@ const make = Effect.gen(function* () {
       }),
     );
     yield* admitNow(swarm.swarmId, settings);
-    const updated = yield* store.getSwarm(swarm.swarmId);
-    return yield* swarmResult(
-      scope,
-      Option.getOrElse(updated, () => swarm),
-      [],
-    );
   });
 
   const FOLLOWUP_ALLOWED = (member: SwarmStore.SwarmMemberRecord) =>
@@ -4060,6 +4108,200 @@ const make = Effect.gen(function* () {
     },
   );
 
+  /** One member as the panel shows it; server state and its envelope's summary only. */
+  const memberView = Effect.fn("SwarmService.memberView")(function* (
+    member: SwarmStore.SwarmMemberRecord,
+  ) {
+    const spec = parseSpec(member.specJson);
+    const envelope = member.envelopeJson === null ? undefined : decodeEnvelope(member.envelopeJson);
+    // Approvals go to the user (D6): a launched, unfinished member may be waiting on one.
+    let waitingForApproval = false;
+    if (member.childThreadId !== null && !isFinalMemberStatus(member.status)) {
+      const child = yield* threads
+        .getThreadRecords(member.childThreadId, ["runtimeRequests"])
+        .pipe(Effect.option);
+      waitingForApproval =
+        Option.isSome(child) &&
+        child.value.runtimeRequests.some(
+          (request) => request.status === "pending" && request.kind !== "user_input",
+        );
+    }
+    const placed = optionFor(spec, member.providerInstanceId);
+    return {
+      key: member.memberKey,
+      title: spec.title,
+      status: member.status,
+      queueReason: member.queueReason,
+      providerInstanceId: member.providerInstanceId ?? rowInstanceId(spec),
+      model: placed.modelSelection.model,
+      runtimeMode: member.effectiveRuntimeMode ?? spec.runtimeCeiling,
+      interactionMode: member.effectiveInteractionMode ?? spec.interactionCeiling,
+      childThreadId: member.childThreadId,
+      attempt: member.attempt,
+      followups: member.followups,
+      autoRetried: member.autoRetries > 0,
+      failureClass: member.failureClass,
+      waitingForApproval,
+      stopGivenUp: abandonedStops.has(memberRef(member)),
+      hasVerify: spec.verifyArgv !== undefined,
+      ...(envelope?.verify === undefined
+        ? {}
+        : {
+            verify: {
+              passed: envelope.verify.passed,
+              attempts: envelope.verify.attempts,
+              timedOut: envelope.verify.timedOut,
+              ...(envelope.verify.notStarted === undefined
+                ? {}
+                : { notStarted: envelope.verify.notStarted }),
+            },
+          }),
+      ...(envelope?.verifySkipped === undefined ? {} : { verifySkipped: envelope.verifySkipped }),
+      ...(envelope === undefined || envelope.summary.length === 0
+        ? {}
+        : { summary: envelope.summary }),
+      startedAt: member.startedAt,
+      endedAt: member.endedAt,
+      turnsUsed: member.turnsUsed,
+    } satisfies SwarmMemberView;
+  });
+
+  /** The architect thread's swarms for its panel (SW-A10), newest first. */
+  const listForThread: SwarmService["Service"]["listForThread"] = Effect.fn(
+    "SwarmService.listForThread",
+  )(function* (threadId) {
+    const settings = yield* readSettings;
+    const caps = capsOf(settings);
+    const now = yield* nowIso;
+    const pauses = new Map(
+      (yield* store.listInstancePauses)
+        .filter((pause) => pause.until > now)
+        .map((pause) => [String(pause.providerInstanceId), pause]),
+    );
+    const notices = yield* store.listNotices(threadId);
+    const swarms = (yield* store.listSwarms({ parentThreadId: threadId }))
+      .toSorted((left, right) => right.createdAt.localeCompare(left.createdAt))
+      .slice(0, PANEL_MAX_SWARMS);
+    const views: Array<SwarmThreadView> = [];
+    for (const swarm of swarms) {
+      const members = yield* store.listMembers(swarm.swarmId);
+      const memberViews: Array<SwarmMemberView> = [];
+      for (const member of members) memberViews.push(yield* memberView(member));
+      const instances = new Map<string, { active: number; driver: SwarmMemberSpec["driver"] }>();
+      for (const member of members) {
+        const spec = parseSpec(member.specJson);
+        const instanceId = String(member.providerInstanceId ?? rowInstanceId(spec) ?? "");
+        if (instanceId === "") continue;
+        const entry = instances.get(instanceId) ?? { active: 0, driver: spec.driver };
+        if (SLOT_HOLDING.has(member.status)) entry.active += 1;
+        instances.set(instanceId, entry);
+      }
+      views.push({
+        swarmId: swarm.swarmId,
+        title: swarm.title,
+        status: swarm.status,
+        wakePolicy: swarm.wakePolicy,
+        budgetExhausted: swarm.budgetExhausted,
+        turnsUsed: members.reduce((total, member) => total + member.turnsUsed, 0),
+        maxTotalTurns: swarm.maxTotalTurns,
+        createdAt: swarm.createdAt,
+        members: memberViews,
+        instances: [...instances].map(([instanceId, entry]) => {
+          const pause = pauses.get(instanceId);
+          return {
+            id: ProviderInstanceId.make(instanceId),
+            active: entry.active,
+            cap: instanceCap(caps, instanceId, entry.driver),
+            ...(pause === undefined
+              ? {}
+              : { pausedUntil: pause.until, pauseClass: pause.pauseClass }),
+          };
+        }),
+        notices: notices
+          .filter((notice) => notice.swarmId === swarm.swarmId)
+          .map((notice) => ({
+            kind: notice.kind,
+            text: notice.text,
+            createdAt: notice.createdAt,
+            delivered: notice.deliveredAt !== null,
+          })),
+      });
+    }
+    return { swarms: views };
+  });
+
+  /**
+   * The user's actions from the panel (SW-A10), on a swarm of `threadId` only. Stop goes
+   * through stopMember without an agent's mode check (the user is not escalating); retry
+   * through the swarm_retry path.
+   */
+  const act: SwarmService["Service"]["act"] = Effect.fn("SwarmService.act")(function* (input) {
+    const found = yield* store.getSwarm(input.swarmId);
+    if (Option.isNone(found) || found.value.parentThreadId !== input.threadId) {
+      return yield* failure(
+        "capability_denied",
+        `Swarm ${input.swarmId} is not a swarm of this thread.`,
+      );
+    }
+    const swarm = found.value;
+    const settings = yield* readSettings;
+    yield* Effect.logInfo("swarm.panel-action", {
+      swarmId: swarm.swarmId,
+      action: input.action,
+      keys: input.keys?.length ?? 0,
+    });
+    if (input.action === "retry") {
+      const keys = input.keys ?? [];
+      if (keys.length === 0) return yield* failure("invalid_request", "Name members to retry.");
+      const retried = yield* retryMembers({
+        swarm,
+        keys,
+        target: undefined,
+        resolver: undefined,
+      }).pipe(Effect.result);
+      return Result.isSuccess(retried)
+        ? { done: [...keys], notDone: [] }
+        : { done: [], notDone: keys.map((key) => ({ key, message: retried.failure.message })) };
+    }
+    if (swarm.status === "detached") {
+      return yield* failure("invalid_request", `Swarm ${swarm.swarmId} is detached.`);
+    }
+    if (input.action === "stop" && (input.keys === undefined || input.keys.length === 0)) {
+      return yield* failure("invalid_request", "Name members to stop.");
+    }
+    const result = yield* cancelMembers({
+      swarm,
+      keys: input.action === "stop_all" ? undefined : input.keys,
+      architect: undefined,
+      settings,
+    });
+    yield* wake;
+    return {
+      done: result.cancelled,
+      notDone: result.notCancelled.map((entry) => ({ key: entry.key, message: entry.message })),
+    };
+  });
+
+  /** Counts per architect thread for the sidebar chip (SW-A10), active swarms only. */
+  const summaries: SwarmService["Service"]["summaries"] = Effect.gen(function* () {
+    const byThread = new Map<string, { running: number; queued: number; failed: number }>();
+    for (const swarm of yield* store.listSwarms({ statuses: ["active"] })) {
+      const entry = byThread.get(swarm.parentThreadId) ?? { running: 0, queued: 0, failed: 0 };
+      for (const member of yield* store.listMembers(swarm.swarmId)) {
+        if (SLOT_HOLDING.has(member.status) || member.status === "limit_wait") entry.running += 1;
+        else if (member.status === "queued") entry.queued += 1;
+        else if (member.status === "failed") entry.failed += 1;
+      }
+      byThread.set(swarm.parentThreadId, entry);
+    }
+    return {
+      summaries: [...byThread].map(([threadId, counts]) => ({
+        threadId: ThreadId.make(threadId),
+        ...counts,
+      })),
+    };
+  });
+
   const capacity: SwarmService["Service"]["capacity"] = Effect.gen(function* () {
     const settings = yield* readSettings;
     const caps = capsOf(settings);
@@ -4120,6 +4362,9 @@ const make = Effect.gen(function* () {
   });
 
   return SwarmService.of({
+    listForThread,
+    act,
+    summaries,
     capacity,
     create,
     addMembers,
