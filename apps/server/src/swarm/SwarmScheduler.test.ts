@@ -101,6 +101,19 @@ describe("planAdmissions", () => {
     expect(plan.queueReasons.get(memberRef(member(swarmA, 2)))).toBe("instance_cap:codex");
   });
 
+  it("holds a pinned member while its listed instance is unhealthy, not an unlisted one", () => {
+    const plan = planAdmissions({
+      swarms: [swarm(swarmA, now)],
+      members: [member(swarmA, 0), member(swarmA, 1, { providerInstanceId: "unlisted" })],
+      caps,
+      pauses: new Map(),
+      now,
+      unhealthy: new Set(["codex"]),
+    });
+    expect(keys(plan.admit)).toEqual(["swarm:a/m1"]);
+    expect(plan.queueReasons.get(memberRef(member(swarmA, 0)))).toBe("instance_unhealthy:codex");
+  });
+
   it("holds an automatic retry until its retry_after time (SW-A8)", () => {
     const later = "2026-11-04T12:00:45.000Z";
     const plan = planAdmissions({
