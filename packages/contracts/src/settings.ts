@@ -1248,6 +1248,18 @@ export const ServerSettings = Schema.Struct({
   swarmInstanceCaps: Schema.Record(Schema.String, SwarmCapSetting).pipe(
     Schema.withDecodingDefault(Effect.succeed({})),
   ),
+  /** Swarm v2: paths that count as test files in a member's result (`testFilesChanged`). */
+  swarmTestPathGlobs: Schema.Array(TrimmedNonEmptyString).pipe(
+    Schema.withDecodingDefault(
+      Effect.succeed([
+        "**/*.test.*",
+        "**/*.spec.*",
+        "**/test/**",
+        "**/tests/**",
+        "**/__tests__/**",
+      ]),
+    ),
+  ),
   sidebarAutoSettleKeepPullRequests: Schema.Boolean.pipe(
     Schema.withDecodingDefault(Effect.succeed(false)),
   ),
@@ -1602,6 +1614,7 @@ export const ServerSettingsPatch = Schema.Struct({
   swarmMaxConcurrent: Schema.optionalKey(SwarmCapSetting),
   swarmMaxConcurrentPerInstance: Schema.optionalKey(SwarmCapSetting),
   swarmInstanceCaps: Schema.optionalKey(Schema.Record(Schema.String, SwarmCapSetting)),
+  swarmTestPathGlobs: Schema.optionalKey(Schema.Array(TrimmedNonEmptyString)),
   backgroundActivity: Schema.optionalKey(
     Schema.Struct({
       schemaVersion: Schema.optionalKey(Schema.Literal(1)),

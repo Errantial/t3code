@@ -327,3 +327,61 @@ export const serialInstanceWarnings = (input: {
     message: `Members on instance ${instanceId} run one at a time.`,
   }));
 };
+
+/** Statuses a member is released with: final, and not detached from the swarm. */
+const RELEASABLE: ReadonlySet<SwarmMemberStatus> = new Set([
+  "claimed_done",
+  "verified",
+  "failed",
+  "cancelled",
+]);
+
+/**
+ * Final, unreleased members whose wake policy lets them wake the architect now (SW-A5):
+ * `group` each as it ends; `failure` failures at once and the rest at the end; `batch` together
+ * at `minCount`, after `maxWaitMs` for the oldest, or when no member is left non-final.
+ */
+export const readyForRelease = <
+  Member extends {
+    readonly status: SwarmMemberStatus;
+    readonly released: boolean;
+    readonly taskId: string | null;
+    readonly envelopeJson: string | null;
+    readonly endedAt: string | null;
+    readonly updatedAt: string;
+  },
+>(input: {
+  readonly wakePolicy: "group" | "failure" | "batch";
+  readonly wakeBatch: {
+    readonly minCount?: number | undefined;
+    readonly maxWaitMs?: number | undefined;
+  };
+  readonly members: ReadonlyArray<Member>;
+  readonly nowMillis: number;
+}): ReadonlyArray<Member> => {
+  const waiting = input.members.filter(
+    (member) =>
+      RELEASABLE.has(member.status) &&
+      !member.released &&
+      member.taskId !== null &&
+      member.envelopeJson !== null,
+  );
+  if (waiting.length === 0) return [];
+  const allFinal = input.members.every((member) => isFinalMemberStatus(member.status));
+  switch (input.wakePolicy) {
+    case "group":
+      return waiting;
+    case "failure":
+      return allFinal ? waiting : waiting.filter((member) => member.status === "failed");
+    case "batch": {
+      const oldest = Math.min(
+        ...waiting.map((member) => Date.parse(member.endedAt ?? member.updatedAt)),
+      );
+      return allFinal ||
+        waiting.length >= (input.wakeBatch.minCount ?? 4) ||
+        input.nowMillis - oldest >= (input.wakeBatch.maxWaitMs ?? 120_000)
+        ? waiting
+        : [];
+    }
+  }
+};
