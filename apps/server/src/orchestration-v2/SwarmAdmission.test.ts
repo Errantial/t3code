@@ -4064,6 +4064,39 @@ it.layer(layerSwarm)("status, cancel, retry, collect, and follow-up (SW-A7)", (i
     }),
   );
 
+  it.effect("a Stop after completion cancels the swarm and refuses follow-ups", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const swarms = yield* SwarmService.SwarmService;
+      const store = yield* SwarmStore.SwarmStore;
+      const { threadId, anchor } = yield* seedArchitect("a7-stop-completed");
+      const result = yield* createSwarm(threadId, {
+        members: members(1, { interactionMode: "plan" }),
+      });
+      yield* endRun({ threadId, runId: anchor.id });
+      yield* finishRow(threadId, (yield* rows(result.swarmId))[0]!, resultText({ summary: "x" }));
+      yield* swarms.tick;
+      yield* drainWakes(threadId, anchor.id);
+      yield* swarms.tick;
+      assert.equal(Option.getOrThrow(yield* store.getSwarm(result.swarmId)).status, "completed");
+      yield* orchestrator.dispatch({
+        type: "thread.stop",
+        commandId: CommandId.make("command:a7-stop-completed"),
+        threadId,
+      });
+      const refused = yield* followupIn(threadId, {
+        swarmId: result.swarmId,
+        key: "m0",
+        message: "More.",
+      }).pipe(Effect.flip);
+      assert.equal(refused.code, "invalid_request");
+      assert.include(refused.message, "no longer admits work");
+      yield* swarms.tick;
+      assert.equal(Option.getOrThrow(yield* store.getSwarm(result.swarmId)).status, "cancelled");
+      yield* retire(result.swarmId);
+    }),
+  );
+
   it.effect("a follow-up on an unreleased member replaces its envelope, with no note", () =>
     Effect.gen(function* () {
       const orchestrator = yield* Orchestrator.OrchestratorV2;

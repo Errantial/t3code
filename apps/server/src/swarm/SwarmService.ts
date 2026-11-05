@@ -1862,7 +1862,10 @@ const make = Effect.gen(function* () {
         // Cancelled and detached swarms are followed until their launched members end:
         // cancelled ones still hold slots and release while their anchor is open, detached
         // ones only collect envelopes.
-        const swarms = yield* store.listSwarms({ statuses: ["active", "cancelled", "detached"] });
+        // A completed swarm is listed too, so a Stop or detach after completion is noticed.
+        const swarms = yield* store.listSwarms({
+          statuses: ["active", "completed", "cancelled", "detached"],
+        });
         const membersBySwarm = new Map<string, ReadonlyArray<SwarmStore.SwarmMemberRecord>>();
         const architects = new Map<
           string,
@@ -1871,6 +1874,19 @@ const make = Effect.gen(function* () {
         const admits = new Map<string, boolean>();
         const watched = new Set<string>();
         for (const swarm of swarms) {
+          if (swarm.status === "completed") {
+            const architect = yield* loadRuns(swarm.parentThreadId).pipe(Effect.option);
+            const state = anchorStateOf(swarm, architect);
+            if (state === "stopped" || state === "detached" || state === "closed_thread") {
+              yield* closeSwarm(
+                swarm,
+                yield* store.listMembers(swarm.swarmId),
+                state,
+                settings,
+              ).pipe(logged("swarm.close-error", { swarmId: swarm.swarmId }));
+            }
+            continue;
+          }
           let members = yield* store.listMembers(swarm.swarmId);
           const followed = (member: SwarmStore.SwarmMemberRecord) =>
             !isFinalMemberStatus(member.status) ||
@@ -2883,6 +2899,18 @@ const make = Effect.gen(function* () {
         return yield* failure(
           "invalid_request",
           `Swarm ${input.swarmId} used its turn budget; its members take no follow-ups.`,
+        );
+      }
+      // As swarm_retry: a follow-up needs the anchor cohort still open (not stopped or
+      // detached), or its result could never be delivered.
+      const architect = yield* loadRuns(swarm.parentThreadId);
+      if (
+        architect.runs.find((run) => run.id === swarm.anchorRunId)?.delegatedCompletion
+          ?.disposition !== "open"
+      ) {
+        return yield* failure(
+          "invalid_request",
+          `The anchor turn of swarm ${input.swarmId} no longer admits work.`,
         );
       }
       const requestKey =
