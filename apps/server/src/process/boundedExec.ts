@@ -261,56 +261,68 @@ export const startBounded = (
     catch: () => new BoundedExecSpawnError(),
   });
 
+/** Runs a short command without blocking the event loop; `undefined` when it fails. */
+const capture = (command: string, args: ReadonlyArray<string>): Effect.Effect<string | undefined> =>
+  Effect.callback<string | undefined>((resume) => {
+    const child = NodeChildProcess.execFile(
+      command,
+      [...args],
+      { windowsHide: true, encoding: "utf8", timeout: 15_000 },
+      (error, stdout) => resume(Effect.succeed(error === null ? stdout : undefined)),
+    );
+    return Effect.sync(() => {
+      child.kill();
+    });
+  });
+
 /** When the OS started `pid` (epoch ms), or undefined when it is not running or unreadable. */
-const processStartMs = (pid: number, platform: NodeJS.Platform): number | undefined => {
-  const read =
-    platform === "win32"
-      ? NodeChildProcess.spawnSync(
-          "powershell",
-          [
-            "-NoProfile",
-            "-NonInteractive",
-            "-Command",
-            `(Get-Process -Id ${pid} -ErrorAction Stop).StartTime.ToUniversalTime().ToString('o')`,
-          ],
-          { windowsHide: true, encoding: "utf8", timeout: 15_000 },
-        )
-      : NodeChildProcess.spawnSync("ps", ["-o", "lstart=", "-p", String(pid)], {
-          encoding: "utf8",
-          timeout: 15_000,
-        });
-  if (read.status !== 0) return undefined;
-  const started = Date.parse(read.stdout.trim());
-  return Number.isFinite(started) ? started : undefined;
-};
+const processStartMs = (
+  pid: number,
+  platform: NodeJS.Platform,
+): Effect.Effect<number | undefined> =>
+  (platform === "win32"
+    ? capture("powershell", [
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        `(Get-Process -Id ${pid} -ErrorAction Stop).StartTime.ToUniversalTime().ToString('o')`,
+      ])
+    : capture("ps", ["-o", "lstart=", "-p", String(pid)])
+  ).pipe(
+    Effect.map((stdout) => {
+      if (stdout === undefined) return undefined;
+      const started = Date.parse(stdout.trim());
+      return Number.isFinite(started) ? started : undefined;
+    }),
+  );
 
 /**
- * Kills a process tree left by an earlier server process, but only if `pid` still names the
- * process started at `startedAtMs` (within 5 s), so a reused pid is never killed.
+ * Kills a process tree left by an earlier server process, without blocking, only if `pid` still
+ * names the process started at `startedAtMs` (within 5 s). Not reached: on Windows a descendant
+ * whose parent exited; on POSIX a group whose leader exited.
  */
-export const killStaleTree = (input: {
+export const killStaleTree = Effect.fn("BoundedExec.killStaleTree")(function* (input: {
   readonly pid: number;
   readonly startedAtMs: number;
   readonly platform: NodeJS.Platform;
-}): Effect.Effect<boolean> =>
-  Effect.sync(() => {
-    const started = processStartMs(input.pid, input.platform);
-    if (started === undefined || Math.abs(started - input.startedAtMs) > 5_000) return false;
-    if (input.platform === "win32") {
-      NodeChildProcess.spawnSync("taskkill", ["/PID", String(input.pid), "/T", "/F"], {
-        windowsHide: true,
-        stdio: "ignore",
-      });
-      return true;
-    }
+}) {
+  const started = yield* processStartMs(input.pid, input.platform);
+  if (started === undefined || Math.abs(started - input.startedAtMs) > 5_000) return false;
+  if (input.platform === "win32") {
+    return (yield* capture("taskkill", ["/PID", String(input.pid), "/T", "/F"])) !== undefined;
+  }
+  return yield* Effect.sync(() => {
     try {
+      // The verify command was spawned detached: its pid leads its process group.
       process.kill(-input.pid, "SIGKILL");
+      return true;
     } catch {
       try {
         process.kill(input.pid, "SIGKILL");
+        return true;
       } catch {
         return false;
       }
     }
-    return true;
   });
+});
