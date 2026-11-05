@@ -30,7 +30,10 @@ import { withWorkspaceLease } from "../workspace/workspaceLease.ts";
 import { InstructionStore } from "../instructions/InstructionStore.ts";
 import { makeInstructionTurnContextContributor } from "../instructions/instructionTurnContext.ts";
 import * as SwarmStore from "../swarm/SwarmStore.ts";
-import { makeSwarmSharedContributor } from "../swarm/swarmTurnContext.ts";
+import {
+  makeSwarmMemberContributor,
+  makeSwarmSharedContributor,
+} from "../swarm/swarmTurnContext.ts";
 import { buildTurnContext } from "@t3tools/provider-core/server/turnContext";
 import * as GitWorkflowService from "../git/GitWorkflowService.ts";
 import * as ProjectService from "../project/ProjectService.ts";
@@ -164,11 +167,16 @@ export const layer: Layer.Layer<
     const runtimePolicy = yield* RuntimePolicy.RuntimePolicyV2;
     const instructionStore = new InstructionStore(path.join(config.baseDir, "instructions"));
     const instructionContributor = makeInstructionTurnContextContributor(instructionStore);
-    // Swarm v2 members also get the architect's shared fields (SW-A3c); optional so runtimes
+    // Swarm v2 members also get their contract (SW-A4) and the architect's shared fields
+    // (SW-A3c); optional so runtimes
     // without the swarm store keep today's context exactly.
     const swarmStore = yield* Effect.serviceOption(SwarmStore.SwarmStore);
     const turnContextContributors = Option.isSome(swarmStore)
-      ? [instructionContributor, makeSwarmSharedContributor(swarmStore.value)]
+      ? [
+          makeSwarmMemberContributor(swarmStore.value),
+          instructionContributor,
+          makeSwarmSharedContributor(swarmStore.value),
+        ]
       : [instructionContributor];
     const isManagedWorktreePath = yield* makeIsManagedWorktreePath;
 

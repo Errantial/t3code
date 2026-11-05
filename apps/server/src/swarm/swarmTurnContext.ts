@@ -10,8 +10,14 @@ import * as Schema from "effect/Schema";
 import type * as SwarmStore from "./SwarmStore.ts";
 import type { SwarmMemberSpec } from "./swarmPlanning.ts";
 
-// Swarm v2 turn context (SW-A3c). `swarm_shared` carries what the architect wrote for every
-// member: model-written, so untrusted. Its text is never logged.
+// Swarm v2 turn context. `swarm_member` (SW-A4) is the server's contract with a member:
+// trusted, server-authored text only, at priority 95 so the total budget never cuts it.
+// `swarm_shared` (SW-A3c) carries what the architect wrote for every member: model-written,
+// so untrusted. Neither text is logged.
+
+const SWARM_MEMBER_KEY = "swarm_member";
+const SWARM_MEMBER_PRIORITY = 95;
+const SWARM_MEMBER_MAX_BYTES = 2_048;
 
 const SWARM_SHARED_KEY = "swarm_shared";
 const SWARM_SHARED_PRIORITY = 105;
@@ -60,6 +66,75 @@ const buildEntry = Effect.fn("SwarmTurnContext.buildShared")(function* (
   return text === undefined
     ? undefined
     : ({ key: SWARM_SHARED_KEY, trust: "untrusted", text } satisfies TurnContextEntry);
+});
+
+/** The block a member ends its final message with; SW-A5 parses the last one. */
+const SWARM_RESULT_FENCE = "t3-swarm-result";
+
+/** Server-authored only: nothing here comes from the architect or a member. */
+export const formatSwarmMember = (input: {
+  readonly planning: boolean;
+  readonly verifies: boolean;
+  readonly allowNestedSwarm: boolean;
+  readonly hasDataShape: boolean;
+}): string =>
+  [
+    "You are a member of a T3 swarm. Your task is your first message, and the swarm context holds what the architect shared with every member.",
+    ...(input.planning
+      ? ["You are a planning member: investigate and report; do not edit files."]
+      : []),
+    ...(input.verifies
+      ? [
+          "The server runs your verify command after you finish; the command is in the swarm context.",
+        ]
+      : []),
+    input.allowNestedSwarm
+      ? "You may start a swarm of your own for this task."
+      : "Do not start a swarm of your own; delegate_task is fine.",
+    ...(input.hasDataShape
+      ? [
+          "Put your findings in `data`, shaped as described in the swarm context. Keep `data` under 8 KB of JSON.",
+        ]
+      : []),
+    "End your final message with:",
+    "```" + SWARM_RESULT_FENCE,
+    '{"summary": "...", "decisions": ["..."], "assumptions": ["..."], "data": <optional JSON>}',
+    "```",
+  ].join("\n");
+
+const buildMemberEntry = Effect.fn("SwarmTurnContext.buildMember")(function* (
+  store: SwarmStore.SwarmStore["Service"],
+  threadId: string,
+) {
+  const member = yield* store.findMemberByChildThread(ThreadId.make(threadId));
+  if (Option.isNone(member)) return undefined;
+  const swarm = yield* store.getSwarm(member.value.swarmId);
+  const spec = decodeSpec(member.value.specJson);
+  if (Option.isNone(swarm) || Option.isNone(spec)) return undefined;
+  const memberSpec = spec.value as SwarmMemberSpec;
+  const interactionMode = member.value.effectiveInteractionMode ?? memberSpec.interactionCeiling;
+  return {
+    key: SWARM_MEMBER_KEY,
+    trust: "trusted",
+    text: formatSwarmMember({
+      planning: interactionMode === "plan",
+      verifies: memberSpec.verifyArgv !== undefined,
+      allowNestedSwarm: memberSpec.allowNestedSwarm === true,
+      hasDataShape: swarm.value.dataShape !== null,
+    }),
+  } satisfies TurnContextEntry;
+});
+
+/** The member contract; non-members get no entry. */
+export const makeSwarmMemberContributor = (
+  store: SwarmStore.SwarmStore["Service"],
+): TurnContextContributor<{ readonly threadId: string }> => ({
+  key: SWARM_MEMBER_KEY,
+  trust: "trusted",
+  priority: SWARM_MEMBER_PRIORITY,
+  maxBytes: SWARM_MEMBER_MAX_BYTES,
+  build: (turn): Effect.Effect<TurnContextEntry | undefined> =>
+    buildMemberEntry(store, turn.threadId).pipe(Effect.orElseSucceed(() => undefined)),
 });
 
 /** Reads the turn's thread as a swarm member; non-members get no entry. */
