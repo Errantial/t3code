@@ -53,20 +53,53 @@ const VERIFY_ENV_NAMES: ReadonlySet<string> = new Set(
     "LANGUAGE",
     "TERM",
     "TZ",
+    // Toolchain homes.
+    "CARGO_HOME",
+    "RUSTUP_HOME",
+    "RUSTUP_TOOLCHAIN",
+    "GOPATH",
+    "GOROOT",
+    "GOCACHE",
+    "JAVA_HOME",
+    "VIRTUAL_ENV",
+    "CONDA_PREFIX",
+    "PYTHONPATH",
+    "PNPM_HOME",
+    "COREPACK_HOME",
+    "NVM_DIR",
+    // Proxies and certificates.
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "NO_PROXY",
+    "SSL_CERT_FILE",
+    "NODE_EXTRA_CA_CERTS",
+    // Windows.
+    "ALLUSERSPROFILE",
+    "PUBLIC",
+    "PROGRAMW6432",
+    "COMMONPROGRAMW6432",
+    "PSMODULEPATH",
+    "USERDOMAIN",
   ].map((name) => name.toUpperCase()),
 );
 
 /** The allowlisted variables, plus `LC_*`; names compare case-insensitively (Windows). */
 export const verifyEnvironment = (
   source: Readonly<Record<string, string | undefined>>,
-): Record<string, string> =>
-  Object.fromEntries(
+  extraNames: ReadonlyArray<string> = [],
+): Record<string, string> => {
+  const extra = new Set(extraNames.map((name) => name.toUpperCase()));
+  return Object.fromEntries(
     Object.entries(source).filter(
       (entry): entry is [string, string] =>
         entry[1] !== undefined &&
-        (VERIFY_ENV_NAMES.has(entry[0].toUpperCase()) || entry[0].toUpperCase().startsWith("LC_")),
+        (VERIFY_ENV_NAMES.has(entry[0].toUpperCase()) ||
+          extra.has(entry[0].toUpperCase()) ||
+          entry[0].toUpperCase().startsWith("LC_") ||
+          entry[0].toUpperCase().startsWith("XDG_")),
     ),
   );
+};
 
 export interface SwarmVerifyOutcome {
   readonly passed: boolean;
@@ -100,6 +133,8 @@ export class SwarmVerifier extends Context.Service<
       readonly timeoutMs: number;
       /** Called once the process exists, so its pid can be persisted. */
       readonly onStarted?: (process: VerifyProcess) => void;
+      /** More variable names to pass through (the `swarmVerifyEnv` setting for the project). */
+      readonly extraEnvNames?: ReadonlyArray<string>;
     }) => Effect.Effect<SwarmVerifyOutcome>;
     /** Kills a check's process tree left by an earlier server process, if it is still that one. */
     readonly killStale: (process: VerifyProcess) => Effect.Effect<boolean>;
@@ -137,7 +172,7 @@ const make = Effect.gen(function* () {
     BoundedExec.startBounded({
       argv: input.argv,
       cwd: input.cwd,
-      env: { ...verifyEnvironment(process.env), CI: "1" },
+      env: { ...verifyEnvironment(process.env, input.extraEnvNames), CI: "1" },
       inheritEnv: false,
       timeoutMs: input.timeoutMs,
       maxOutputBytes: VERIFY_STREAM_TAIL_BYTES,

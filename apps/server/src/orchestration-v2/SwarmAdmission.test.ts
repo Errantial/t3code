@@ -1418,6 +1418,8 @@ const verifyScript: Array<
   | { readonly hold: Deferred.Deferred<SwarmVerifier.SwarmVerifyOutcome> }
 > = [];
 let verifyKills = 0;
+/** The extra environment names the latest check was given (`swarmVerifyEnv`). */
+let lastVerifyEnvNames: ReadonlyArray<string> = [];
 /** Processes the fake was asked to kill as left by an earlier server process. */
 const staleKills: Array<SwarmVerifier.VerifyProcess> = [];
 /** Each call completes the oldest waiter: a milestone for a check that starts later. */
@@ -1449,6 +1451,7 @@ const layerFakeVerifier = Layer.succeed(
       Effect.suspend(() => {
         input.onStarted?.({ pid: 4242, startedAtMs: 1_000 });
         verifyCalls.push({ argv: input.argv, cwd: input.cwd });
+        lastVerifyEnvNames = input.extraEnvNames ?? [];
         const waiter = verifyCallWaiters.shift();
         if (waiter !== undefined) Deferred.doneUnsafe(waiter, Effect.void);
         const next = verifyScript.shift() ?? verifyPass;
@@ -3301,6 +3304,30 @@ it.layer(layerSwarm)("verify (SW-A6)", (it) => {
       assert.equal(task?.completionWake, "always");
       assert.include(task?.completionDetail ?? "", `"verify":{"passed":true`);
       assert.isTrue((yield* rows(result.swarmId))[0]!.released);
+      yield* retire(result.swarmId);
+    }),
+  );
+
+  it.effect("passes the project's swarmVerifyEnv names to the check", () =>
+    Effect.gen(function* () {
+      const settings = yield* ServerSettings.ServerSettingsService;
+      resetVerify();
+      yield* settings.updateSettings({
+        swarmVerifyEnv: {
+          "*": ["ALL_PROJECTS"],
+          "project:a6-env": ["THIS_PROJECT"],
+          other: ["NO"],
+        },
+      });
+      const { threadId, anchor } = yield* seedArchitect("a6-env");
+      const result = yield* createSwarm(threadId, {
+        members: verifyMembers(1, { argv: ["pnpm", "test"] }),
+      });
+      yield* endRun({ threadId, runId: anchor.id });
+      yield* finishRow(threadId, (yield* rows(result.swarmId))[0]!, "m0 done");
+      yield* afterPasses(result.swarmId, "m0", 2);
+      assert.deepEqual(lastVerifyEnvNames, ["ALL_PROJECTS", "THIS_PROJECT"]);
+      yield* settings.updateSettings({ swarmVerifyEnv: {} });
       yield* retire(result.swarmId);
     }),
   );

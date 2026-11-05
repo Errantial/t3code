@@ -1259,6 +1259,13 @@ export const ServerSettings = Schema.Struct({
   swarmInstanceCaps: Schema.Record(Schema.String, SwarmCapSetting).pipe(
     Schema.withDecodingDefault(Effect.succeed({})),
   ),
+  /**
+   * Swarm v2: more environment variable names a verify command may see, by project id (`*` for
+   * every project). Verify otherwise gets only an allowlist of the server's environment.
+   */
+  swarmVerifyEnv: Schema.Record(Schema.String, Schema.Array(TrimmedNonEmptyString)).pipe(
+    Schema.withDecodingDefault(Effect.succeed({})),
+  ),
   /** Swarm v2: retry a member once, after a backoff, when its run fails on a transient error. */
   swarmAutoRetryTransient: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
   /** Swarm v2: turns per member when the member sets none; a member value can only lower it. */
@@ -1648,6 +1655,9 @@ export const ServerSettingsPatch = Schema.Struct({
   swarmMaxConcurrent: Schema.optionalKey(SwarmCapSetting),
   swarmMaxConcurrentPerInstance: Schema.optionalKey(SwarmCapSetting),
   swarmInstanceCaps: Schema.optionalKey(Schema.Record(Schema.String, SwarmCapSetting)),
+  swarmVerifyEnv: Schema.optionalKey(
+    Schema.Record(Schema.String, Schema.Array(TrimmedNonEmptyString)),
+  ),
   swarmAutoRetryTransient: Schema.optionalKey(Schema.Boolean),
   swarmDefaultMaxTurns: Schema.optionalKey(SwarmTurnsSetting),
   swarmDefaultMaxWallClockMs: Schema.optionalKey(SwarmWallClockSetting),
