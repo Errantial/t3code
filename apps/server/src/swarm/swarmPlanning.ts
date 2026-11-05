@@ -40,6 +40,8 @@ export interface SwarmMemberSpec {
   readonly priorTurns?: number;
   /** SW-A9: when the latest follow-up was sent; the wall clock restarts there. */
   readonly followupStartedAt?: string;
+  /** When the current attempt was queued again (a retry); queue wait counts from here. */
+  readonly requeuedAt?: string;
   /** swarm_retry: the previous attempt's result, wrapped as data, put before the task. */
   readonly previousAttempt?: string;
   /** swarm_followup: the latest follow-up's text and request key, for re-dispatch and replays. */

@@ -6,6 +6,7 @@ import {
   MessageId,
   OrchestratorMcpFailure,
   type OrchestrationV2Command,
+  type OrchestratorMcpSwarmCapacity,
   type OrchestrationV2Run,
   type ProviderInteractionMode,
   type RuntimeMode,
@@ -171,6 +172,8 @@ export class SwarmService extends Context.Service<
       readonly memberKey: string;
       readonly followup: number;
     }) => Effect.Effect<void, OrchestratorMcpFailure>;
+    /** orchestrator_capabilities' `swarm`: caps, live slots and queues, and counters. */
+    readonly capacity: Effect.Effect<OrchestratorMcpSwarmCapacity, OrchestratorMcpFailure>;
     /** One scheduler pass: reconcile launched members, then admit what the caps allow. */
     readonly tick: Effect.Effect<void>;
     /** Asks the scheduler for a pass soon. */
@@ -209,7 +212,7 @@ const requeuePatch = (
   next: SwarmMemberSpec,
   now: string,
 ): SwarmStore.SwarmMemberPatch => ({
-  specJson: encodeSpecJson({ ...next, priorTurns: row.turnsUsed }),
+  specJson: encodeSpecJson({ ...next, priorTurns: row.turnsUsed, requeuedAt: now }),
   status: "queued",
   queueReason: null,
   attempt: row.attempt + 1,
@@ -417,6 +420,37 @@ const make = Effect.gen(function* () {
   const stopAttempts = new Map<string, number>();
   const abandonedStops = new Set<string>();
   const wakes = yield* Queue.sliding<void>(1);
+  // Per-instance counters since this process started (SW-A8 instrumentation; counts only).
+  const statsSince = DateTime.formatIso(yield* DateTime.now);
+  const instanceStats = new Map<
+    string,
+    {
+      admitted: number;
+      finished: number;
+      failedByClass: Record<string, number>;
+      queueWaitTotalMs: number;
+    }
+  >();
+  const statsOf = (instanceId: string) => {
+    const known = instanceStats.get(instanceId);
+    if (known !== undefined) return known;
+    const fresh = {
+      admitted: 0,
+      finished: 0,
+      failedByClass: {} as Record<string, number>,
+      queueWaitTotalMs: 0,
+    };
+    instanceStats.set(instanceId, fresh);
+    return fresh;
+  };
+  const recordFailed = (instanceId: string | null, failureClass: string) => {
+    if (instanceId === null) return;
+    const stats = statsOf(instanceId);
+    stats.failedByClass[failureClass] = (stats.failedByClass[failureClass] ?? 0) + 1;
+  };
+  const recordFinished = (instanceId: string | null) => {
+    if (instanceId !== null) statsOf(instanceId).finished += 1;
+  };
 
   const nowIso = DateTime.now.pipe(Effect.map(DateTime.formatIso));
 
@@ -492,6 +526,7 @@ const make = Effect.gen(function* () {
         : [],
     )[0];
     if (task === undefined || task.childThreadId === null) {
+      recordFailed(option.modelSelection.instanceId, "launch");
       const kind = Result.isFailure(dispatched) ? failureKindOf(dispatched.failure) : "unknown";
       admissionFailures.set(memberRef(member), kind);
       yield* Effect.logWarning("swarm.admission-failed", {
@@ -516,6 +551,12 @@ const make = Effect.gen(function* () {
       return;
     }
     const childThreadId = task.childThreadId;
+    const admitted = statsOf(option.modelSelection.instanceId);
+    admitted.admitted += 1;
+    admitted.queueWaitTotalMs += Math.max(
+      0,
+      Date.parse(endedAt) - Date.parse(parseSpec(member.specJson).requeuedAt ?? member.queuedAt),
+    );
     const childRun = events.flatMap((stored) =>
       stored.event.type === "run.created" && stored.event.threadId === childThreadId
         ? [stored.event.payload]
@@ -930,6 +971,7 @@ const make = Effect.gen(function* () {
         updatedAt,
       },
     });
+    recordFinished(input.member.providerInstanceId);
     yield* Effect.logInfo("swarm.verify-skipped", {
       swarmId: input.swarm.swarmId,
       memberKey: input.member.memberKey,
@@ -1023,6 +1065,8 @@ const make = Effect.gen(function* () {
           }
         : {}),
     });
+    if (status === "verified") recordFinished(member.providerInstanceId);
+    if (status === "failed") recordFailed(member.providerInstanceId, "verify");
     yield* Effect.logInfo("swarm.verify", {
       swarmId: input.swarmId,
       memberKey: input.memberKey,
@@ -1392,6 +1436,7 @@ const make = Effect.gen(function* () {
         return paused;
       }),
     );
+    recordFailed(instanceId, failureClass);
     yield* Effect.logInfo("swarm.member-failed", { ...ids, autoRetry: retry });
     if (pausedUntil !== undefined && instanceId !== null) {
       yield* instanceDownNotes(String(instanceId), pausedUntil).pipe(
@@ -1579,6 +1624,7 @@ const make = Effect.gen(function* () {
         updatedAt,
       },
     });
+    if (ended === "claimed_done") recordFinished(member.providerInstanceId);
   });
 
   /**
@@ -3962,7 +4008,67 @@ const make = Effect.gen(function* () {
     },
   );
 
+  const capacity: SwarmService["Service"]["capacity"] = Effect.gen(function* () {
+    const settings = yield* readSettings;
+    const caps = capsOf(settings);
+    const now = yield* nowIso;
+    const nowMs = Date.parse(now);
+    const live = new Map<
+      string,
+      { active: number; queued: number; driver?: SwarmMemberSpec["driver"] }
+    >();
+    for (const swarm of yield* store.listSwarms({ statuses: ["active", "cancelled"] })) {
+      for (const member of yield* store.listMembers(swarm.swarmId)) {
+        const spec = parseSpec(member.specJson);
+        const instanceId = String(
+          member.providerInstanceId ??
+            spec.anyOf?.[0]?.modelSelection.instanceId ??
+            spec.modelSelection.instanceId,
+        );
+        const entry = live.get(instanceId) ?? { active: 0, queued: 0, driver: spec.driver };
+        if (SLOT_HOLDING.has(member.status) || member.status === "limit_wait") entry.active += 1;
+        if (member.status === "queued") entry.queued += 1;
+        live.set(instanceId, entry);
+      }
+    }
+    const pauses = new Map(
+      (yield* store.listInstancePauses)
+        .filter((pause) => pause.until > now)
+        .map((pause) => [String(pause.providerInstanceId), pause]),
+    );
+    const ids = [
+      ...new Set([...live.keys(), ...instanceStats.keys(), ...pauses.keys()]),
+    ].toSorted();
+    const hours = Math.max(nowMs - Date.parse(statsSince), 60_000) / 3_600_000;
+    return {
+      caps: { global: caps.global, perInstance: caps.perInstance },
+      since: statsSince,
+      instances: ids.map((instanceId) => {
+        const counted = instanceStats.get(instanceId);
+        const pause = pauses.get(instanceId);
+        return {
+          providerInstanceId: ProviderInstanceId.make(instanceId),
+          active: live.get(instanceId)?.active ?? 0,
+          queued: live.get(instanceId)?.queued ?? 0,
+          cap: instanceCap(caps, instanceId, live.get(instanceId)?.driver),
+          ...(pause === undefined
+            ? {}
+            : { pausedUntil: pause.until, pauseClass: pause.pauseClass }),
+          admitted: counted?.admitted ?? 0,
+          queueWaitMsAvg:
+            counted === undefined || counted.admitted === 0
+              ? null
+              : Math.round(counted.queueWaitTotalMs / counted.admitted),
+          finished: counted?.finished ?? 0,
+          failedByClass: { ...counted?.failedByClass },
+          throughputPerHour: Math.round(((counted?.finished ?? 0) / hours) * 100) / 100,
+        };
+      }),
+    };
+  });
+
   return SwarmService.of({
+    capacity,
     create,
     addMembers,
     status,

@@ -782,8 +782,37 @@ export const OrchestratorMcpCapabilitiesResult = Schema.Struct({
   contracts: Schema.optional(Schema.Array(Schema.String)),
   /** What this link may run here. Absent on older peers; then only orchestration is offered. */
   remoteExecution: Schema.optional(PeerExecGrant),
+  /** Swarm v2 only, while its Labs setting is on: caps and per-instance counters. */
+  swarm: Schema.optional(Schema.suspend(() => OrchestratorMcpSwarmCapacity)),
 });
 export type OrchestratorMcpCapabilitiesResult = typeof OrchestratorMcpCapabilitiesResult.Type;
+
+/**
+ * One provider instance as Swarm v2 sees it: live slots and queue, its pause, and counters since
+ * `since` (server start): admissions, the average queue wait, finished members, failures by class.
+ */
+export const OrchestratorMcpSwarmInstanceStats = Schema.Struct({
+  providerInstanceId: ProviderInstanceId,
+  active: NonNegativeInt,
+  queued: NonNegativeInt,
+  cap: NonNegativeInt,
+  pausedUntil: Schema.optional(Schema.String),
+  pauseClass: Schema.optional(Schema.String),
+  admitted: NonNegativeInt,
+  queueWaitMsAvg: Schema.NullOr(Schema.Number),
+  finished: NonNegativeInt,
+  failedByClass: Schema.Record(Schema.String, NonNegativeInt),
+  /** Finished members per hour since `since`. */
+  throughputPerHour: Schema.Number,
+});
+export type OrchestratorMcpSwarmInstanceStats = typeof OrchestratorMcpSwarmInstanceStats.Type;
+
+export const OrchestratorMcpSwarmCapacity = Schema.Struct({
+  caps: Schema.Struct({ global: NonNegativeInt, perInstance: NonNegativeInt }),
+  since: Schema.String,
+  instances: Schema.Array(OrchestratorMcpSwarmInstanceStats),
+});
+export type OrchestratorMcpSwarmCapacity = typeof OrchestratorMcpSwarmCapacity.Type;
 
 export const OrchestratorMcpScheduleTaskInput = Schema.Struct({
   environmentId: OrchestratorMcpEnvironmentTarget,

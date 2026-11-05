@@ -5156,3 +5156,127 @@ it.layer(layerSwarm)("limits (SW-A9)", (it) => {
     }),
   );
 });
+
+// SW-A8 instrumentation and the automatic retry's placement and writer check.
+
+it.layer(layerSwarm)("instance counters and automatic retry rules (SW-A8)", (it) => {
+  it.effect("counts admissions with their queue wait, finishes, and failures by class", () =>
+    Effect.gen(function* () {
+      const swarms = yield* SwarmService.SwarmService;
+      yield* atHour(1);
+      const instanceId = String(modelSelection.instanceId);
+      const statsOf = Effect.gen(function* () {
+        return (yield* swarms.capacity).instances.find(
+          (instance) => instance.providerInstanceId === instanceId,
+        );
+      });
+      const before = yield* statsOf;
+      const { threadId, anchor } = yield* seedArchitect("a8-counters");
+      const result = yield* createSwarm(threadId, {
+        maxConcurrent: 1,
+        members: members(2, { interactionMode: "plan" }),
+      });
+      yield* endRun({ threadId, runId: anchor.id });
+      const queued = yield* statsOf;
+      assert.equal(queued?.active, 1);
+      assert.equal(queued?.queued, 1);
+      assert.equal(queued?.cap, 4);
+      // m1 waits 90 s for m0's slot.
+      yield* TestClock.adjust(Duration.seconds(90));
+      yield* finishRow(threadId, (yield* rows(result.swarmId))[0]!, resultText({ summary: "ok" }));
+      yield* swarms.tick;
+      const m1 = (yield* rows(result.swarmId))[1]!;
+      assert.equal(m1.status, "launching");
+      yield* failRow(m1, providerFailure("validation_error"));
+      yield* swarms.tick;
+      const after = yield* statsOf;
+      assert.equal(after!.admitted - (before?.admitted ?? 0), 2);
+      assert.equal(after!.finished - (before?.finished ?? 0), 1);
+      assert.equal(
+        (after!.failedByClass.validation_error ?? 0) -
+          (before?.failedByClass.validation_error ?? 0),
+        1,
+      );
+      // The block's first admissions: one at once, one after 90 s.
+      assert.isUndefined(before);
+      assert.equal(after!.queueWaitMsAvg, 45_000);
+      assert.isAbove(after!.throughputPerHour, 0);
+      const capacity = yield* swarms.capacity;
+      assert.deepEqual(capacity.caps, { global: 2, perInstance: 4 });
+      yield* resetHealth;
+      yield* retire(result.swarmId);
+    }),
+  );
+
+  it.effect("places an automatic retry of an anyOf member on another instance", () =>
+    Effect.gen(function* () {
+      const swarms = yield* SwarmService.SwarmService;
+      yield* atHour(2);
+      providerHealth = [
+        { instanceId: "codex", enabled: true, status: "ready", auth: { status: "authenticated" } },
+        {
+          instanceId: "codex-b",
+          enabled: true,
+          status: "ready",
+          auth: { status: "authenticated" },
+        },
+      ] as unknown as ReadonlyArray<ServerProvider>;
+      const { threadId, anchor } = yield* seedArchitect("a8-replace");
+      const result = yield* createSwarm(threadId, {
+        members: members(1, {
+          interactionMode: "plan",
+          target: { anyOf: instanceIds("codex", "codex-b"), model: "m" },
+        }),
+      });
+      yield* endRun({ threadId, runId: anchor.id });
+      const first = (yield* rows(result.swarmId))[0]!;
+      assert.equal(first.providerInstanceId, "codex");
+      yield* failRow(first, providerFailure("transport_error"));
+      yield* swarms.tick;
+      yield* TestClock.adjust(Duration.seconds(46));
+      yield* swarms.tick;
+      const retried = (yield* rows(result.swarmId))[0]!;
+      assert.equal(retried.attempt, 2);
+      assert.equal(retried.providerInstanceId, "codex-b", "the failed instance is avoided");
+      providerHealth = [];
+      yield* resetHealth;
+      yield* retire(result.swarmId);
+    }),
+  );
+
+  it.effect("does not retry automatically when the writer check refuses", () =>
+    Effect.gen(function* () {
+      const swarms = yield* SwarmService.SwarmService;
+      const store = yield* SwarmStore.SwarmStore;
+      yield* atHour(3);
+      const { threadId, anchor } = yield* seedArchitect("a8-retry-writers");
+      const result = yield* createSwarm(threadId, {
+        allowSharedWriters: true,
+        members: members(2).map((member) => ({ ...member, ownsPaths: [`src/${member.key}`] })),
+      });
+      yield* endRun({ threadId, runId: anchor.id });
+      const [m0, m1] = yield* rows(result.swarmId);
+      // m1 lost its ownsPaths: two shared writers without them would edit one checkout.
+      const { ownsPaths: _ownsPaths, ...withoutPaths } = JSON.parse(m1!.specJson) as Record<
+        string,
+        unknown
+      >;
+      yield* store.updateMember({
+        swarmId: result.swarmId,
+        memberKey: "m1",
+        patch: {
+          specJson: JSON.stringify(withoutPaths),
+          updatedAt: DateTime.formatIso(yield* DateTime.now),
+        },
+      });
+      yield* failRow(m0!, providerFailure("transport_error"));
+      yield* swarms.tick;
+      const after = (yield* rows(result.swarmId))[0]!;
+      assert.equal(after.status, "failed");
+      assert.equal(after.autoRetries, 0);
+      assert.equal(after.failureClass, "transport_error");
+      yield* resetHealth;
+      yield* retire(result.swarmId);
+    }),
+  );
+});
