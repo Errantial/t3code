@@ -154,6 +154,8 @@ export interface SwarmNotice {
   readonly deliveredAt: string | null;
 }
 
+const utf8Length = (text: string) => new TextEncoder().encode(text).length;
+
 const noticeOf = (row: Row): SwarmNotice => ({
   swarmId: row.swarm_id as SwarmId,
   noticeKey: String(row.notice_key),
@@ -378,10 +380,15 @@ export class SwarmStore extends Context.Service<
       readonly text: string;
       readonly createdAt: string;
     }) => Effect.Effect<boolean, OrchestratorMcpFailure>;
-    /** The thread's pending notices, oldest first, marked delivered in the same transaction. */
+    /**
+     * The thread's oldest pending notices whose texts fit in `maxBytes` (always at least one),
+     * marked delivered in the same transaction; the rest stay pending for a later turn.
+     * Delivery is at most once: a notice is marked when the turn's context is built.
+     */
     readonly takeNotices: (input: {
       readonly parentThreadId: ThreadId;
       readonly deliveredAt: string;
+      readonly maxBytes: number;
     }) => Effect.Effect<ReadonlyArray<SwarmNotice>, OrchestratorMcpFailure>;
     /** Every notice of a thread, delivered or not (the panel and tests). */
     readonly listNotices: (
@@ -626,12 +633,21 @@ const make = Effect.gen(function* () {
             WHERE parent_thread_id = ${input.parentThreadId} AND delivered_at IS NULL
             ORDER BY created_at ASC, notice_key ASC
           `;
-          if (rows.length === 0) return [];
-          yield* sql`
-            UPDATE swarm_notices SET delivered_at = ${input.deliveredAt}
-            WHERE parent_thread_id = ${input.parentThreadId} AND delivered_at IS NULL
-          `;
-          return rows.map(noticeOf);
+          const taken: Array<SwarmNotice> = [];
+          let used = 0;
+          for (const notice of rows.map(noticeOf)) {
+            const bytes = utf8Length(notice.text) + 3;
+            if (taken.length > 0 && used + bytes > input.maxBytes) break;
+            taken.push(notice);
+            used += bytes;
+          }
+          for (const notice of taken) {
+            yield* sql`
+              UPDATE swarm_notices SET delivered_at = ${input.deliveredAt}
+              WHERE swarm_id = ${notice.swarmId} AND notice_key = ${notice.noticeKey}
+            `;
+          }
+          return taken;
         }),
       )
       .pipe(Effect.catch(storageFailure("takeNotices")));
