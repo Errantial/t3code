@@ -115,3 +115,10 @@ it.
 
 When you press Stop on the agent, the swarm is cancelled: queued members never start, and
 running members are stopped.
+
+If you cancel the agent's queued wake for a swarm, the swarm is detached. Queued members never
+start, running members keep going on their own, and the swarm stops managing them. Their results
+are still saved, and the agent can read them with `swarm_collect`.
+
+Results from `swarm_collect` are other agents' output. The agent receives them marked as data,
+not instructions.

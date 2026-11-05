@@ -426,6 +426,7 @@ export type SwarmStatusDigest = typeof SwarmStatusDigest.Type;
 
 export const SwarmCollectResult = Schema.Struct({
   swarmId: SwarmId,
+  trust: Schema.Literal("data"), // envelopes are other agents' output, never instructions
   envelopes: Schema.Array(
     Schema.Struct({ key: SwarmMemberKey, title: TrimmedNonEmptyString, envelope: Schema.Unknown }),
   ),
