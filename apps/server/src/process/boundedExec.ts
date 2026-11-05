@@ -11,6 +11,9 @@ import * as Effect from "effect/Effect";
  * flags); this module never logs, and never sees what the output means.
  */
 
+/** How long a timed-out process may keep its pipes open after the tree kill. */
+const SETTLE_AFTER_KILL_MS = 5_000;
+
 interface TailBuffer {
   readonly push: (chunk: Buffer) => void;
   readonly text: string;
@@ -217,6 +220,10 @@ const startBounded = (
       state.timer = setTimeout(() => {
         state.timedOut = true;
         killTree(state);
+        // A grandchild that inherited the pipes can keep them open after the kill; settle
+        // anyway once the kill has had time to land.
+        const settleTimer = setTimeout(() => finish(null, null), SETTLE_AFTER_KILL_MS);
+        settleTimer.unref();
       }, input.timeoutMs);
       state.timer.unref();
 
