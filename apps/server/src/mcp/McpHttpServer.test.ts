@@ -1026,7 +1026,18 @@ it.effect("shows swarm v2 tools only with the flag on, and hides create_swarm th
         ),
         McpHttpServer.toolkitRegistration(SwarmToolkit, SwarmHandlers.layer),
       ).pipe(
-        Layer.provide(Layer.mock(SwarmService.SwarmService)({})),
+        Layer.provide(
+          Layer.mock(SwarmService.SwarmService)({
+            // The handler reaches the service once the flag is on; the service owns the refusal.
+            status: () =>
+              Effect.fail(
+                new OrchestratorMcpFailure({
+                  code: "capability_denied",
+                  message: "Only the thread that created swarm swarm:1 can use swarm_status on it.",
+                }),
+              ),
+          }),
+        ),
         Layer.provide(Layer.mock(OrchestratorMcpService.OrchestratorMcpService)({})),
         Layer.provideMerge(
           McpHttpServer.layerMcpTransport.pipe(
@@ -1108,9 +1119,10 @@ it.effect("shows swarm v2 tools only with the flag on, and hides create_swarm th
         "swarm_retry",
         "swarm_status",
       ]);
+      // With the flag on, the call reaches the service.
       expect(yield* call("swarm_status", { swarmId: "swarm:1" })).toMatchObject({
         isError: true,
-        content: [{ text: expect.stringContaining("not available in this build yet") }],
+        content: [{ text: expect.stringContaining("swarm_status") }],
       });
     }),
   ).pipe(Effect.provide(NodeHttpServer.layerTest)),
