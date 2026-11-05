@@ -17,6 +17,8 @@ import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import * as McpToolAccess from "../../McpToolAccess.ts";
 import * as OrchestratorMcpService from "../../OrchestratorMcpService.ts";
 import * as ThreadMetadataMcpService from "../../ThreadMetadataMcpService.ts";
+import * as ServerSettings from "../../../serverSettings.ts";
+import * as SwarmService from "../../../swarm/SwarmService.ts";
 
 type PeerListReport = {
   readonly link: OrchestratorMcpEnvironmentLink;
@@ -29,7 +31,18 @@ const handlers = {
     Effect.gen(function* () {
       const scope = yield* McpInvocationContext.McpInvocationContext;
       const service = yield* OrchestratorMcpService.OrchestratorMcpService;
-      return yield* service.capabilities(scope, input);
+      const result = yield* service.capabilities(scope, input);
+      // Swarm v2 (SW-A8): caps and per-instance counters, only while its Labs setting is on.
+      const settings = yield* ServerSettings.ServerSettingsService;
+      const swarmOn = yield* settings.getSettings.pipe(
+        Effect.map((current) => current.swarmV2Enabled),
+        Effect.orElseSucceed(() => false),
+      );
+      if (!swarmOn) return result;
+      const swarms = yield* Effect.serviceOption(SwarmService.SwarmService);
+      if (Option.isNone(swarms)) return result;
+      const swarm = yield* swarms.value.capacity.pipe(Effect.option);
+      return Option.isNone(swarm) ? result : { ...result, swarm: swarm.value };
     }),
   ),
   delegate_task: McpToolAccess.actsAsCaller((input) =>
