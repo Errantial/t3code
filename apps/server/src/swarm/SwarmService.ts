@@ -109,9 +109,6 @@ const SAFETY_TICK = Duration.seconds(5);
 const failure = (code: OrchestratorMcpFailure["code"], message: string) =>
   new OrchestratorMcpFailure({ code, message });
 
-const notYet = (what: string) =>
-  failure("capability_denied", `${what} is not available in this build yet.`);
-
 const storageOrDispatchTag = (error: unknown) =>
   typeof error === "object" && error !== null && "_tag" in error
     ? String((error as { readonly _tag: unknown })._tag)
@@ -212,7 +209,7 @@ const requeuePatch = (
   next: SwarmMemberSpec,
   now: string,
 ): SwarmStore.SwarmMemberPatch => ({
-  specJson: encodeSpecJson(next),
+  specJson: encodeSpecJson({ ...next, priorTurns: row.turnsUsed }),
   status: "queued",
   queueReason: null,
   attempt: row.attempt + 1,
@@ -285,12 +282,6 @@ const FAILURE_MESSAGES: Readonly<Record<AdmissionFailureKind, string>> = {
   provider_disabled: "Its provider instance is disabled for this project.",
   refused: "The orchestrator refused to start it.",
   unknown: "The member could not start. The server log has details.",
-};
-
-/** Swarm fields a later task owns; until then they fail explicitly rather than being ignored. */
-const unsupportedSwarmFields = (input: SwarmCreateInput): string | undefined => {
-  if (input.maxTotalTurns !== undefined) return "`maxTotalTurns`";
-  return undefined;
 };
 
 const WakeBatchJson = Schema.fromJsonString(SwarmWakeBatch);
@@ -389,15 +380,6 @@ const followupNoteBody = (
         : [swarmDigest({ key: entry.key, envelope: decodeEnvelope(member.envelopeJson) })];
     }),
   ].join("\n\n");
-
-/** The same for member fields, checked after a `map` expands. */
-const unsupportedMemberFields = (members: ReadonlyArray<SwarmMemberInput>): string | undefined => {
-  for (const member of members) {
-    if (member.maxTurns !== undefined) return "`maxTurns`";
-    if (member.maxWallClockMs !== undefined) return "`maxWallClockMs`";
-  }
-  return undefined;
-};
 
 /** D5: members per swarm, retries included. */
 const SWARM_MAX_MEMBERS_TOTAL = 48;
@@ -545,6 +527,8 @@ const make = Effect.gen(function* () {
       patch: {
         taskId: task.id,
         childThreadId,
+        // The member's wall clock (SW-A9) starts with its child.
+        startedAt: endedAt,
         ...(childRun === undefined ? {} : { childRunId: childRun.id, boundRunId: childRun.id }),
         providerInstanceId: option.modelSelection.instanceId,
         updatedAt: endedAt,
@@ -1010,8 +994,13 @@ const make = Effect.gen(function* () {
     const maxRetries = spec.verifyMaxRetries ?? VERIFY_DEFAULT_MAX_RETRIES;
     // A command that cannot start fails the same way every time: final, with no retry.
     const retry = !verify.passed && !input.outcome.notStarted && member.verifyAttempts < maxRetries;
-    // A retry is not sent once the swarm row is cancelled or detached; the check fails instead.
-    const retrying = retry && swarm.value.status === "active";
+    // A retry is not sent once the swarm row is cancelled or detached, or when the budget or the
+    // member's turns are used up (SW-A9); the check fails instead.
+    const outOfTurns =
+      swarm.value.budgetExhausted ||
+      (spec.maxTurns !== undefined &&
+        (yield* childRecords(member.childThreadId)).runs.length >= spec.maxTurns);
+    const retrying = retry && swarm.value.status === "active" && !outOfTurns;
     const status = verify.passed ? "verified" : retrying ? "running" : "failed";
     const envelope = yield* buildEnvelope({
       swarm: swarm.value,
@@ -1027,7 +1016,9 @@ const make = Effect.gen(function* () {
               class: "verify" as const,
               message: input.outcome.notStarted
                 ? VERIFY_NOT_STARTED_MESSAGE
-                : `The verify command failed after ${verify.attempts} ${verify.attempts === 1 ? "check" : "checks"}.`,
+                : retry && outOfTurns
+                  ? `The verify command failed after ${verify.attempts} ${verify.attempts === 1 ? "check" : "checks"}. budget: no retry.`
+                  : `The verify command failed after ${verify.attempts} ${verify.attempts === 1 ? "check" : "checks"}.`,
             },
           }
         : {}),
@@ -1421,12 +1412,14 @@ const make = Effect.gen(function* () {
     if (member.childThreadId === null) return;
     const child = yield* childRecords(member.childThreadId);
     const updatedAt = yield* nowIso;
-    // Before release every run on the member thread counts toward its turns (rev 2.1).
-    if (!member.released && child.runs.length !== member.turnsUsed) {
+    // Every run on the thread of an unfinished member counts (rev 2.1, SW-A9), on top of the
+    // turns of its earlier attempts.
+    const turnsUsed = (parseSpec(member.specJson).priorTurns ?? 0) + child.runs.length;
+    if (member.status !== "detached" && turnsUsed !== member.turnsUsed) {
       yield* store.updateMember({
         swarmId: swarm.swarmId,
         memberKey: member.memberKey,
-        patch: { turnsUsed: child.runs.length, updatedAt },
+        patch: { turnsUsed, updatedAt },
       });
     }
     const run = boundRunOf(member, child.runs);
@@ -1528,7 +1521,11 @@ const make = Effect.gen(function* () {
         yield* store.updateMember({
           swarmId: swarm.swarmId,
           memberKey: member.memberKey,
-          patch: { status: "running", startedAt: updatedAt, updatedAt },
+          patch: {
+            status: "running",
+            ...(member.startedAt === null ? { startedAt: updatedAt } : {}),
+            updatedAt,
+          },
         });
       }
       return;
@@ -2281,6 +2278,12 @@ const make = Effect.gen(function* () {
           }
           members = yield* store.listMembers(swarm.swarmId);
           if (swarm.status === "detached") continue;
+          if (swarm.status === "active") {
+            yield* enforceLimits(swarm, members, settings).pipe(
+              logged("swarm.limits-error", { swarmId: swarm.swarmId }),
+            );
+            members = yield* store.listMembers(swarm.swarmId);
+          }
           yield* queueFinishedFollowups(swarm, members).pipe(
             logged("swarm.followup-queue-error", { swarmId: swarm.swarmId }),
           );
@@ -2379,7 +2382,7 @@ const make = Effect.gen(function* () {
             swarmId: swarm.swarmId,
             createdAt: swarm.createdAt,
             maxConcurrent: swarm.maxConcurrent,
-            admits: admits.get(swarm.swarmId) === true,
+            admits: admits.get(swarm.swarmId) === true && !swarm.budgetExhausted,
           })),
           members: [...membersBySwarm.values()].flat().map((member) => {
             const spec = parseSpec(member.specJson);
@@ -2582,8 +2585,6 @@ const make = Effect.gen(function* () {
     readonly resolver: SwarmTargetResolver;
   }) {
     const { architect, members, resolver } = input;
-    const unsupported = unsupportedMemberFields(members);
-    if (unsupported !== undefined) return yield* notYet(unsupported);
     const keys = new Set<string>();
     for (const member of members) {
       if (keys.has(member.key) || input.existingKeys.has(member.key)) {
@@ -2730,6 +2731,14 @@ const make = Effect.gen(function* () {
         }),
         ...(member.role === undefined ? {} : { role: member.role }),
         ...(member.doneCriteria === undefined ? {} : { doneCriteria: member.doneCriteria }),
+        maxTurns: Math.min(
+          member.maxTurns ?? input.settings.swarmDefaultMaxTurns,
+          input.settings.swarmDefaultMaxTurns,
+        ),
+        maxWallClockMs: Math.min(
+          member.maxWallClockMs ?? input.settings.swarmDefaultMaxWallClockMs,
+          input.settings.swarmDefaultMaxWallClockMs,
+        ),
         ...(verify === undefined
           ? {}
           : {
@@ -2888,7 +2897,7 @@ const make = Effect.gen(function* () {
   const stopMember = Effect.fn("SwarmService.stopMember")(function* (
     swarm: SwarmStore.SwarmRecord,
     member: SwarmStore.SwarmMemberRecord,
-    reason: "cancel" | "stop" | "closed_thread",
+    reason: "cancel" | "stop" | "closed_thread" | "budget",
     settings: ServerSettingsValue,
   ) {
     const childThreadId = member.childThreadId;
@@ -2899,7 +2908,9 @@ const make = Effect.gen(function* () {
         ? "Cancelled by the swarm's architect."
         : reason === "stop"
           ? "Stopped with the swarm's architect."
-          : "The swarm's architect thread was closed.";
+          : reason === "budget"
+            ? "Stopped: the swarm member reached its turn or time limit."
+            : "The swarm's architect thread was closed.";
     if (member.status === "limit_wait") {
       // The usage-limit continuation resumes outside admission; disarm it before the stop.
       const shell = yield* threads.getThreadShell(childThreadId).pipe(Effect.option);
@@ -2989,7 +3000,11 @@ const make = Effect.gen(function* () {
       patch: {
         status: "cancelled",
         queueReason: null,
-        ...(reason === "stop" ? { failureClass: "cancelled_by_architect_stop" as const } : {}),
+        ...(reason === "stop"
+          ? { failureClass: "cancelled_by_architect_stop" as const }
+          : reason === "budget"
+            ? { failureClass: "budget" as const }
+            : {}),
         envelopeJson: encodeSpecJson(envelope),
         endedAt: now,
         updatedAt: now,
@@ -2997,6 +3012,70 @@ const make = Effect.gen(function* () {
     });
     yield* Effect.logInfo("swarm.member-stopped", ids);
     return true;
+  });
+
+  /**
+   * SW-A9 limits, each pass: a member past its `maxTurns` (runs of this attempt) or its
+   * `maxWallClockMs` (from its start or latest follow-up) is stopped with class `budget`; a swarm
+   * whose turns reach `maxTotalTurns` is marked `budget_exhausted`, its queued rows cancelled
+   * (class `budget`), and its `limit_wait` members stopped so they never resume.
+   */
+  const enforceLimits = Effect.fn("SwarmService.enforceLimits")(function* (
+    swarm: SwarmStore.SwarmRecord,
+    members: ReadonlyArray<SwarmStore.SwarmMemberRecord>,
+    settings: ServerSettingsValue,
+  ) {
+    const nowMs = DateTime.toEpochMillis(yield* DateTime.now);
+    for (const member of members) {
+      if (member.childThreadId === null || isFinalMemberStatus(member.status)) continue;
+      const spec = parseSpec(member.specJson);
+      const turns = member.turnsUsed - (spec.priorTurns ?? 0);
+      const start = spec.followupStartedAt ?? member.startedAt;
+      const limit =
+        spec.maxTurns !== undefined && turns > spec.maxTurns
+          ? "turns"
+          : spec.maxWallClockMs !== undefined &&
+              start !== null &&
+              nowMs - Date.parse(start) > spec.maxWallClockMs
+            ? "wall_clock"
+            : undefined;
+      if (limit === undefined) continue;
+      yield* Effect.logInfo("swarm.member-limit", {
+        swarmId: swarm.swarmId,
+        memberKey: member.memberKey,
+        limit,
+      });
+      yield* stopMember(swarm, member, "budget", settings);
+    }
+    if (swarm.budgetExhausted || swarm.maxTotalTurns === null) return;
+    const after = yield* store.listMembers(swarm.swarmId);
+    const used = after.reduce((total, member) => total + member.turnsUsed, 0);
+    if (used < swarm.maxTotalTurns) return;
+    const now = yield* nowIso;
+    yield* store.updateSwarm(swarm.swarmId, { budgetExhausted: true, updatedAt: now });
+    yield* Effect.logInfo("swarm.budget-exhausted", {
+      swarmId: swarm.swarmId,
+      turns: used,
+      maxTotalTurns: swarm.maxTotalTurns,
+    });
+    for (const member of after) {
+      if (neverLaunched(member)) {
+        yield* store.updateMember({
+          swarmId: swarm.swarmId,
+          memberKey: member.memberKey,
+          patch: {
+            status: "cancelled",
+            queueReason: null,
+            failureClass: "budget",
+            endedAt: now,
+            updatedAt: now,
+          },
+        });
+      } else if (member.status === "limit_wait") {
+        // The continuation would resume it outside admission; stopMember disarms it first.
+        yield* stopMember(swarm, member, "budget", settings);
+      }
+    }
   });
 
   /**
@@ -3165,7 +3244,7 @@ const make = Effect.gen(function* () {
     if (swarm.budgetExhausted) {
       return yield* failure(
         "invalid_request",
-        `Swarm ${input.swarmId} used its turn budget; no member is retried.`,
+        `Swarm ${input.swarmId}: swarm turn budget used; no member is retried.`,
       );
     }
     const target = input.target;
@@ -3314,7 +3393,7 @@ const make = Effect.gen(function* () {
       if (swarm.budgetExhausted) {
         return yield* failure(
           "invalid_request",
-          `Swarm ${input.swarmId} used its turn budget; its members take no follow-ups.`,
+          `Swarm ${input.swarmId}: swarm turn budget used; its members take no follow-ups.`,
         );
       }
       // As swarm_retry: a follow-up needs the anchor cohort still open (not stopped or
@@ -3361,6 +3440,15 @@ const make = Effect.gen(function* () {
           if (row.childThreadId === null) {
             return yield* failure("invalid_request", `Member '${input.key}' never started.`);
           }
+          if (spec.maxTurns !== undefined) {
+            const runs = (yield* childRecords(row.childThreadId)).runs.length;
+            if (runs >= spec.maxTurns) {
+              return yield* failure(
+                "invalid_request",
+                `Member '${input.key}' used its ${spec.maxTurns} turns.`,
+              );
+            }
+          }
           if (row.followups >= MAX_FOLLOWUPS) {
             return yield* failure(
               "invalid_request",
@@ -3387,6 +3475,7 @@ const make = Effect.gen(function* () {
           const now = yield* nowIso;
           const next: SwarmMemberSpec = {
             ...spec,
+            followupStartedAt: now,
             followupText: input.message,
             ...(requestKey === undefined ? {} : { followupRequestKey: requestKey }),
           };
@@ -3618,8 +3707,7 @@ const make = Effect.gen(function* () {
     if (caller === undefined) {
       return yield* failure("invalid_request", "swarm_create needs an agent inside a T3 thread.");
     }
-    const unsupported = unsupportedSwarmFields(input);
-    if (unsupported !== undefined) return yield* notYet(unsupported);
+    // SW-A9: a swarm's turn budget can only lower the server's.
     if (input.wakeBatch !== undefined && input.wakePolicy !== "batch") {
       return yield* failure("invalid_request", "`wakeBatch` needs wakePolicy: 'batch'.");
     }
@@ -3638,6 +3726,15 @@ const make = Effect.gen(function* () {
       return yield* failure(
         "invalid_request",
         `maxConcurrent ${input.maxConcurrent} is above this machine's cap of ${settings.swarmMaxConcurrent}.`,
+      );
+    }
+    if (
+      input.maxTotalTurns !== undefined &&
+      input.maxTotalTurns > settings.swarmDefaultMaxTotalTurns
+    ) {
+      return yield* failure(
+        "invalid_request",
+        `maxTotalTurns ${input.maxTotalTurns} is above this machine's limit of ${settings.swarmDefaultMaxTotalTurns}.`,
       );
     }
     // Nesting depth 1 (D10): a member starts its own swarm only when its architect allowed it.
@@ -3703,7 +3800,7 @@ const make = Effect.gen(function* () {
       wakePolicy: input.wakePolicy ?? "group",
       wakeBatchJson: input.wakeBatch === undefined ? null : encodeWakeBatch(input.wakeBatch),
       maxConcurrent: input.maxConcurrent ?? null,
-      maxTotalTurns: null,
+      maxTotalTurns: input.maxTotalTurns ?? settings.swarmDefaultMaxTotalTurns,
       verifyJson: null,
       sharedContext: input.sharedContext ?? null,
       dataShape: input.dataShape ?? null,
@@ -3759,7 +3856,7 @@ const make = Effect.gen(function* () {
       if (swarm.budgetExhausted) {
         return yield* failure(
           "invalid_request",
-          `Swarm ${input.swarmId} used its turn budget and takes no more members.`,
+          `Swarm ${input.swarmId}: swarm turn budget used; it takes no more members.`,
         );
       }
       const members = yield* rosterOf(input);
