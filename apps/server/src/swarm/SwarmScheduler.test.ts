@@ -83,6 +83,37 @@ describe("planAdmissions", () => {
     expect(plan.queueReasons.get(memberRef(member(swarmA, 5)))).toBe("global_cap");
   });
 
+  it("keeps a limit_wait member's instance slot while freeing its global one (SW-A8)", () => {
+    const plan = planAdmissions({
+      swarms: [swarm(swarmA, now)],
+      members: [
+        member(swarmA, 0, { status: "limit_wait" }),
+        member(swarmA, 1, { status: "running" }),
+        member(swarmA, 2),
+        member(swarmA, 3, { providerInstanceId: "other" }),
+      ],
+      caps: { global: 3, perInstance: 2, instanceOverrides: {} },
+      pauses: new Map(),
+      now,
+    });
+    // Global: 1 of 3 used, so two could start; codex: 2 of 2 used, so m2 waits on its instance.
+    expect(keys(plan.admit)).toEqual(["swarm:a/m3"]);
+    expect(plan.queueReasons.get(memberRef(member(swarmA, 2)))).toBe("instance_cap:codex");
+  });
+
+  it("holds an automatic retry until its retry_after time (SW-A8)", () => {
+    const later = "2026-11-04T12:00:45.000Z";
+    const plan = planAdmissions({
+      swarms: [swarm(swarmA, now)],
+      members: [member(swarmA, 0, { retryAfter: later }), member(swarmA, 1, { retryAfter: now })],
+      caps,
+      pauses: new Map(),
+      now,
+    });
+    expect(keys(plan.admit)).toEqual(["swarm:a/m1"]);
+    expect(plan.queueReasons.get(memberRef(member(swarmA, 0)))).toBe(`retry_after:${later}`);
+  });
+
   it("applies the per-swarm maxConcurrent below the global cap", () => {
     const plan = planAdmissions({
       swarms: [

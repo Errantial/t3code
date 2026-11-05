@@ -332,6 +332,19 @@ export class SwarmStore extends Context.Service<
       ReadonlyArray<SwarmInstancePause>,
       OrchestratorMcpFailure
     >;
+    /**
+     * Members across every swarm whose last failure was on `providerInstanceId`, of one of
+     * `classes`, at or after `since` (SW-A8 instance down; the last-failure index).
+     */
+    readonly countRecentInstanceFailures: (input: {
+      readonly providerInstanceId: ProviderInstanceId;
+      readonly since: string;
+      readonly classes: ReadonlyArray<SwarmFailureClass>;
+    }) => Effect.Effect<number, OrchestratorMcpFailure>;
+    /** Runs store calls in one transaction (SW-A8: a failure, its pause, and its retry). */
+    readonly transaction: <A, R>(
+      effect: Effect.Effect<A, OrchestratorMcpFailure, R>,
+    ) => Effect.Effect<A, OrchestratorMcpFailure, R>;
   }
 >()("t3/swarm/SwarmStore") {}
 
@@ -523,7 +536,25 @@ const make = Effect.gen(function* () {
     Effect.catch(storageFailure("listInstancePauses")),
   );
 
+  const countRecentInstanceFailures: SwarmStore["Service"]["countRecentInstanceFailures"] = (
+    input,
+  ) =>
+    sql<{ readonly failures: number }>`
+      SELECT COUNT(*) AS failures FROM swarm_members
+      WHERE last_failed_instance_id = ${input.providerInstanceId}
+        AND last_failed_at >= ${input.since}
+        AND last_failure_class IN ${sql.in([...input.classes])}
+    `.pipe(
+      Effect.map((rows) => Number(rows[0]?.failures ?? 0)),
+      Effect.catch(storageFailure("countRecentInstanceFailures")),
+    );
+
+  const transaction: SwarmStore["Service"]["transaction"] = (effect) =>
+    sql.withTransaction(effect).pipe(Effect.catchTags({ SqlError: storageFailure("transaction") }));
+
   return SwarmStore.of({
+    countRecentInstanceFailures,
+    transaction,
     createSwarm,
     getSwarm,
     getSwarmByRequestKey,

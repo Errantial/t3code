@@ -194,6 +194,8 @@ export interface PlannedMember {
   readonly anyOf?: ReadonlyArray<string>;
   /** Placement avoids this instance whenever another candidate qualifies (a failed retry). */
   readonly avoidInstanceId?: string | undefined;
+  /** An automatic retry waits until this time (SW-A8). */
+  readonly retryAfter?: string | null | undefined;
 }
 
 export interface PlannedAdmission extends PlannedMember {
@@ -230,14 +232,16 @@ export const planAdmissions = (input: {
   let globalActive = active.length;
   const perInstance = new Map<string, number>();
   const perSwarm = new Map<string, number>();
-  for (const member of active) {
-    if (member.providerInstanceId !== null) {
-      perInstance.set(
-        member.providerInstanceId,
-        (perInstance.get(member.providerInstanceId) ?? 0) + 1,
-      );
-    }
+  for (const member of active)
     perSwarm.set(member.swarmId, (perSwarm.get(member.swarmId) ?? 0) + 1);
+  // limit_wait frees its global and swarm slots but keeps its instance slot (SW-A8).
+  for (const member of input.members) {
+    if (member.providerInstanceId === null) continue;
+    if (!holdsSlot(member.status) && member.status !== "limit_wait") continue;
+    perInstance.set(
+      member.providerInstanceId,
+      (perInstance.get(member.providerInstanceId) ?? 0) + 1,
+    );
   }
   const admit: Array<PlannedAdmission> = [];
   const isPaused = (instanceId: string) => {
@@ -278,6 +282,10 @@ export const planAdmissions = (input: {
       .toSorted((left, right) => left.ordinal - right.ordinal);
     const swarmCap = Math.min(input.caps.global, swarm.maxConcurrent ?? input.caps.global);
     for (const member of queued) {
+      if (member.retryAfter != null && member.retryAfter > input.now) {
+        queueReasons.set(memberRef(member), `retry_after:${member.retryAfter}`);
+        continue;
+      }
       if (globalActive >= input.caps.global) {
         queueReasons.set(memberRef(member), "global_cap");
         continue;

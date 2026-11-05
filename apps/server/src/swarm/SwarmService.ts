@@ -18,6 +18,7 @@ import {
   type SwarmCollectInput,
   type SwarmCollectResult,
   type SwarmEnvelopeField,
+  type SwarmFailureClass,
   type SwarmFollowupInput,
   type SwarmFollowupResult,
   type SwarmRetryInput,
@@ -45,6 +46,7 @@ import * as Option from "effect/Option";
 import * as Fiber from "effect/Fiber";
 import * as FiberMap from "effect/FiberMap";
 import * as Queue from "effect/Queue";
+import * as Random from "effect/Random";
 import * as Result from "effect/Result";
 import * as Scope from "effect/Scope";
 import * as Schema from "effect/Schema";
@@ -68,6 +70,7 @@ import {
   delegatedCompletionWakeEntryBytes,
 } from "../orchestration-v2/delegatedCompletionWake.ts";
 import { subagentResultForRun } from "@t3tools/provider-core/server/subagentProjection";
+import { latestRootProviderFailure } from "@t3tools/shared/orchestrationV2ThreadError";
 import * as ServerSettings from "../serverSettings.ts";
 import * as SwarmStore from "./SwarmStore.ts";
 import * as SwarmVerifier from "./SwarmVerifier.ts";
@@ -200,6 +203,39 @@ const optionFor = (spec: SwarmMemberSpec, instanceId: string | null): SwarmPlace
 const rowInstanceId = (spec: SwarmMemberSpec) =>
   spec.anyOf === undefined ? spec.modelSelection.instanceId : null;
 
+/**
+ * A member back to `queued` as its next attempt (swarm_retry and the automatic retry): fresh
+ * verify retries and follow-ups, and its unreleased task kept to be disposed once terminal.
+ */
+const requeuePatch = (
+  row: SwarmStore.SwarmMemberRecord,
+  next: SwarmMemberSpec,
+  now: string,
+): SwarmStore.SwarmMemberPatch => ({
+  specJson: encodeSpecJson(next),
+  status: "queued",
+  queueReason: null,
+  attempt: row.attempt + 1,
+  commandId: null,
+  taskId: null,
+  supersededTaskId: row.taskId !== null && !row.released ? row.taskId : null,
+  childThreadId: null,
+  childRunId: null,
+  boundRunId: null,
+  providerInstanceId: rowInstanceId(next),
+  effectiveRuntimeMode: null,
+  effectiveInteractionMode: null,
+  failureClass: null,
+  envelopeJson: null,
+  verifyAttempts: 0,
+  followups: 0,
+  followupNotified: false,
+  released: false,
+  startedAt: null,
+  endedAt: null,
+  updatedAt: now,
+});
+
 const RECENT_FAILURE_WINDOW_MINUTES = 10;
 
 const capsOf = (settings: {
@@ -270,13 +306,25 @@ type SwarmNoteKind =
   | "approvals"
   | "delivery_stalled"
   | "undelivered"
-  | "stop_failed";
+  | "stop_failed"
+  | "instance_down";
 
 const NOTE_WINDOW_MS = 30_000;
 const FOLLOWUP_COALESCE_MS = 5_000;
 const DELIVERY_STALL_MS = 10 * 60_000;
 const MAX_RELEASE_ATTEMPTS = 5;
 const MAX_STOP_ATTEMPTS = 5;
+/** SW-A8: classes that may be retried automatically and count toward an instance being down. */
+const TRANSIENT_FAILURE_CLASSES: ReadonlyArray<SwarmFailureClass> = [
+  "transport_error",
+  "provider_error",
+];
+const USAGE_LIMIT_PAUSE_MS = 15 * 60_000;
+const INSTANCE_DOWN_WINDOW_MS = 60_000;
+const INSTANCE_DOWN_PAUSE_MS = 5 * 60_000;
+const INSTANCE_DOWN_REPEAT_PAUSE_MS = 15 * 60_000;
+const AUTO_RETRY_BACKOFF_MS = 30_000;
+const AUTO_RETRY_JITTER_MS = 15_000;
 const VERIFY_DEFAULT_TIMEOUT_MS = 600_000;
 const MAX_FOLLOWUPS = 5;
 const STATUS_MAX_INSTANCES = 8;
@@ -591,7 +639,7 @@ const make = Effect.gen(function* () {
   const childRecords = (threadId: ThreadId) =>
     threads
       .getThreadRecords(threadId, ["runs", "messages", "turnItems"], {
-        turnItemTypes: ["assistant_message"],
+        turnItemTypes: ["assistant_message", "error"],
         messageRoles: ["assistant"],
       })
       .pipe(
@@ -1092,6 +1140,254 @@ const make = Effect.gen(function* () {
     );
   });
 
+  /** Pauses admissions on an instance until `until`, never shortening a longer pause. */
+  const pauseInstance = Effect.fn("SwarmService.pauseInstance")(function* (input: {
+    readonly providerInstanceId: SwarmStore.SwarmInstancePause["providerInstanceId"];
+    readonly pauseClass: SwarmStore.SwarmInstancePause["pauseClass"];
+    readonly until: string;
+    readonly now: string;
+  }) {
+    const existing = (yield* store.listInstancePauses).find(
+      (pause) => pause.providerInstanceId === input.providerInstanceId,
+    );
+    if (existing !== undefined && existing.until >= input.until) return false;
+    yield* store.setInstancePause({
+      providerInstanceId: input.providerInstanceId,
+      pauseClass: input.pauseClass,
+      until: input.until,
+      at: input.now,
+    });
+    yield* Effect.logInfo("swarm.instance-paused", {
+      providerInstanceId: input.providerInstanceId,
+      pauseClass: input.pauseClass,
+      until: input.until,
+    });
+    return true;
+  });
+
+  /**
+   * Instance down (SW-A8): two transient failures on one instance within 60 s pause it for 5
+   * minutes, or 15 when a down pause ended in the last 5 minutes. An active pause is not
+   * stacked. Returns the new pause's end, if one was set.
+   */
+  const checkInstanceDown = Effect.fn("SwarmService.checkInstanceDown")(function* (
+    providerInstanceId: SwarmStore.SwarmInstancePause["providerInstanceId"],
+    nowDt: DateTime.Utc,
+  ) {
+    const now = DateTime.formatIso(nowDt);
+    const failures = yield* store.countRecentInstanceFailures({
+      providerInstanceId,
+      since: DateTime.formatIso(
+        DateTime.subtract(nowDt, { milliseconds: INSTANCE_DOWN_WINDOW_MS }),
+      ),
+      classes: TRANSIENT_FAILURE_CLASSES,
+    });
+    if (failures < 2) return undefined;
+    const existing = (yield* store.listInstancePauses).find(
+      (pause) => pause.providerInstanceId === providerInstanceId,
+    );
+    if (existing !== undefined && existing.until > now) return undefined;
+    const repeat =
+      existing?.pauseClass === "instance_down" &&
+      existing.until >=
+        DateTime.formatIso(DateTime.subtract(nowDt, { milliseconds: INSTANCE_DOWN_PAUSE_MS }));
+    const until = DateTime.formatIso(
+      DateTime.add(nowDt, {
+        milliseconds: repeat ? INSTANCE_DOWN_REPEAT_PAUSE_MS : INSTANCE_DOWN_PAUSE_MS,
+      }),
+    );
+    yield* pauseInstance({ providerInstanceId, pauseClass: "instance_down", until, now });
+    return until;
+  });
+
+  /** One note per open swarm with unfinished members on a paused-down instance. */
+  const instanceDownNotes = Effect.fn("SwarmService.instanceDownNotes")(function* (
+    providerInstanceId: string,
+    until: string,
+  ) {
+    for (const swarm of yield* store.listSwarms({ statuses: ["active"] })) {
+      const affected = (yield* store.listMembers(swarm.swarmId)).some((member) => {
+        if (isFinalMemberStatus(member.status)) return false;
+        const spec = parseSpec(member.specJson);
+        return (
+          String(member.providerInstanceId ?? spec.modelSelection.instanceId) ===
+            providerInstanceId ||
+          (spec.anyOf?.some(
+            (option) => String(option.modelSelection.instanceId) === providerInstanceId,
+          ) ??
+            false)
+        );
+      });
+      if (!affected) continue;
+      const architect = yield* loadRuns(swarm.parentThreadId).pipe(Effect.option);
+      if (anchorStateOf(swarm, architect) !== "open") continue;
+      yield* notifyArchitect(swarm, {
+        kind: "instance_down",
+        key: `${providerInstanceId}:${until}`,
+        summary: "A provider instance looks down",
+        text: `Swarm ${swarm.swarmId}: provider instance ${providerInstanceId} failed repeatedly, so admissions there are paused until ${until}. Members that can run elsewhere move; the rest wait.`,
+        routine: false,
+      });
+    }
+  });
+
+  /** Whether a failed member may be retried automatically now (SW-A8), by the retry rules. */
+  const autoRetryAllowed = Effect.fn("SwarmService.autoRetryAllowed")(function* (
+    swarm: SwarmStore.SwarmRecord,
+    member: SwarmStore.SwarmMemberRecord,
+  ) {
+    if (swarm.status !== "active" || swarm.budgetExhausted || member.autoRetries > 0) return false;
+    const architect = yield* loadRuns(swarm.parentThreadId).pipe(Effect.option);
+    if (anchorStateOf(swarm, architect) !== "open") return false;
+    const members = yield* store.listMembers(swarm.swarmId);
+    if (members.reduce((total, row) => total + row.attempt, 0) + 1 > SWARM_MAX_MEMBERS_TOTAL) {
+      return false;
+    }
+    const refusal = sharedWriterRefusal({
+      members: members
+        .filter((row) => !isFinalMemberStatus(row.status) || row.memberKey === member.memberKey)
+        .map((row) => {
+          const spec = parseSpec(row.specJson);
+          return {
+            key: row.memberKey,
+            isolation: spec.isolation,
+            writer: row.writer,
+            ownsPaths: spec.ownsPaths,
+          };
+        }),
+      allowSharedWriters: swarm.allowSharedWriters,
+    });
+    return refusal === undefined;
+  });
+
+  /**
+   * A failed bound run, by its real class: `usage_limit` pauses the instance and waits in
+   * `limit_wait` when auto-resume is on; otherwise one transaction records the failure, runs the
+   * instance-down check, then requeues a transient failure once, after a backoff.
+   */
+  const failMember = Effect.fn("SwarmService.failMember")(function* (input: {
+    readonly swarm: SwarmStore.SwarmRecord;
+    readonly member: SwarmStore.SwarmMemberRecord;
+    readonly child: Pick<
+      OrchestrationV2ThreadProjection,
+      "thread" | "messages" | "turnItems" | "runs"
+    >;
+    readonly run: OrchestrationV2Run;
+    readonly settings: ServerSettingsValue;
+  }) {
+    const { swarm, member, child, run, settings } = input;
+    const providerFailure = latestRootProviderFailure(run, child.turnItems);
+    const failureClass: SwarmFailureClass = providerFailure?.class ?? "unknown";
+    const nowDt = yield* DateTime.now;
+    const now = DateTime.formatIso(nowDt);
+    const instanceId = member.providerInstanceId;
+    const ids = { swarmId: swarm.swarmId, memberKey: member.memberKey, failureClass };
+    if (failureClass === "usage_limit" && instanceId !== null) {
+      const resetAt = providerFailure?.resetAt ?? null;
+      yield* pauseInstance({
+        providerInstanceId: instanceId,
+        pauseClass: "usage_limit",
+        until:
+          resetAt ??
+          DateTime.formatIso(DateTime.add(nowDt, { milliseconds: USAGE_LIMIT_PAUSE_MS })),
+        now,
+      });
+      if (settings.autoResumeLimitedThreads && resetAt !== null) {
+        // The usage-limit continuation owns resuming; the member frees its global slot.
+        yield* store.updateMember({
+          swarmId: swarm.swarmId,
+          memberKey: member.memberKey,
+          patch: {
+            status: "limit_wait",
+            lastFailureClass: "usage_limit",
+            lastFailedAt: now,
+            lastFailedInstanceId: instanceId,
+            updatedAt: now,
+          },
+        });
+        yield* Effect.logInfo("swarm.limit-wait", ids);
+        return;
+      }
+    }
+    const envelope = yield* buildEnvelope({
+      swarm,
+      member,
+      child,
+      run,
+      status: "failed",
+      testPathGlobs: settings.swarmTestPathGlobs,
+      failure: {
+        class: failureClass,
+        message: (providerFailure?.message ?? "The member's run failed.").slice(0, 1_000),
+      },
+    });
+    const transient = TRANSIENT_FAILURE_CLASSES.includes(failureClass);
+    const retry =
+      transient &&
+      settings.swarmAutoRetryTransient &&
+      providerFailure?.retryable !== false &&
+      (yield* autoRetryAllowed(swarm, member));
+    const retryAfter = DateTime.formatIso(
+      DateTime.add(nowDt, {
+        milliseconds:
+          AUTO_RETRY_BACKOFF_MS + (yield* Random.nextIntBetween(0, AUTO_RETRY_JITTER_MS)),
+      }),
+    );
+    const failed: SwarmStore.SwarmMemberRecord = {
+      ...member,
+      status: "failed",
+      failureClass,
+      envelopeJson: encodeSpecJson(envelope),
+    };
+    const pausedUntil = yield* store.transaction(
+      Effect.gen(function* () {
+        yield* store.updateMember({
+          swarmId: swarm.swarmId,
+          memberKey: member.memberKey,
+          patch: {
+            status: "failed",
+            failureClass,
+            lastFailureClass: failureClass,
+            lastFailedAt: now,
+            lastFailedInstanceId: instanceId,
+            envelopeJson: failed.envelopeJson,
+            endedAt: now,
+            updatedAt: now,
+          },
+        });
+        // Before any retry is scheduled, so the history this failure adds is counted.
+        const paused =
+          transient && instanceId !== null
+            ? yield* checkInstanceDown(instanceId, nowDt)
+            : undefined;
+        if (retry) {
+          const spec = parseSpec(member.specJson);
+          yield* store.updateMember({
+            swarmId: swarm.swarmId,
+            memberKey: member.memberKey,
+            patch: {
+              ...requeuePatch(
+                failed,
+                { ...spec, previousAttempt: previousAttemptText(failed) },
+                now,
+              ),
+              queueReason: `retry_after:${retryAfter}`,
+              retryAfter,
+              autoRetries: member.autoRetries + 1,
+            },
+          });
+        }
+        return paused;
+      }),
+    );
+    yield* Effect.logInfo("swarm.member-failed", { ...ids, autoRetry: retry });
+    if (pausedUntil !== undefined && instanceId !== null) {
+      yield* instanceDownNotes(String(instanceId), pausedUntil).pipe(
+        logged("swarm.note-error", { swarmId: swarm.swarmId }),
+      );
+    }
+  });
+
   /**
    * The member terminal path (SW-A5 envelopes, SW-A6 verify; SW-A8 real failure classes): when
    * the bound run ends, the member becomes final with its envelope, or verifies first.
@@ -1121,8 +1417,37 @@ const make = Effect.gen(function* () {
       }
       return;
     }
-    // limit_wait (SW-A8): stays until a usage-limit continuation of the bound run appears.
-    if (member.status === "limit_wait" && run.id === member.boundRunId) return;
+    // limit_wait (SW-A8): stays until a usage-limit continuation of the bound run appears. If
+    // the continuation was disarmed (by the user, or a Stop), the member fails as usage_limit.
+    if (member.status === "limit_wait" && run.status === "failed") {
+      const recovery = child.thread.limitRecovery;
+      if (recovery?.runId === run.id && recovery.autoResume === false) {
+        const envelope = yield* buildEnvelope({
+          swarm,
+          member,
+          child,
+          run,
+          status: "failed",
+          testPathGlobs: settings.swarmTestPathGlobs,
+          failure: {
+            class: "usage_limit",
+            message: "The usage-limit continuation was turned off.",
+          },
+        });
+        yield* store.updateMember({
+          swarmId: swarm.swarmId,
+          memberKey: member.memberKey,
+          patch: {
+            status: "failed",
+            failureClass: "usage_limit",
+            envelopeJson: encodeSpecJson(envelope),
+            endedAt: updatedAt,
+            updatedAt,
+          },
+        });
+      }
+      return;
+    }
     if (run.id !== member.boundRunId) {
       yield* store.updateMember({
         swarmId: swarm.swarmId,
@@ -1210,14 +1535,13 @@ const make = Effect.gen(function* () {
         settings,
       });
     }
+    if (run.status === "failed") return yield* failMember({ swarm, member, child, run, settings });
     const ended: FinalMemberStatus | undefined =
       run.status === "completed"
         ? "claimed_done"
-        : run.status === "failed"
-          ? "failed"
-          : run.status === "cancelled" || run.status === "interrupted"
-            ? "cancelled"
-            : undefined;
+        : run.status === "cancelled" || run.status === "interrupted"
+          ? "cancelled"
+          : undefined;
     if (ended === undefined) return;
     const envelope = yield* buildEnvelope({
       swarm,
@@ -1233,14 +1557,6 @@ const make = Effect.gen(function* () {
       patch: {
         status: ended,
         envelopeJson: encodeSpecJson(envelope),
-        ...(ended === "failed"
-          ? {
-              failureClass: "unknown",
-              lastFailureClass: "unknown",
-              lastFailedAt: updatedAt,
-              lastFailedInstanceId: member.providerInstanceId,
-            }
-          : {}),
         endedAt: updatedAt,
         updatedAt,
       },
@@ -2033,6 +2349,7 @@ const make = Effect.gen(function* () {
               ...(unplaced
                 ? { anyOf: spec.anyOf!.map((option) => String(option.modelSelection.instanceId)) }
                 : {}),
+              retryAfter: member.retryAfter,
               // A retried anyOf member avoids the instance its last attempt failed on.
               ...(unplaced && member.attempt > 1 && member.lastFailedInstanceId !== null
                 ? { avoidInstanceId: String(member.lastFailedInstanceId) }
@@ -2045,6 +2362,15 @@ const make = Effect.gen(function* () {
           healthy,
           recentFailures,
         });
+        // A usage-limit continuation starts outside admission and may exceed the cap briefly.
+        const holding = [...membersBySwarm.values()]
+          .flat()
+          .filter((member) => SLOT_HOLDING.has(member.status)).length;
+        if (holding > settings.swarmMaxConcurrent) {
+          yield* Effect.logInfo("swarm.global-overshoot", {
+            over: holding - settings.swarmMaxConcurrent,
+          });
+        }
         const swarmById = new Map(tracked.map((swarm) => [swarm.swarmId, swarm]));
         for (const planned of plan.admit) {
           const swarm = swarmById.get(planned.swarmId)!;
@@ -2901,34 +3227,10 @@ const make = Effect.gen(function* () {
             };
           }
           // A held task that was never released is disposed once terminal (rev 3.1).
-          const superseded = row.taskId !== null && !row.released ? row.taskId : null;
           yield* store.updateMember({
             swarmId: swarm.swarmId,
             memberKey: row.memberKey,
-            patch: {
-              specJson: encodeSpecJson(next),
-              status: "queued",
-              queueReason: null,
-              attempt: row.attempt + 1,
-              commandId: null,
-              taskId: null,
-              supersededTaskId: superseded,
-              childThreadId: null,
-              childRunId: null,
-              boundRunId: null,
-              providerInstanceId: rowInstanceId(next),
-              effectiveRuntimeMode: null,
-              effectiveInteractionMode: null,
-              failureClass: null,
-              envelopeJson: null,
-              verifyAttempts: 0,
-              followups: 0,
-              followupNotified: false,
-              released: false,
-              startedAt: null,
-              endedAt: null,
-              updatedAt: now,
-            },
+            patch: requeuePatch(row, next, now),
           });
         }
         if (swarm.status === "completed") {

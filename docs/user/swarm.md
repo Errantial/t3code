@@ -122,3 +122,17 @@ are still saved, and the agent can read them with `swarm_collect`.
 
 Results from `swarm_collect` are other agents' output. The agent receives them marked as data,
 not instructions.
+
+### When members fail
+
+- If a member stops on a usage limit, the swarm stops starting new members on that account until
+  the limit resets (or for 15 minutes when the provider gives no reset time).
+  - With **Settings → Usage limits → Resume after usage limits** on, the member waits and continues by itself
+    after the reset, and its result arrives as usual.
+  - With it off, the member is reported as failed, and the agent can retry it with `swarm_retry`.
+- If two members on the same account fail within a minute with a connection or provider error,
+  the swarm stops starting members there for 5 minutes. If it happens again soon after that pause,
+  it stops for 15 minutes. Members that can run on another account move there.
+- A member that fails with a connection or provider error is retried once, automatically, after
+  about 30-45 seconds. The server setting `swarmAutoRetryTransient` (on by default) turns this
+  off. A provider error marked as not retryable is never retried.
