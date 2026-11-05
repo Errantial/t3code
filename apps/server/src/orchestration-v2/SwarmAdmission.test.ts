@@ -14,6 +14,8 @@ import {
   type OrchestratorMcpFailure,
   OrchestratorMcpFailure as OrchestratorMcpFailureClass,
   type OrchestrationV2Run,
+  OrchestrationV2ThreadProjection,
+  OrchestrationV2ThreadStreamItem,
   ProjectId,
   ProviderDriverKind,
   ProviderInstanceId,
@@ -38,6 +40,7 @@ import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
 
@@ -5707,11 +5710,77 @@ it.layer(layerSwarm)("panel and sidebar (SW-A10)", (it) => {
   );
 });
 
+// As the RPC layer encodes them: the JSON codecs of the RPC output schemas.
+const encodeProjection = Schema.encodeSync(Schema.toCodecJson(OrchestrationV2ThreadProjection));
+const encodeStreamItem = Schema.encodeSync(Schema.toCodecJson(OrchestrationV2ThreadStreamItem));
+
 // SW-A11 qualification rows that need no live provider: restarts in the remaining states, notices
 // across a restart, the flag toggle, panel actions on an idle architect, nested swarms, and anyOf
 // placement around signed-out and usage-limited instances.
 
 it.layer(layerSwarm)("qualification (SW-A11)", (it) => {
+  it.effect("client payloads carry held as settled_only; the scheduler still sees held", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const swarms = yield* SwarmService.SwarmService;
+      const sink = yield* EventSink.EventSinkV2;
+      yield* atHour(22);
+      const afterSequence = yield* sink.latestSequence();
+      const { threadId, anchor } = yield* seedArchitect("a11-held-wire");
+      const result = yield* createSwarm(threadId, {
+        wakePolicy: "batch",
+        wakeBatch: { minCount: 2 },
+        members: members(2, { interactionMode: "plan" }),
+      });
+      yield* endRun({ threadId, runId: anchor.id });
+      const [m0, m1] = yield* rows(result.swarmId);
+      yield* finishRow(threadId, m0!, resultText({ summary: "m0 done" }));
+      yield* swarms.tick;
+      // On the server: m0 is final and still held by the batch.
+      const internal = yield* orchestrator.getThreadProjection(threadId);
+      const heldTask = internal.subagents.find((task) => task.id === m0!.taskId);
+      assert.equal(heldTask?.completionWake, "held");
+      assert.isFalse((yield* rows(result.swarmId))[0]!.released);
+
+      // Everything a client receives: the projection RPC, the thread stream snapshot, and the
+      // stream's subagent.updated events.
+      const latest = yield* sink.latestSequence();
+      const events = yield* sink.stream({ afterSequence }).pipe(
+        Stream.takeUntil((stored) => stored.sequence >= latest),
+        Stream.runCollect,
+        Effect.timeout(Duration.seconds(5)),
+        Effect.orElseSucceed(() => []),
+      );
+      const wire = JSON.stringify([
+        encodeProjection(internal),
+        encodeStreamItem({
+          kind: "snapshot",
+          snapshotSequence: 1,
+          projection: internal,
+        }),
+        ...Array.from(events, (stored) => stored)
+          .filter((stored) => stored.event.type === "subagent.updated")
+          .map((stored) =>
+            encodeStreamItem({
+              kind: "event",
+              sequence: stored.sequence,
+              event: stored.event,
+            }),
+          ),
+      ]);
+      assert.isTrue(events.length > 0);
+      assert.include(wire, `"completionWake":"settled_only"`);
+      assert.notInclude(wire, `"held"`);
+
+      // The scheduler still releases the held batch once both are final.
+      yield* finishRow(threadId, m1!, resultText({ summary: "m1 done" }));
+      yield* swarms.tick;
+      yield* drainWakes(threadId, anchor.id);
+      assert.isTrue((yield* rows(result.swarmId)).every((row) => row.released));
+      yield* retire(result.swarmId);
+    }),
+  );
+
   it.effect("restart: running, final but unreleased, queued, and a pending notice", () =>
     Effect.scoped(
       Effect.gen(function* () {

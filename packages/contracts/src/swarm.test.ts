@@ -8,7 +8,11 @@ import {
   OrchestrationV2DelegatedCompletionCohort,
   OrchestrationV2DelegatedCompletionDetail,
   OrchestrationV2DelegatedCompletionWake,
+  OrchestrationV2DomainEvent,
+  OrchestrationV2Subagent,
+  OrchestrationV2SubagentJson,
 } from "./orchestrationV2.ts";
+import { EventId, SwarmId } from "./baseSchemas.ts";
 import {
   SwarmAddMembersInput,
   SwarmCancelInput,
@@ -324,5 +328,83 @@ describe("swarmV2Enabled", () => {
     expect(DEFAULT_SERVER_SETTINGS.swarmV2Enabled).toBe(false);
     expect(accepts(ServerSettingsPatch, { swarmV2Enabled: true })).toBe(true);
     expect(accepts(ServerSettingsPatch, { swarmV2Enabled: "yes" })).toBe(false);
+  });
+});
+
+// A record as stored, while its swarm holds it.
+const storedHeldTask = {
+  id: "node:member",
+  threadId: "thread:architect",
+  runId: "run:anchor",
+  parentNodeId: "node:parent",
+  origin: "app_owned",
+  createdBy: "agent",
+  driver: "codex",
+  providerInstanceId: "codex",
+  providerThreadId: null,
+  childThreadId: "thread:member",
+  nativeTaskRef: null,
+  prompt: "Do part 0.",
+  title: "Member 0",
+  model: null,
+  completionWake: "held",
+  completionDetail: "Swarm member m0: claimed_done.",
+  status: "running",
+  result: null,
+  startedAt: null,
+  completedAt: null,
+  updatedAt: "2026-11-05T00:00:00.000Z",
+};
+// What a v1.2.0 client decodes with: no completionDetail, the two older wake values, no swarmIds.
+const V120Subagent = OrchestrationV2Subagent.mapFields(
+  ({ completionDetail: _detail, ...fields }) => ({
+    ...fields,
+    completionWake: Schema.optional(Schema.Literals(["always", "settled_only"])),
+  }),
+);
+const V120Cohort = OrchestrationV2DelegatedCompletionCohort.mapFields(
+  ({ swarmIds: _swarmIds, ...fields }) => fields,
+);
+const decodeStoredTask = Schema.decodeUnknownSync(OrchestrationV2SubagentJson);
+const encodeStoredTask = Schema.encodeSync(OrchestrationV2SubagentJson);
+const encodeWireTask = Schema.encodeSync(OrchestrationV2Subagent);
+const encodeWireEvent = Schema.encodeSync(OrchestrationV2DomainEvent);
+const encodeWireCohort = Schema.encodeSync(OrchestrationV2DelegatedCompletionCohort);
+const decodeV120Task = Schema.decodeUnknownExit(V120Subagent);
+const decodeV120Cohort = Schema.decodeUnknownExit(V120Cohort);
+
+describe("completionWake on the client wire (v1.2.0 compatibility)", () => {
+  const task = decodeStoredTask(storedHeldTask);
+
+  it("keeps held on the server and in storage", () => {
+    expect(task.completionWake).toBe("held");
+    expect(encodeStoredTask(task).completionWake).toBe("held");
+  });
+
+  it("sends held as settled_only in subagent records and events", () => {
+    expect(encodeWireTask(task).completionWake).toBe("settled_only");
+    const event = encodeWireEvent({
+      id: EventId.make("event:member"),
+      type: "subagent.updated",
+      threadId: task.threadId,
+      runId: task.runId ?? undefined,
+      occurredAt: task.updatedAt,
+      payload: task,
+    } as OrchestrationV2DomainEvent);
+    expect(JSON.stringify(event)).not.toContain('"held"');
+    expect(encodeWireTask({ ...task, completionWake: "always" }).completionWake).toBe("always");
+  });
+
+  it("decodes on a v1.2.0 client with completionDetail and swarmIds as extra keys", () => {
+    const wire = encodeWireTask(task);
+    expect(Exit.isSuccess(decodeV120Task(wire))).toBe(true);
+    expect(Exit.isFailure(decodeV120Task({ ...wire, completionWake: "held" }))).toBe(true);
+    const cohort = encodeWireCohort({
+      disposition: "open",
+      nextGeneration: 1,
+      delivery: null,
+      swarmIds: [SwarmId.make("swarm:1")],
+    });
+    expect(Exit.isSuccess(decodeV120Cohort(cohort))).toBe(true);
   });
 });
