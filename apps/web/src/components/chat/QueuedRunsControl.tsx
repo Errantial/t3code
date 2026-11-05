@@ -33,6 +33,8 @@ import { Button, InlineButton } from "../ui/button";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import type { TimestampFormat } from "@t3tools/contracts/settings";
 import { GuestMessageName } from "./guestMessageStyle";
+import { queuedWakeCarriesSwarm, SWARM_DETACH_CONFIRMATION } from "./swarmWakeConfirmation";
+import { requestConfirmDialog } from "~/confirmDialog";
 import { TimelineRowTimestamp } from "./TimelineRowParts";
 import { FoldedMessageHeader, useScheduledTaskTitle } from "./TimelineUserMessageRow";
 
@@ -214,6 +216,11 @@ export function QueuedRunsControl({
   if (items.length === 0) return null;
 
   const remove = async (runId: RunId) => {
+    // A swarm's wake: cancelling it detaches the swarm, so the user confirms first (D12).
+    if (queuedWakeCarriesSwarm(projection, runId)) {
+      const confirmed = (await requestConfirmDialog(SWARM_DETACH_CONFIRMATION)) ?? true;
+      if (!confirmed) return;
+    }
     setBusyRunId(runId);
     await cancel({
       environmentId: props.environmentId,
