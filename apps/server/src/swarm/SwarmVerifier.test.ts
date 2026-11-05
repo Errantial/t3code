@@ -149,6 +149,29 @@ it.live.skipIf(HostProcess.Platform.defaultValue() !== "win32")(
     ),
 );
 
+it.live.skipIf(HostProcess.Platform.defaultValue() === "win32")(
+  "does not kill a POSIX process whose start time does not match (a reused pid)",
+  () =>
+    withRepo((repo) =>
+      Effect.gen(function* () {
+        const verifier = yield* SwarmVerifier.SwarmVerifier;
+        const started = yield* BoundedExec.startBounded({
+          argv: [node, "-e", "setInterval(() => {}, 1000)"],
+          cwd: repo,
+          timeoutMs: 120_000,
+          maxOutputBytes: 1_024,
+          platform: HostProcess.Platform.defaultValue(),
+        });
+        const pid = started.pid!;
+        expect(yield* verifier.killStale({ pid, startedAtMs: started.startedAtMs - 120_000 })).toBe(
+          false,
+        );
+        expect(alive(pid)).toBe(true);
+        started.cancel();
+      }).pipe(Effect.provide(layerFor(repo))),
+    ),
+);
+
 it("passes verify only an allowlisted environment, without the server's secrets", () => {
   expect(
     SwarmVerifier.verifyEnvironment({
