@@ -8128,6 +8128,14 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         cause: `Delegated task ${command.taskId} is not an app-owned task of thread ${command.parentThreadId}.`,
       });
     }
+    // A held swarm member wakes only when the swarm scheduler releases it.
+    if (task.completionWake === "held" && command.swarmRelease !== true) {
+      return yield* new OrchestratorDispatchError({
+        commandId: command.commandId,
+        commandType: command.type,
+        cause: `Delegated task ${command.taskId} is held for its swarm; only the swarm releases it.`,
+      });
+    }
     if (task.completionWake === command.completionWake) {
       // A repeated release (same detail) is a no-op, so a crash between release and its
       // bookkeeping can release again safely.

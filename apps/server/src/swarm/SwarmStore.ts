@@ -307,10 +307,19 @@ export class SwarmStore extends Context.Service<
     readonly enqueueNote: (
       note: Omit<SwarmNoteRecord, "sent">,
     ) => Effect.Effect<void, OrchestratorMcpFailure>;
+    /** Marks the note sent and its members' follow-ups notified, in one transaction. */
     readonly markNoteSent: (input: {
       readonly swarmId: SwarmId;
       readonly seq: number;
+      readonly memberKeys?: ReadonlyArray<string>;
     }) => Effect.Effect<void, OrchestratorMcpFailure>;
+    /** Replaces an unsent note's members, while it is still being coalesced. */
+    readonly updateNoteMembers: (input: {
+      readonly swarmId: SwarmId;
+      readonly seq: number;
+      readonly membersJson: string;
+    }) => Effect.Effect<void, OrchestratorMcpFailure>;
+    readonly nextNoteSeq: (swarmId: SwarmId) => Effect.Effect<number, OrchestratorMcpFailure>;
     readonly listUnsentNotes: Effect.Effect<ReadonlyArray<SwarmNoteRecord>, OrchestratorMcpFailure>;
     readonly setInstancePause: (
       pause: SwarmInstancePause,
@@ -452,10 +461,38 @@ const make = Effect.gen(function* () {
     })}`.pipe(Effect.asVoid, Effect.catch(storageFailure("enqueueNote")));
 
   const markNoteSent: SwarmStore["Service"]["markNoteSent"] = (input) =>
+    sql
+      .withTransaction(
+        sql`
+          UPDATE swarm_note_outbox SET sent = 1
+          WHERE swarm_id = ${input.swarmId} AND seq = ${input.seq}
+        `.pipe(
+          Effect.andThen(
+            (input.memberKeys ?? []).length === 0
+              ? Effect.void
+              : sql`
+                  UPDATE swarm_members SET followup_notified = 1
+                  WHERE swarm_id = ${input.swarmId}
+                    AND ${sql.in("member_key", input.memberKeys ?? [])}
+                `,
+          ),
+        ),
+      )
+      .pipe(Effect.asVoid, Effect.catch(storageFailure("markNoteSent")));
+
+  const updateNoteMembers: SwarmStore["Service"]["updateNoteMembers"] = (input) =>
     sql`
-      UPDATE swarm_note_outbox SET sent = 1
-      WHERE swarm_id = ${input.swarmId} AND seq = ${input.seq}
-    `.pipe(Effect.asVoid, Effect.catch(storageFailure("markNoteSent")));
+      UPDATE swarm_note_outbox SET members_json = ${input.membersJson}
+      WHERE swarm_id = ${input.swarmId} AND seq = ${input.seq} AND sent = 0
+    `.pipe(Effect.asVoid, Effect.catch(storageFailure("updateNoteMembers")));
+
+  const nextNoteSeq: SwarmStore["Service"]["nextNoteSeq"] = (swarmId) =>
+    sql<{ readonly next: number }>`
+      SELECT COALESCE(MAX(seq), 0) + 1 AS next FROM swarm_note_outbox WHERE swarm_id = ${swarmId}
+    `.pipe(
+      Effect.map((rows) => Number(rows[0]?.next ?? 1)),
+      Effect.catch(storageFailure("nextNoteSeq")),
+    );
 
   const listUnsentNotes: SwarmStore["Service"]["listUnsentNotes"] = sql<Row>`
     SELECT * FROM swarm_note_outbox WHERE sent = 0 ORDER BY swarm_id ASC, seq ASC
@@ -497,6 +534,8 @@ const make = Effect.gen(function* () {
     updateMember,
     enqueueNote,
     markNoteSent,
+    updateNoteMembers,
+    nextNoteSeq,
     listUnsentNotes,
     setInstancePause,
     clearInstancePause,

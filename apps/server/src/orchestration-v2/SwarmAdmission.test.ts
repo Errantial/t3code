@@ -16,8 +16,10 @@ import {
   ProjectId,
   ProviderDriverKind,
   ProviderInstanceId,
+  ProviderSessionId,
   ProviderThreadId,
   RunId,
+  RuntimeRequestId,
   type ServerProvider,
   SwarmId,
   type SwarmCreateInput,
@@ -32,6 +34,7 @@ import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Stream from "effect/Stream";
+import * as TestClock from "effect/testing/TestClock";
 
 import * as CheckpointStore from "../checkpointing/CheckpointStore.ts";
 import * as ServerConfig from "../config.ts";
@@ -50,6 +53,7 @@ import * as VcsDriverRegistry from "../vcs/VcsDriverRegistry.ts";
 import * as VcsProcess from "../vcs/VcsProcess.ts";
 import * as WorkspacePaths from "../workspace/WorkspacePaths.ts";
 import { CodexProviderCapabilitiesV2 } from "./Adapters/CodexAdapterV2.ts";
+import * as DelegatedTaskQuestionReactor from "./DelegatedTaskQuestionReactor.ts";
 import * as EffectOutbox from "./EffectOutbox.ts";
 import * as EventSink from "./EventSink.ts";
 import * as Orchestrator from "./Orchestrator.ts";
@@ -1522,6 +1526,38 @@ const drainWakes = (threadId: ThreadId, anchorRunId: RunId) =>
     }
   });
 
+/** Ends a swarm member's bound run as completed (with text) or failed, and waits for its task. */
+const finishRow = (
+  threadId: ThreadId,
+  row: SwarmStore.SwarmMemberRecord,
+  text: string,
+  status: "completed" | "failed" = "completed",
+) =>
+  status === "completed"
+    ? finishMember({
+        parentThreadId: threadId,
+        taskId: row.taskId!,
+        childThreadId: row.childThreadId!,
+        runId: row.childRunId!,
+        text,
+      })
+    : Effect.gen(function* () {
+        const sink = yield* EventSink.EventSinkV2;
+        const afterSequence = yield* sink.latestSequence();
+        yield* endRun({ threadId: row.childThreadId!, runId: row.childRunId!, status: "failed" });
+        yield* sink.stream({ afterSequence, eventType: "subagent.updated" }).pipe(
+          Stream.filter(
+            (stored) =>
+              stored.event.type === "subagent.updated" &&
+              stored.event.payload.id === row.taskId &&
+              stored.event.payload.status === "failed",
+          ),
+          Stream.take(1),
+          Stream.runDrain,
+          Effect.timeout(Duration.seconds(10)),
+        );
+      });
+
 /** Tests share one database and cap; a finished test's swarm stops counting toward the cap. */
 const retire = (swarmId: SwarmId) =>
   Effect.gen(function* () {
@@ -1932,6 +1968,18 @@ it.layer(layerSwarm)("swarm_create, admission, and the scheduler (SW-A3)", (it) 
         ["claimed_done", "detached", "detached", "cancelled"],
       );
       assert.equal(Option.getOrThrow(yield* store.getSwarm(result.swarmId)).status, "detached");
+      assert.isTrue(
+        (yield* orchestrator.getThreadProjection(threadId)).messages.some(
+          (message) => message.notification?.summary === "Swarm detached",
+        ),
+      );
+      // A detached member keeps running unmanaged; its result still lands for swarm_collect.
+      const detachedRow = (yield* rows(result.swarmId))[1]!;
+      yield* finishRow(threadId, detachedRow, "detached member done");
+      yield* swarms.tick;
+      const finished = (yield* rows(result.swarmId))[1]!;
+      assert.equal(finished.status, "detached");
+      assert.include(finished.envelopeJson ?? "", "detached member done");
     }),
   );
 
@@ -2316,6 +2364,499 @@ it.layer(layerSwarm)("swarm_create, admission, and the scheduler (SW-A3)", (it) 
     }),
   );
 
+  it.effect("wakes once for 4 and 12 members with 512-character titles, idle and busy", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const swarms = yield* SwarmService.SwarmService;
+      const settings = yield* ServerSettings.ServerSettingsService;
+      yield* settings.updateSettings({ swarmMaxConcurrent: 12, swarmMaxConcurrentPerInstance: 12 });
+      const measured: Array<string> = [];
+      for (const k of [4, 12]) {
+        for (const busy of [false, true]) {
+          const { threadId, anchor } = yield* seedArchitect(`a5-k${k}-${busy ? "busy" : "idle"}`);
+          const result = yield* createSwarm(threadId, {
+            members: Array.from({ length: k }, (_, index) => ({
+              key: `m${index}`,
+              title: `${index}`.padEnd(512, "T"),
+              task: `Part ${index}.`,
+              interactionMode: "plan" as const,
+            })),
+          });
+          yield* endRun({ threadId, runId: anchor.id });
+          if (busy) yield* startRun({ threadId, ordinal: 2 });
+          for (const row of yield* rows(result.swarmId)) {
+            yield* finishRow(threadId, row, `${row.memberKey} done`);
+          }
+          yield* swarms.tick;
+          const delivery = (yield* orchestrator.getThreadProjection(threadId)).runs.find(
+            (run) => run.id === anchor.id,
+          )?.delegatedCompletion?.delivery;
+          assert.equal(delivery?.taskIds.length, k, `k=${k} busy=${busy}: one wake holds all`);
+          yield* takeWake(threadId);
+          const wake = yield* deliverWake(threadId, anchor.id);
+          assert.equal(wake.run.status === "queued", busy);
+          assert.notInclude(wake.text, "Use task_status");
+          assert.isAtMost(Buffer.byteLength(wake.text), 16_000);
+          measured.push(
+            `k=${k} ${busy ? "busy" : "idle"}: 1 wake, ${Buffer.byteLength(wake.text)} bytes`,
+          );
+          yield* retire(result.swarmId);
+        }
+      }
+      yield* settings.updateSettings({ swarmMaxConcurrent: 2, swarmMaxConcurrentPerInstance: 4 });
+      if (process.env.T3_SWARM_SPIKE_TIMINGS === "1") {
+        process.stderr.write(`SWARM-A5 wakes ${JSON.stringify(measured)}\n`);
+      }
+    }),
+  );
+
+  it.effect("keeps every wake within 16,000 bytes, with no pointers, beside a large sibling", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const swarms = yield* SwarmService.SwarmService;
+      const settings = yield* ServerSettings.ServerSettingsService;
+      yield* settings.updateSettings({ swarmMaxConcurrent: 12, swarmMaxConcurrentPerInstance: 12 });
+      const { threadId, anchor } = yield* seedArchitect("a5-sibling");
+      // A plain delegate_task sibling with a 512-character title and a 6 KB result.
+      const sibling = yield* admit({
+        threadId,
+        anchor,
+        swarmId: undefined,
+        key: "sibling".padEnd(400, "S"),
+      });
+      const result = yield* createSwarm(threadId, {
+        members: Array.from({ length: 12 }, (_, index) => ({
+          key: `m${index}`,
+          title: `${index}`.padEnd(512, "T"),
+          task: `Part ${index}.`,
+          interactionMode: "plan" as const,
+        })),
+      });
+      yield* endRun({ threadId, runId: anchor.id });
+      yield* startRun({ threadId, ordinal: 2 });
+      yield* finishMember({
+        parentThreadId: threadId,
+        taskId: sibling.taskId,
+        childThreadId: sibling.childThreadId,
+        runId: sibling.childRun.id,
+        text: "R".repeat(6_000),
+      });
+      yield* takeWake(threadId);
+      yield* deliverWake(threadId, anchor.id);
+      for (const row of yield* rows(result.swarmId)) {
+        yield* finishRow(threadId, row, "x".repeat(3_000));
+      }
+      for (let round = 0; round < 6; round += 1) {
+        yield* swarms.tick;
+        yield* drainWakes(threadId, anchor.id);
+      }
+      const swarmTaskIds = new Set((yield* rows(result.swarmId)).map((row) => String(row.taskId)));
+      assert.isTrue((yield* rows(result.swarmId)).every((row) => row.released));
+      const wakes = (yield* orchestrator.getThreadProjection(threadId)).messages.filter(
+        (message) => message.delegatedCompletion?.parentRunId === anchor.id,
+      );
+      assert.isAbove(wakes.length, 1, "the sibling's bytes push some members to a later wake");
+      for (const wake of wakes) {
+        const pointers = wake.text
+          .split("\n\n")
+          .filter((entry) => entry.includes("Use task_status"));
+        assert.isFalse(
+          pointers.some((entry) => [...swarmTaskIds].some((taskId) => entry.includes(taskId))),
+          "no released swarm task arrives as a pointer",
+        );
+        const inline = wake.text
+          .split("\n\n")
+          .filter((entry) => !entry.includes("Use task_status"))
+          .join("\n\n");
+        assert.isAtMost(Buffer.byteLength(inline), 16_000);
+      }
+      yield* settings.updateSettings({ swarmMaxConcurrent: 2, swarmMaxConcurrentPerInstance: 4 });
+      yield* retire(result.swarmId);
+    }),
+  );
+
+  it.effect("releases one member alone when siblings already fill the wake (progress)", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const swarms = yield* SwarmService.SwarmService;
+      const { threadId, anchor } = yield* seedArchitect("a5-progress");
+      const sibling = yield* admit({ threadId, anchor, swarmId: undefined, key: "big" });
+      const result = yield* createSwarm(threadId, {
+        maxConcurrent: 2,
+        members: members(2, { interactionMode: "plan" }),
+      });
+      yield* endRun({ threadId, runId: anchor.id });
+      yield* startRun({ threadId, ordinal: 2 });
+      yield* finishMember({
+        parentThreadId: threadId,
+        taskId: sibling.taskId,
+        childThreadId: sibling.childThreadId,
+        runId: sibling.childRun.id,
+        text: "R".repeat(15_900),
+      });
+      yield* takeWake(threadId);
+      yield* deliverWake(threadId, anchor.id);
+      for (const row of yield* rows(result.swarmId)) yield* finishRow(threadId, row, "done");
+      yield* swarms.tick;
+      const after = yield* rows(result.swarmId);
+      assert.deepEqual(
+        after.map((row) => row.released),
+        [true, false],
+      );
+      const delivery = (yield* orchestrator.getThreadProjection(threadId)).runs.find(
+        (run) => run.id === anchor.id,
+      )?.delegatedCompletion?.delivery;
+      assert.deepEqual(delivery?.taskIds, [sibling.taskId, after[0]!.taskId!]);
+      yield* drainWakes(threadId, anchor.id);
+      yield* retire(result.swarmId);
+    }),
+  );
+
+  it.effect("recomputes the batch window from stored end times, and times failure releases", () =>
+    Effect.gen(function* () {
+      const swarms = yield* SwarmService.SwarmService;
+      const { threadId, anchor } = yield* seedArchitect("a5-batch-window");
+      const batch = yield* createSwarm(threadId, {
+        maxConcurrent: 2,
+        wakePolicy: "batch",
+        wakeBatch: { minCount: 3, maxWaitMs: 30_000 },
+        members: members(2, { interactionMode: "plan" }),
+      });
+      yield* endRun({ threadId, runId: anchor.id });
+      const [m0] = yield* rows(batch.swarmId);
+      yield* finishRow(threadId, m0!, "m0 done");
+      yield* swarms.tick;
+      assert.isFalse((yield* rows(batch.swarmId))[0]!.released);
+      // The window reads ended_at from the row, so a restarted scheduler sees the same wait.
+      yield* TestClock.adjust("31 seconds");
+      yield* swarms.tick;
+      assert.isTrue((yield* rows(batch.swarmId))[0]!.released);
+      yield* drainWakes(threadId, anchor.id);
+      yield* retire(batch.swarmId);
+
+      const { threadId: failureThread, anchor: failureAnchor } =
+        yield* seedArchitect("a5-failure-policy");
+      const failure = yield* createSwarm(failureThread, {
+        maxConcurrent: 2,
+        wakePolicy: "failure",
+        members: members(2, { interactionMode: "plan" }),
+      });
+      yield* endRun({ threadId: failureThread, runId: failureAnchor.id });
+      const [first, second] = yield* rows(failure.swarmId);
+      yield* finishRow(failureThread, first!, "failed", "failed");
+      yield* swarms.tick;
+      assert.deepEqual(
+        (yield* rows(failure.swarmId)).map((row) => [row.status, row.released]),
+        [
+          ["failed", true],
+          ["launching", false],
+        ],
+      );
+      yield* drainWakes(failureThread, failureAnchor.id);
+      yield* finishRow(failureThread, second!, "done");
+      yield* swarms.tick;
+      assert.isTrue((yield* rows(failure.swarmId))[1]!.released);
+      yield* drainWakes(failureThread, failureAnchor.id);
+      yield* retire(failure.swarmId);
+    }),
+  );
+
+  it.effect("sends a follow-up note from the outbox once, and again unchanged after a crash", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const swarms = yield* SwarmService.SwarmService;
+      const store = yield* SwarmStore.SwarmStore;
+      const { threadId, anchor } = yield* seedArchitect("a5-outbox");
+      const result = yield* createSwarm(threadId, {
+        maxConcurrent: 2,
+        members: members(2, { interactionMode: "plan" }),
+      });
+      yield* endRun({ threadId, runId: anchor.id });
+      for (const row of yield* rows(result.swarmId)) yield* finishRow(threadId, row, "done");
+      yield* swarms.tick;
+      yield* drainWakes(threadId, anchor.id);
+      // Two follow-up results within 5 s coalesce into one note.
+      yield* swarms.queueFollowupResult({ swarmId: result.swarmId, memberKey: "m0", followup: 1 });
+      yield* swarms.queueFollowupResult({ swarmId: result.swarmId, memberKey: "m1", followup: 1 });
+      yield* swarms.tick;
+      assert.equal(
+        (yield* store.listUnsentNotes).filter((note) => note.swarmId === result.swarmId).length,
+        1,
+      );
+      yield* TestClock.adjust("6 seconds");
+      yield* swarms.tick;
+      const notes = (yield* orchestrator.getThreadProjection(threadId)).messages.filter(
+        (message) => message.id === `message:swarm-note:${result.swarmId}:followup_result:1`,
+      );
+      assert.equal(notes.length, 1);
+      assert.include(notes[0]!.text, '"key":"m0"');
+      assert.include(notes[0]!.text, '"key":"m1"');
+      assert.isTrue((yield* rows(result.swarmId)).every((row) => row.followupNotified));
+
+      // A crash after the dispatch but before the row was marked: the same seq replays.
+      yield* store.enqueueNote({
+        swarmId: result.swarmId,
+        seq: 2,
+        kind: "followup_result",
+        membersJson: JSON.stringify([{ key: "m0", followup: 2 }]),
+        createdAt: DateTime.formatIso(yield* DateTime.now),
+      });
+      yield* TestClock.adjust("6 seconds");
+      yield* swarms.tick;
+      yield* swarms.tick;
+      const second = (yield* orchestrator.getThreadProjection(threadId)).messages.filter(
+        (message) => message.id === `message:swarm-note:${result.swarmId}:followup_result:2`,
+      );
+      assert.equal(second.length, 1);
+      assert.deepEqual(
+        (yield* store.listUnsentNotes).filter((note) => note.swarmId === result.swarmId),
+        [],
+      );
+      yield* retire(result.swarmId);
+    }),
+  );
+
+  it.effect(
+    "notes a Stop, a pause, waiting approvals, an exhausted budget, and a stalled wake",
+    () =>
+      Effect.gen(function* () {
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        const swarms = yield* SwarmService.SwarmService;
+        const store = yield* SwarmStore.SwarmStore;
+        const sink = yield* EventSink.EventSinkV2;
+        const summaries = (threadId: ThreadId) =>
+          orchestrator
+            .getThreadProjection(threadId)
+            .pipe(
+              Effect.map((projection) =>
+                projection.messages.flatMap((message) =>
+                  message.notification?.source.kind === "system"
+                    ? [message.notification.summary]
+                    : [],
+                ),
+              ),
+            );
+
+        // Pause, approvals, and budget for an open swarm, one per 30 s window.
+        const { threadId, anchor } = yield* seedArchitect("a5-notes");
+        const result = yield* createSwarm(threadId, {
+          maxConcurrent: 1,
+          members: members(2, { interactionMode: "plan" }),
+        });
+        yield* endRun({ threadId, runId: anchor.id });
+        const now = yield* DateTime.now;
+        yield* store.setInstancePause({
+          providerInstanceId: ProviderInstanceId.make("codex"),
+          pauseClass: "usage_limit",
+          until: DateTime.formatIso(DateTime.add(now, { hours: 1 })),
+          at: DateTime.formatIso(now),
+        });
+        yield* swarms.tick;
+        assert.deepEqual(yield* summaries(threadId), [
+          "Swarm admissions paused on a provider instance",
+        ]);
+        const [first] = yield* rows(result.swarmId);
+        const childRun = (yield* orchestrator.getThreadProjection(first!.childThreadId!)).runs[0]!;
+        yield* sink.write({
+          events: [
+            {
+              id: EventId.make("event:a5-notes-approval"),
+              type: "runtime-request.updated",
+              threadId: first!.childThreadId!,
+              runId: childRun.id,
+              occurredAt: now,
+              payload: {
+                id: RuntimeRequestId.make("request:a5-notes-approval"),
+                nodeId: childRun.rootNodeId!,
+                providerTurnId: null,
+                nativeRequestRef: null,
+                kind: "command",
+                status: "pending",
+                responseCapability: { type: "message" },
+                createdAt: now,
+                resolvedAt: null,
+              },
+            },
+          ],
+        });
+        yield* swarms.tick;
+        assert.equal((yield* summaries(threadId)).length, 1, "the 30 s window holds the next note");
+        yield* TestClock.adjust("31 seconds");
+        yield* swarms.tick;
+        assert.include(yield* summaries(threadId), "Swarm members are waiting on approval");
+        yield* store.updateSwarm(result.swarmId, {
+          budgetExhausted: true,
+          updatedAt: DateTime.formatIso(now),
+        });
+        yield* TestClock.adjust("31 seconds");
+        yield* swarms.tick;
+        assert.include(yield* summaries(threadId), "Swarm stopped admitting members");
+        yield* store.clearInstancePause(ProviderInstanceId.make("codex"));
+        yield* store.updateSwarm(result.swarmId, {
+          budgetExhausted: false,
+          updatedAt: DateTime.formatIso(now),
+        });
+
+        // Stop cancels the swarm, with a closing note that never waits for the window.
+        yield* orchestrator.dispatch({
+          type: "thread.stop",
+          commandId: CommandId.make("command:a5-notes-stop"),
+          threadId,
+        });
+        yield* swarms.tick;
+        assert.include(yield* summaries(threadId), "Swarm cancelled by Stop");
+        yield* retire(result.swarmId);
+
+        // A delivery that never gets a run is reported after 10 minutes.
+        const { threadId: stalledThread, anchor: stalledAnchor } =
+          yield* seedArchitect("a5-stalled");
+        const stalled = yield* createSwarm(stalledThread, {
+          maxConcurrent: 2,
+          members: members(2, { interactionMode: "plan" }),
+        });
+        yield* endRun({ threadId: stalledThread, runId: stalledAnchor.id });
+        const [m0, m1] = yield* rows(stalled.swarmId);
+        yield* finishRow(stalledThread, m0!, "m0 done");
+        yield* swarms.tick;
+        yield* finishRow(stalledThread, m1!, "m1 done");
+        yield* swarms.tick;
+        yield* TestClock.adjust("11 minutes");
+        yield* swarms.tick;
+        assert.include(
+          yield* summaries(stalledThread),
+          "Swarm results are waiting to be delivered",
+        );
+        yield* drainWakes(stalledThread, stalledAnchor.id);
+        yield* retire(stalled.swarmId);
+      }),
+  );
+
+  it.effect(
+    "completes a finished swarm, disposes a superseded task once terminal, and releases after swarm_cancel",
+    () =>
+      Effect.gen(function* () {
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        const swarms = yield* SwarmService.SwarmService;
+        const store = yield* SwarmStore.SwarmStore;
+        const { threadId, anchor } = yield* seedArchitect("a5-complete");
+        const result = yield* createSwarm(threadId, {
+          maxConcurrent: 2,
+          members: members(2, { interactionMode: "plan" }),
+        });
+        yield* endRun({ threadId, runId: anchor.id });
+        const [m0, m1] = yield* rows(result.swarmId);
+        // A held task that a retry superseded (SW-A7 sets this); it is still running.
+        const earlier = yield* admit({
+          threadId,
+          anchor,
+          swarmId: result.swarmId,
+          key: "earlier-attempt",
+          completionWake: "held",
+        });
+        yield* store.updateMember({
+          swarmId: result.swarmId,
+          memberKey: "m0",
+          patch: {
+            supersededTaskId: earlier.taskId,
+            updatedAt: DateTime.formatIso(yield* DateTime.now),
+          },
+        });
+        yield* finishRow(threadId, m0!, "m0 done");
+        yield* swarms.tick;
+        assert.equal(
+          (yield* rows(result.swarmId))[0]!.supersededTaskId,
+          earlier.taskId,
+          "kept while the superseded task runs",
+        );
+        yield* finishMember({
+          parentThreadId: threadId,
+          taskId: earlier.taskId,
+          childThreadId: earlier.childThreadId,
+          runId: earlier.childRun.id,
+          text: "earlier attempt done",
+        });
+        // swarm_cancel cancels the swarm; with its cohort open it still releases results.
+        yield* store.updateSwarm(result.swarmId, {
+          status: "cancelled",
+          updatedAt: DateTime.formatIso(yield* DateTime.now),
+        });
+        yield* finishRow(threadId, m1!, "m1 done");
+        yield* swarms.tick;
+        yield* drainWakes(threadId, anchor.id);
+        yield* swarms.tick;
+        const after = yield* rows(result.swarmId);
+        assert.isNull(after[0]!.supersededTaskId);
+        const disposed = (yield* orchestrator.getThreadProjection(threadId)).subagents.find(
+          (task) => task.id === earlier.taskId,
+        );
+        assert.equal(disposed?.completionWake, "settled_only");
+        assert.isUndefined(disposed?.completionDelivery, "a disposed attempt never wakes");
+        assert.isTrue(after[1]!.released, "released after swarm_cancel while the cohort is open");
+
+        const { threadId: doneThread, anchor: doneAnchor } = yield* seedArchitect("a5-completed");
+        const done = yield* createSwarm(doneThread, {
+          maxConcurrent: 2,
+          members: members(2, { interactionMode: "plan" }),
+        });
+        yield* endRun({ threadId: doneThread, runId: doneAnchor.id });
+        for (const row of yield* rows(done.swarmId)) yield* finishRow(doneThread, row, "done");
+        yield* swarms.tick;
+        yield* drainWakes(doneThread, doneAnchor.id);
+        yield* swarms.tick;
+        assert.equal(Option.getOrThrow(yield* store.getSwarm(done.swarmId)).status, "completed");
+      }),
+  );
+
+  it.effect(
+    "accepts doneCriteria, refuses a reused member key, and serializes concurrent adds",
+    () =>
+      Effect.gen(function* () {
+        const swarms = yield* SwarmService.SwarmService;
+        const { threadId } = yield* seedArchitect("a5-adds");
+        const result = yield* createSwarm(threadId, {
+          maxConcurrent: 1,
+          members: [
+            {
+              key: "done-when",
+              title: "Done when",
+              task: "Work.",
+              interactionMode: "plan",
+              doneCriteria: "The report lists every risk.",
+            },
+          ],
+        });
+        assert.include((yield* rows(result.swarmId))[0]!.specJson, "The report lists every risk.");
+        const add = (clientRequestId: string, keys: ReadonlyArray<string>) =>
+          swarms.addMembers({
+            scope: scopeFor(threadId),
+            input: {
+              swarmId: result.swarmId,
+              clientRequestId,
+              members: keys.map((key) => ({
+                key,
+                title: key,
+                task: "More.",
+                interactionMode: "plan" as const,
+              })),
+            },
+            resolver,
+          });
+        yield* add("first", ["a1"]);
+        const reused = yield* add("second", ["a1"]).pipe(Effect.flip);
+        assert.include(reused.message, "repeated");
+        // 2 exist; two concurrent adds of 24 cannot both pass the 48 total.
+        const many = (prefix: string) =>
+          Array.from({ length: 24 }, (_, index) => `${prefix}${index}`);
+        const outcomes = yield* Effect.all(
+          [add("left", many("l")).pipe(Effect.result), add("right", many("r")).pipe(Effect.result)],
+          { concurrency: "unbounded" },
+        );
+        assert.equal(outcomes.filter((outcome) => outcome._tag === "Success").length, 1);
+        assert.isAtMost((yield* rows(result.swarmId)).length, 48);
+        yield* retire(result.swarmId);
+      }),
+  );
+
   it.effect("returns one swarm to two concurrent calls with the same clientRequestId", () =>
     Effect.gen(function* () {
       const { threadId } = yield* seedArchitect("a3-race");
@@ -2347,6 +2888,7 @@ it.layer(layerTest)("held wakes and release (SW-A5)", (it) => {
         taskId,
         completionWake: "always",
         completionDetail: detail,
+        swarmRelease: true,
       });
     });
 
@@ -2487,3 +3029,103 @@ it.layer(layerTest)("held wakes and release (SW-A5)", (it) => {
     }),
   );
 });
+
+it.layer(Layer.merge(layerTest, DelegatedTaskQuestionReactor.layer.pipe(Layer.provide(layerTest))))(
+  "held members and clients (SW-A5)",
+  (it) => {
+    it.effect(
+      "refuses a client's completionDetail and a release of a held task without the marker",
+      () =>
+        Effect.gen(function* () {
+          const orchestrator = yield* Orchestrator.OrchestratorV2;
+          const { threadId, anchor } = yield* seedArchitect("a5-client-release");
+          const swarmId = SwarmId.make("swarm:a5-client-release");
+          yield* anchorSwarm(threadId, anchor.id, swarmId);
+          const held = yield* admit({
+            threadId,
+            anchor,
+            swarmId,
+            key: "held",
+            completionWake: "held",
+          });
+          const release = {
+            type: "delegated_task.wake-policy" as const,
+            commandId: CommandId.make("command:a5-client-release"),
+            parentThreadId: threadId,
+            taskId: held.taskId,
+            completionWake: "always" as const,
+          };
+          // A client cannot set a detail, and loses the server's marker.
+          const refused = yield* withCreationProvenance(
+            { ...release, completionDetail: "forged digest" },
+            { createdBy: "user", creationSource: "web" },
+          ).pipe(Effect.flip);
+          assert.include(refused.message, "completionDetail");
+          const stripped = yield* withCreationProvenance(
+            { ...release, swarmRelease: true },
+            { createdBy: "user", creationSource: "web" },
+          );
+          assert.notProperty(stripped, "swarmRelease");
+          // Without the marker the handler refuses to release a held task.
+          const exit = yield* orchestrator.dispatch(stripped).pipe(Effect.exit);
+          assert.isTrue(Exit.isFailure(exit));
+          assert.include(
+            String(Exit.isFailure(exit) ? exit.cause : ""),
+            "only the swarm releases it",
+          );
+          const task = (yield* orchestrator.getThreadProjection(threadId)).subagents.find(
+            (row) => row.id === held.taskId,
+          );
+          assert.equal(task?.completionWake, "held");
+        }),
+    );
+
+    it.effect("wakes the architect when a held member asks a question", () =>
+      Effect.gen(function* () {
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        const reactor = yield* DelegatedTaskQuestionReactor.DelegatedTaskQuestionReactor;
+        const sink = yield* EventSink.EventSinkV2;
+        const { threadId, anchor } = yield* seedArchitect("a5-question");
+        const swarmId = SwarmId.make("swarm:a5-question");
+        yield* anchorSwarm(threadId, anchor.id, swarmId);
+        const held = yield* admit({
+          threadId,
+          anchor,
+          swarmId,
+          key: "asker",
+          completionWake: "held",
+        });
+        const now = yield* DateTime.now;
+        const question = {
+          id: EventId.make("event:a5-question"),
+          type: "runtime-request.updated" as const,
+          threadId: held.childThreadId,
+          runId: held.childRun.id,
+          occurredAt: now,
+          payload: {
+            id: RuntimeRequestId.make("request:a5-question"),
+            nodeId: held.childRun.rootNodeId!,
+            providerTurnId: null,
+            nativeRequestRef: null,
+            kind: "user_input" as const,
+            status: "pending" as const,
+            responseCapability: {
+              type: "live" as const,
+              providerSessionId: ProviderSessionId.make("session:a5-question"),
+            },
+            createdAt: now,
+            resolvedAt: null,
+          },
+        };
+        yield* sink.write({ events: [question] });
+        // The architect is still in its turn; a held member's question wakes it all the same.
+        yield* reactor.handle(question);
+        const wakes = (yield* orchestrator.getThreadProjection(threadId)).messages.filter(
+          (message) => message.notification?.source.kind === "delegated_task",
+        );
+        assert.equal(wakes.length, 1);
+        assert.include(wakes[0]!.text, "blocked on a question");
+      }),
+    );
+  },
+);
