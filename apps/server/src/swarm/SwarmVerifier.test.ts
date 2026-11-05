@@ -101,6 +101,8 @@ it.live("runs argv in the checkout and reports a pass, a failure, and the output
         timeoutMs: 30_000,
       });
       expect(missing.passed).toBe(false);
+      expect(missing.notStarted).toBe(true);
+      expect(failed.notStarted).toBe(false);
       const unknownProject = yield* verifier
         .checkoutOf({ worktreePath: null, projectId: ProjectId.make("project:gone") })
         .pipe(Effect.flip);

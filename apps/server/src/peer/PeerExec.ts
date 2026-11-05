@@ -326,7 +326,7 @@ const make = Effect.gen(function* () {
             return next;
           });
 
-          const outcome = yield* started.await;
+          const { spawnFailed: _spawnFailed, ...outcome } = yield* started.await;
           const result: PeerExecResult = {
             execId: input.execId,
             ...outcome,

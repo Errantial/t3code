@@ -310,6 +310,7 @@ export const SwarmEnvelope = Schema.Struct({
       timedOut: Schema.Boolean,
       attempts: NonNegativeInt,
       outputTail: Schema.String.check(Schema.isMaxLength(4_096)),
+      notStarted: Schema.optional(Schema.Boolean), // the command could not be started
     }),
   ),
   // A member with verify that ended claimed_done unchecked: a thread left full-access, the

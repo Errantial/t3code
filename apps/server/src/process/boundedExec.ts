@@ -51,6 +51,8 @@ interface ExecState {
   truncated: boolean;
   cancelled: boolean;
   timedOut: boolean;
+  spawned: boolean;
+  spawnFailed: boolean;
   readonly startedAt: number;
   readonly maxOutputBytes: number;
   readonly platform: NodeJS.Platform;
@@ -110,6 +112,8 @@ export interface BoundedExecOutcome {
   readonly exitCode: number | null;
   readonly signal: NodeJS.Signals | null;
   readonly timedOut: boolean;
+  /** The program never started (not found, not executable): no exit code to report. */
+  readonly spawnFailed: boolean;
   readonly cancelled: boolean;
   readonly durationMs: number;
   readonly stdoutTail: string;
@@ -127,6 +131,7 @@ const outcomeOf = (
   exitCode,
   signal: signal ?? null,
   timedOut: state.timedOut,
+  spawnFailed: state.spawnFailed,
   cancelled: state.cancelled,
   durationMs: Date.now() - state.startedAt,
   stdoutTail: state.stdout.text,
@@ -183,6 +188,8 @@ export const startBounded = (
         maxOutputBytes: input.maxOutputBytes,
         platform: input.platform,
         settled: false,
+        spawned: false,
+        spawnFailed: false,
         settle: undefined,
         timer: undefined,
       };
@@ -197,7 +204,13 @@ export const startBounded = (
         for (const listener of listeners.splice(0)) listener(settled);
       };
       state.settle = finish;
-      child.once("error", () => finish(null, null));
+      child.once("spawn", () => {
+        state.spawned = true;
+      });
+      child.once("error", () => {
+        if (!state.spawned) state.spawnFailed = true;
+        finish(null, null);
+      });
       child.once("close", (code, signal) => finish(code, signal));
       child.stdout?.on("data", (chunk: Buffer) => append(state, "stdout", chunk));
       child.stderr?.on("data", (chunk: Buffer) => append(state, "stderr", chunk));

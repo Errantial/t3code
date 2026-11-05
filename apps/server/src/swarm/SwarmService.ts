@@ -244,6 +244,8 @@ const DELIVERY_STALL_MS = 10 * 60_000;
 const MAX_RELEASE_ATTEMPTS = 5;
 const VERIFY_DEFAULT_TIMEOUT_MS = 600_000;
 const VERIFY_DEFAULT_MAX_RETRIES = 2;
+const VERIFY_NOT_STARTED_MESSAGE =
+  'The verify command could not be started; on Windows use ["cmd", "/c", …] for .cmd/.bat commands.';
 /** The retry message carries the last 2 KB of the verify output. */
 const VERIFY_RETRY_OUTPUT_CHARACTERS = 2_048;
 
@@ -849,9 +851,11 @@ const make = Effect.gen(function* () {
       timedOut: input.outcome.timedOut,
       attempts: member.verifyAttempts + 1,
       outputTail: input.outcome.outputTail,
+      ...(input.outcome.notStarted ? { notStarted: true } : {}),
     };
     const maxRetries = spec.verifyMaxRetries ?? VERIFY_DEFAULT_MAX_RETRIES;
-    const retry = !verify.passed && member.verifyAttempts < maxRetries;
+    // A command that cannot start fails the same way every time: final, with no retry.
+    const retry = !verify.passed && !input.outcome.notStarted && member.verifyAttempts < maxRetries;
     // A retry is not sent once the swarm row is cancelled or detached; the check fails instead.
     const retrying = retry && swarm.value.status === "active";
     const status = verify.passed ? "verified" : retrying ? "running" : "failed";
@@ -867,7 +871,9 @@ const make = Effect.gen(function* () {
         ? {
             failure: {
               class: "verify" as const,
-              message: `The verify command failed after ${verify.attempts} ${verify.attempts === 1 ? "check" : "checks"}.`,
+              message: input.outcome.notStarted
+                ? VERIFY_NOT_STARTED_MESSAGE
+                : `The verify command failed after ${verify.attempts} ${verify.attempts === 1 ? "check" : "checks"}.`,
             },
           }
         : {}),

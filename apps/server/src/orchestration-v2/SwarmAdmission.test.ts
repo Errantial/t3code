@@ -1423,12 +1423,14 @@ const verifyPass: SwarmVerifier.SwarmVerifyOutcome = {
   passed: true,
   exitCode: 0,
   timedOut: false,
+  notStarted: false,
   outputTail: "all tests passed",
 };
 const verifyFail: SwarmVerifier.SwarmVerifyOutcome = {
   passed: false,
   exitCode: 1,
   timedOut: false,
+  notStarted: false,
   outputTail: "FAIL src/a.test.ts",
 };
 const layerFakeVerifier = Layer.succeed(
@@ -3319,7 +3321,13 @@ it.layer(layerSwarm)("verify (SW-A6)", (it) => {
   it.effect("fails a timed-out check with no retries left", () =>
     Effect.gen(function* () {
       resetVerify();
-      verifyScript.push({ passed: false, exitCode: null, timedOut: true, outputTail: "" });
+      verifyScript.push({
+        passed: false,
+        exitCode: null,
+        timedOut: true,
+        notStarted: false,
+        outputTail: "",
+      });
       const { threadId, anchor } = yield* seedArchitect("a6-timeout");
       const result = yield* createSwarm(threadId, {
         members: verifyMembers(1, { argv: ["pnpm", "test"], timeoutMs: 5_000, maxRetries: 0 }),
@@ -3330,6 +3338,33 @@ it.layer(layerSwarm)("verify (SW-A6)", (it) => {
       assert.equal(failed.status, "failed");
       assert.include(failed.envelopeJson ?? "", `"timedOut":true`);
       assert.equal(failed.verifyAttempts, 0, "no retry message was sent");
+      yield* retire(result.swarmId);
+    }),
+  );
+
+  it.effect("fails at once, with no retry, when the verify command cannot start", () =>
+    Effect.gen(function* () {
+      resetVerify();
+      verifyScript.push({
+        passed: false,
+        exitCode: null,
+        timedOut: false,
+        notStarted: true,
+        outputTail: "",
+      });
+      const { threadId, anchor } = yield* seedArchitect("a6-not-started");
+      const result = yield* createSwarm(threadId, {
+        members: verifyMembers(1, { argv: ["npm", "test"] }),
+      });
+      yield* endRun({ threadId, runId: anchor.id });
+      yield* finishRow(threadId, (yield* rows(result.swarmId))[0]!, "m0 done");
+      const failed = yield* afterPasses(result.swarmId, "m0", 2);
+      assert.equal(failed.status, "failed");
+      assert.equal(failed.failureClass, "verify");
+      assert.equal(failed.verifyAttempts, 0, "no retry message for a command that cannot start");
+      assert.include(failed.envelopeJson ?? "", `"notStarted":true`);
+      assert.include(failed.envelopeJson ?? "", `could not be started; on Windows use`);
+      assert.equal(verifyCalls.length, 1);
       yield* retire(result.swarmId);
     }),
   );
