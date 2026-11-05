@@ -1348,7 +1348,10 @@ const make = Effect.gen(function* () {
           DateTime.formatIso(DateTime.add(nowDt, { milliseconds: USAGE_LIMIT_PAUSE_MS })),
         now,
       });
-      if (settings.autoResumeLimitedThreads && resetAt !== null) {
+      // Once the swarm's budget is used, the member fails and its continuation is turned off:
+      // a resume would start a turn outside admission and past the budget.
+      if (swarm.budgetExhausted) yield* disarmContinuation(swarm, member);
+      if (settings.autoResumeLimitedThreads && resetAt !== null && !swarm.budgetExhausted) {
         // The usage-limit continuation owns resuming; the member frees its global slot.
         yield* store.updateMember({
           swarmId: swarm.swarmId,
@@ -2936,6 +2939,34 @@ const make = Effect.gen(function* () {
   });
 
   /**
+   * Turns off a member thread's usage-limit continuation, matched to the thread's latest limited
+   * run, so the recovery worker never resumes it outside admission.
+   */
+  const disarmContinuation = Effect.fn("SwarmService.disarmContinuation")(function* (
+    swarm: SwarmStore.SwarmRecord,
+    member: SwarmStore.SwarmMemberRecord,
+  ) {
+    if (member.childThreadId === null) return;
+    const shell = yield* threads.getThreadShell(member.childThreadId).pipe(Effect.option);
+    const thread = Option.getOrNull(shell);
+    if (thread?.latestRunId == null || thread.usageLimitResetAt == null) return;
+    yield* threads
+      .dispatch({
+        type: "thread.metadata.update",
+        commandId: CommandId.make(
+          `swarm-disarm:${swarm.swarmId}:${member.memberKey}:${member.attempt}:${thread.latestRunId}`,
+        ),
+        threadId: member.childThreadId,
+        limitRecovery: {
+          runId: thread.latestRunId,
+          resetAt: thread.usageLimitResetAt,
+          autoResume: false,
+        },
+      })
+      .pipe(logged("swarm.disarm-error", { swarmId: swarm.swarmId, memberKey: member.memberKey }));
+  });
+
+  /**
    * Stops a launched member (no MCP scope): disarms a `limit_wait` continuation, stops the child
    * and its subtree, and only then marks it `cancelled` with an envelope. Returns false, leaving
    * the member as it was, when the stop could not be dispatched.
@@ -2957,27 +2988,8 @@ const make = Effect.gen(function* () {
           : reason === "budget"
             ? "Stopped: the swarm member reached its turn or time limit."
             : "The swarm's architect thread was closed.";
-    if (member.status === "limit_wait") {
-      // The usage-limit continuation resumes outside admission; disarm it before the stop.
-      const shell = yield* threads.getThreadShell(childThreadId).pipe(Effect.option);
-      const thread = Option.getOrNull(shell);
-      if (thread?.latestRunId != null && thread.usageLimitResetAt != null) {
-        yield* threads
-          .dispatch({
-            type: "thread.metadata.update",
-            commandId: CommandId.make(
-              `swarm-disarm:${swarm.swarmId}:${member.memberKey}:${member.attempt}:${thread.latestRunId}`,
-            ),
-            threadId: childThreadId,
-            limitRecovery: {
-              runId: thread.latestRunId,
-              resetAt: thread.usageLimitResetAt,
-              autoResume: false,
-            },
-          })
-          .pipe(logged("swarm.disarm-error", ids));
-      }
-    }
+    // The usage-limit continuation resumes outside admission; disarm it before the stop.
+    if (member.status === "limit_wait") yield* disarmContinuation(swarm, member);
     yield* abortVerify(member);
     const commandId = CommandId.make(
       `swarm-stop:${swarm.swarmId}:${member.memberKey}:${member.attempt}`,
@@ -3093,17 +3105,20 @@ const make = Effect.gen(function* () {
       });
       yield* stopMember(swarm, member, "budget", settings);
     }
-    if (swarm.budgetExhausted || swarm.maxTotalTurns === null) return;
+    if (swarm.maxTotalTurns === null) return;
     const after = yield* store.listMembers(swarm.swarmId);
-    const used = after.reduce((total, member) => total + member.turnsUsed, 0);
-    if (used < swarm.maxTotalTurns) return;
     const now = yield* nowIso;
-    yield* store.updateSwarm(swarm.swarmId, { budgetExhausted: true, updatedAt: now });
-    yield* Effect.logInfo("swarm.budget-exhausted", {
-      swarmId: swarm.swarmId,
-      turns: used,
-      maxTotalTurns: swarm.maxTotalTurns,
-    });
+    if (!swarm.budgetExhausted) {
+      const used = after.reduce((total, member) => total + member.turnsUsed, 0);
+      if (used < swarm.maxTotalTurns) return;
+      yield* store.updateSwarm(swarm.swarmId, { budgetExhausted: true, updatedAt: now });
+      yield* Effect.logInfo("swarm.budget-exhausted", {
+        swarmId: swarm.swarmId,
+        turns: used,
+        maxTotalTurns: swarm.maxTotalTurns,
+      });
+    }
+    // Every pass while the budget is used: a member may reach limit_wait after exhaustion.
     for (const member of after) {
       if (neverLaunched(member)) {
         yield* store.updateMember({

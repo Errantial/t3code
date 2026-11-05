@@ -4941,6 +4941,44 @@ it.layer(layerSwarm)("failures, usage limits, and instance health (SW-A8)", (it)
     }),
   );
 
+  it.effect("a usage limit after the budget is used fails the member and never resumes", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const swarms = yield* SwarmService.SwarmService;
+      const settings = yield* ServerSettings.ServerSettingsService;
+      yield* atHour(7);
+      yield* settings.updateSettings({ autoResumeLimitedThreads: true });
+      const { threadId, anchor } = yield* seedArchitect("a8-limit-budget");
+      const result = yield* createSwarm(threadId, {
+        maxTotalTurns: 1,
+        members: members(1, { interactionMode: "plan" }),
+      });
+      yield* endRun({ threadId, runId: anchor.id });
+      yield* swarms.tick;
+      const store = yield* SwarmStore.SwarmStore;
+      assert.isTrue(Option.getOrThrow(yield* store.getSwarm(result.swarmId)).budgetExhausted);
+      const row = (yield* rows(result.swarmId))[0]!;
+      const resetAt = DateTime.formatIso(DateTime.add(yield* DateTime.now, { minutes: 5 }));
+      yield* failRow(row, providerFailure("usage_limit", { resetAt }));
+      yield* swarms.tick;
+      const failed = (yield* rows(result.swarmId))[0]!;
+      assert.equal(failed.status, "failed", "no limit_wait once the budget is used");
+      assert.equal(failed.failureClass, "usage_limit");
+      const shell = (yield* orchestrator.getShellSnapshot()).threads.find(
+        (thread) => thread.id === row.childThreadId,
+      )!;
+      assert.isFalse(shell.limitRecovery?.autoResume, "the continuation is turned off");
+      // The recovery worker finds nothing to resume after the reset.
+      yield* TestClock.adjust(Duration.minutes(6));
+      const later = (yield* orchestrator.getShellSnapshot()).threads.find(
+        (thread) => thread.id === row.childThreadId,
+      )!;
+      assert.isNull(limitRecoveryCommand(later, true, DateTime.toEpochMillis(yield* DateTime.now)));
+      yield* resetHealth;
+      yield* retire(result.swarmId);
+    }),
+  );
+
   it.effect("a usage limit without auto-resume fails the member and pauses the instance", () =>
     Effect.gen(function* () {
       const swarms = yield* SwarmService.SwarmService;
