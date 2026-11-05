@@ -6084,11 +6084,8 @@ it.layer(layerSwarm)("qualification (SW-A11)", (it) => {
         }),
       });
       assert.deepEqual(
-        result.members.map((row) => [row.status, row.providerInstanceId]),
-        [
-          ["launching", "codex"],
-          ["launching", "codex"],
-        ],
+        result.members.map((row) => `${row.status}:${row.providerInstanceId}`),
+        ["launching:codex", "launching:codex"],
       );
       providerHealth = [];
       yield* retire(result.swarmId);
