@@ -1459,6 +1459,28 @@ const layerFakeVerifier = Layer.succeed(
 const prepareRuns: Array<string> = [];
 /** What placement reads as provider health; tests change it. */
 let providerHealth: ReadonlyArray<ServerProvider> = [];
+/** Child threads whose thread.stop the swarm's dispatch fails, to test a failed stopMember. */
+const failStopThreads = new Set<string>();
+const layerFailingStops = Layer.effect(
+  ThreadManagementService.ThreadManagementService,
+  Effect.gen(function* () {
+    const real = yield* ThreadManagementService.ThreadManagementService;
+    return {
+      ...real,
+      dispatch: (command: Parameters<typeof real.dispatch>[0]) =>
+        command.type === "thread.stop" && failStopThreads.has(command.threadId)
+          ? Effect.fail(
+              new Orchestrator.OrchestratorDispatchError({
+                commandId: command.commandId,
+                commandType: command.type,
+                cause: "Refused for the test.",
+              }),
+            )
+          : real.dispatch(command),
+    } as typeof real;
+  }),
+);
+
 const layerSwarm = SwarmService.layer.pipe(
   Layer.provideMerge(SwarmStore.layer.pipe(Layer.provide(SqlitePersistence.layerMemory))),
   Layer.provide(
@@ -1475,6 +1497,7 @@ const layerSwarm = SwarmService.layer.pipe(
     } as unknown as ProviderRegistry.ProviderRegistry["Service"]),
   ),
   Layer.provide(layerFakeVerifier),
+  Layer.provide(layerFailingStops),
   Layer.provideMerge(ServerSettings.layerTest({ swarmV2Enabled: true, swarmMaxConcurrent: 2 })),
   Layer.provideMerge(layerTest),
 );
@@ -4060,6 +4083,44 @@ it.layer(layerSwarm)("status, cancel, retry, collect, and follow-up (SW-A7)", (i
         message: "Again.",
       }).pipe(Effect.flip);
       assert.include(tooMany.message, "already had 5 follow-ups");
+      yield* retire(result.swarmId);
+    }),
+  );
+
+  it.effect("a failed stop leaves the member as it was, retries, and gives up with a note", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const swarms = yield* SwarmService.SwarmService;
+      const { threadId, anchor } = yield* seedArchitect("a7-stop-fails");
+      const result = yield* createSwarm(threadId, {
+        members: members(2, { interactionMode: "plan" }),
+      });
+      yield* endRun({ threadId, runId: anchor.id });
+      const [m0, m1] = yield* rows(result.swarmId);
+      failStopThreads.add(m0!.childThreadId!);
+      failStopThreads.add(m1!.childThreadId!);
+      const partial = yield* cancelIn(threadId, { swarmId: result.swarmId, keys: ["m0"] });
+      assert.deepEqual(partial.cancelled, []);
+      assert.equal(partial.notCancelled[0]?.code, "stop_failed");
+      assert.equal((yield* rows(result.swarmId))[0]!.status, m0!.status, "left as it was");
+      // The whole swarm: both stops fail; each pass tries again.
+      yield* cancelIn(threadId, { swarmId: result.swarmId });
+      assert.deepEqual(
+        (yield* rows(result.swarmId)).map((row) => row.status),
+        [m0!.status, m1!.status],
+      );
+      // m0's thread accepts the stop again: the next pass stops it.
+      failStopThreads.delete(m0!.childThreadId!);
+      yield* swarms.tick;
+      assert.equal((yield* rows(result.swarmId))[0]!.status, "cancelled");
+      // m1 keeps failing: after five tries the swarm gives up, once, with a note.
+      for (let pass = 0; pass < 5; pass += 1) yield* swarms.tick;
+      assert.notEqual((yield* rows(result.swarmId))[1]!.status, "cancelled");
+      const notes = (yield* orchestrator.getThreadProjection(threadId)).messages.filter((message) =>
+        message.text.includes("member m1 could not be stopped"),
+      );
+      assert.equal(notes.length, 1);
+      failStopThreads.delete(m1!.childThreadId!);
       yield* retire(result.swarmId);
     }),
   );
