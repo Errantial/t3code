@@ -236,7 +236,8 @@ type SwarmNoteKind =
   | "budget"
   | "instance_paused"
   | "approvals"
-  | "delivery_stalled";
+  | "delivery_stalled"
+  | "undelivered";
 
 const NOTE_WINDOW_MS = 30_000;
 const FOLLOWUP_COALESCE_MS = 5_000;
@@ -1253,7 +1254,44 @@ const make = Effect.gen(function* () {
       // Progress: one member that does not fit still goes, alone (it may arrive as a pointer).
       if (used > DELEGATED_RESULT_INLINE_BYTES) break;
     }
+    /** Gives up on a release: the result stays in swarm_collect, and the architect is told. */
+    const giveUp = Effect.fn("SwarmService.giveUpRelease")(function* (
+      member: SwarmStore.SwarmMemberRecord,
+      reason: string,
+    ) {
+      yield* Effect.logWarning("swarm.release-abandoned", {
+        swarmId: swarm.swarmId,
+        memberKey: member.memberKey,
+        reason,
+      });
+      yield* notifyArchitect(swarm, {
+        kind: "undelivered",
+        key: `${member.memberKey}:${member.attempt}`,
+        summary: "A swarm result could not be delivered",
+        text: `Swarm ${swarm.swarmId}: member ${member.memberKey}'s result could not be delivered; read it with swarm_collect.`,
+        routine: false,
+      });
+    });
     for (const { member, digest } of releases) {
+      const ref = memberRef(member);
+      const markReleased = Effect.gen(function* () {
+        releaseAttempts.delete(ref);
+        yield* store.updateMember({
+          swarmId: swarm.swarmId,
+          memberKey: member.memberKey,
+          patch: { released: true, updatedAt: yield* nowIso },
+        });
+      });
+      // The task's state first: a task no longer held is either this release already applied
+      // (a replay after a crash) or something else changed it, and then nothing is sent.
+      const task = tasks.get(String(member.taskId));
+      if (task !== undefined && task.completionWake !== "held") {
+        if (task.completionWake !== "always" || task.completionDetail !== digest) {
+          yield* giveUp(member, "not_held");
+        }
+        yield* markReleased;
+        continue;
+      }
       const released = yield* threads
         .dispatch({
           type: "delegated_task.wake-policy",
@@ -1269,29 +1307,23 @@ const make = Effect.gen(function* () {
         .pipe(Effect.result);
       if (Result.isFailure(released)) {
         const errorTag = storageOrDispatchTag(released.failure);
-        // A refusal is final (the task is no longer held, or this id was rejected before and
-        // replays as rejected); other errors retry, a few times.
-        const refused =
-          errorTag === "OrchestratorDispatchError" ||
-          errorTag === "OrchestratorCommandPreviouslyRejectedError";
-        const ref = memberRef(member);
+        // Only a rejected receipt is final here: this command id replays as rejected forever.
+        // OrchestratorDispatchError is generic; with the task still held it is retried, a few
+        // times.
+        const rejected = errorTag === "OrchestratorCommandPreviouslyRejectedError";
         const attempts = (releaseAttempts.get(ref) ?? 0) + 1;
         releaseAttempts.set(ref, attempts);
-        const gaveUp = refused || attempts >= MAX_RELEASE_ATTEMPTS;
+        const gaveUp = rejected || attempts >= MAX_RELEASE_ATTEMPTS;
         yield* Effect.logWarning("swarm.release-failed", {
           swarmId: swarm.swarmId,
           memberKey: member.memberKey,
           errorTag,
-          outcome: refused ? "refused" : gaveUp ? "retries_exhausted" : "will_retry",
+          outcome: rejected ? "rejected" : gaveUp ? "retries_exhausted" : "will_retry",
         });
         if (!gaveUp) continue;
-        releaseAttempts.delete(ref);
+        yield* giveUp(member, rejected ? "rejected" : "retries_exhausted");
       }
-      yield* store.updateMember({
-        swarmId: swarm.swarmId,
-        memberKey: member.memberKey,
-        patch: { released: true, updatedAt: yield* nowIso },
-      });
+      yield* markReleased;
     }
     yield* Effect.logInfo("swarm.released", {
       swarmId: swarm.swarmId,
