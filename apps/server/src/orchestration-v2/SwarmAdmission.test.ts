@@ -3291,6 +3291,42 @@ it.layer(layerSwarm)("verify (SW-A6)", (it) => {
     }),
   );
 
+  it.effect("tells the architect once when a result can no longer be released", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const swarms = yield* SwarmService.SwarmService;
+      resetVerify();
+      const { threadId, anchor } = yield* seedArchitect("a5-undelivered");
+      const result = yield* createSwarm(threadId, { members: members(1) });
+      yield* endRun({ threadId, runId: anchor.id });
+      const row = (yield* rows(result.swarmId))[0]!;
+      yield* finishRow(threadId, row, "m0 done");
+      // Something other than the release changed the task: it is no longer held.
+      yield* orchestrator.dispatch({
+        type: "delegated_task.wake-policy",
+        commandId: CommandId.make("command:a5-undelivered-dispose"),
+        parentThreadId: threadId,
+        taskId: row.taskId!,
+        completionWake: "settled_only",
+        swarmRelease: true,
+      });
+      yield* swarms.tick;
+      yield* swarms.tick;
+      assert.isTrue((yield* rows(result.swarmId))[0]!.released);
+      const parent = yield* orchestrator.getThreadProjection(threadId);
+      assert.equal(
+        parent.subagents.find((task) => task.id === row.taskId)?.completionWake,
+        "settled_only",
+        "nothing is sent for a task that is no longer held",
+      );
+      const notes = parent.messages.filter((message) =>
+        message.text.includes("m0's result could not be delivered; read it with swarm_collect"),
+      );
+      assert.equal(notes.length, 1);
+      yield* retire(result.swarmId);
+    }),
+  );
+
   it.effect("wraps the failed command's output as data in the retry message", () =>
     Effect.gen(function* () {
       resetVerify();
