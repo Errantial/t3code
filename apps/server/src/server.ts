@@ -75,6 +75,7 @@ import * as PeerExecReceipts from "./peer/PeerExecReceipts.ts";
 import * as RemoteDelegation from "./peer/RemoteDelegation.ts";
 import * as SwarmService from "./swarm/SwarmService.ts";
 import * as SwarmStore from "./swarm/SwarmStore.ts";
+import * as SwarmVerifier from "./swarm/SwarmVerifier.ts";
 import * as PeerLinkRequests from "./peer/PeerLinkRequests.ts";
 import * as PeerLinks from "./peer/PeerLinks.ts";
 import * as PeerMcpClient from "./peer/PeerMcpClient.ts";
@@ -793,7 +794,12 @@ const layerMakeRoutes = Layer.mergeAll(
     ),
   ),
   // Swarm v2 (migration 076); nothing reads or writes the swarm tables while swarmV2Enabled is off.
-  Layer.provide(SwarmService.layer.pipe(Layer.provideMerge(SwarmStore.layer))),
+  Layer.provide(
+    SwarmService.layer.pipe(
+      Layer.provideMerge(SwarmStore.layer),
+      Layer.provide(SwarmVerifier.layer.pipe(Layer.provide(RuntimeLayer.layerProjectService))),
+    ),
+  ),
   Layer.provide(ServerSelfUpdate.layer.pipe(Layer.provide(layerDesktopAppUpdate))),
   Layer.provide(layerCommandReadiness),
   Layer.provide(ServerHttp.layerBrowserApiCors),

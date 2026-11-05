@@ -2,7 +2,6 @@
 import * as NodeCrypto from "node:crypto";
 import * as NodeFSP from "node:fs/promises";
 import * as NodePath from "node:path";
-import * as NodeChildProcess from "node:child_process";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 
 import {
@@ -30,6 +29,7 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Ref from "effect/Ref";
 
+import * as BoundedExec from "../process/boundedExec.ts";
 import * as ProjectService from "../project/ProjectService.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as PeerExecReceipts from "./PeerExecReceipts.ts";
@@ -38,121 +38,6 @@ const failure = (
   code: ConstructorParameters<typeof OrchestratorMcpFailure>[0]["code"],
   message: string,
 ) => new OrchestratorMcpFailure({ code, message });
-
-interface TailBuffer {
-  readonly push: (chunk: Buffer) => void;
-  readonly text: string;
-}
-
-const makeTail = (cap: number): TailBuffer => {
-  const chunks: Array<Buffer> = [];
-  let length = 0;
-  return {
-    push: (chunk) => {
-      chunks.push(chunk);
-      length += chunk.length;
-      while (length > cap && chunks.length > 1) {
-        const first = chunks.shift();
-        if (first === undefined) break;
-        length -= first.length;
-      }
-      const head = chunks[0];
-      if (head !== undefined && length > cap) {
-        const keep = head.subarray(length - cap);
-        chunks[0] = keep;
-        length = cap;
-      }
-    },
-    get text() {
-      return Buffer.concat(chunks).toString("utf8");
-    },
-  };
-};
-
-interface ExecState {
-  child: NodeChildProcess.ChildProcess | undefined;
-  readonly stdout: TailBuffer;
-  readonly stderr: TailBuffer;
-  stdoutBytes: number;
-  stderrBytes: number;
-  truncated: boolean;
-  cancelled: boolean;
-  timedOut: boolean;
-  readonly startedAt: number;
-  readonly maxOutputBytes: number;
-  readonly platform: NodeJS.Platform;
-  settled: boolean;
-  settle: ((exitCode: number | null, signal: NodeJS.Signals | null) => void) | undefined;
-  timer: NodeJS.Timeout | undefined;
-}
-
-const killTree = (state: ExecState) => {
-  if (state.settled) return;
-  const child = state.child;
-  if (child === undefined) return;
-  const pid = child.pid;
-  if (pid === undefined) return;
-  if (state.platform === "win32") {
-    NodeChildProcess.spawnSync("taskkill", ["/PID", String(pid), "/T", "/F"], {
-      windowsHide: true,
-      stdio: "ignore",
-    });
-    return;
-  }
-  try {
-    process.kill(-pid, "SIGTERM");
-  } catch {
-    try {
-      child.kill("SIGTERM");
-    } catch {
-      // Already gone.
-    }
-  }
-  const timer = setTimeout(() => {
-    try {
-      process.kill(-pid, "SIGKILL");
-    } catch {
-      try {
-        child.kill("SIGKILL");
-      } catch {
-        // Already gone.
-      }
-    }
-  }, 2_000);
-  timer.unref();
-};
-
-const append = (state: ExecState, stream: "stdout" | "stderr", chunk: Buffer) => {
-  const target = stream === "stdout" ? state.stdout : state.stderr;
-  target.push(chunk);
-  if (stream === "stdout") state.stdoutBytes += chunk.length;
-  else state.stderrBytes += chunk.length;
-  if (state.stdoutBytes > state.maxOutputBytes || state.stderrBytes > state.maxOutputBytes) {
-    state.truncated = true;
-  }
-};
-
-const resultOf = (
-  input: { readonly execId: string; readonly cwd: string },
-  state: ExecState,
-  exitCode: number | null,
-  signal: NodeJS.Signals | null,
-): PeerExecResult => ({
-  execId: input.execId,
-  exitCode,
-  signal: signal ?? null,
-  timedOut: state.timedOut,
-  cancelled: state.cancelled,
-  durationMs: Date.now() - state.startedAt,
-  stdoutTail: state.stdout.text,
-  stderrTail: state.stderr.text,
-  stdoutBytes: state.stdoutBytes,
-  stderrBytes: state.stderrBytes,
-  truncated: state.truncated,
-  cwd: input.cwd,
-  platform: state.platform,
-  outputRetained: true,
-});
 
 const canonicalRequest = (input: {
   readonly argv: ReadonlyArray<string>;
@@ -229,7 +114,7 @@ const make = Effect.gen(function* () {
   const inFlight = yield* Ref.make(
     new Map<string, Deferred.Deferred<PeerExecResult, OrchestratorMcpFailure>>(),
   );
-  const states = yield* Ref.make(new Map<string, ExecState>());
+  const states = yield* Ref.make(new Map<string, BoundedExec.BoundedProcess>());
   const lastSweep = yield* Ref.make(0);
 
   const settingsNow = settings.getSettings.pipe(Effect.orElseSucceed(() => undefined));
@@ -425,68 +310,30 @@ const make = Effect.gen(function* () {
             } satisfies PeerExecResult;
           }
 
-          const child = yield* Effect.try({
-            try: () =>
-              NodeChildProcess.spawn(input.argv[0] as string, input.argv.slice(1), {
-                cwd: prepared.cwd,
-                env: { ...process.env, ...prepared.env },
-                windowsHide: true,
-                stdio: ["ignore", "pipe", "pipe"],
-                detached: platform !== "win32",
-              }),
-            catch: () => failure("invalid_request", "The command could not be started."),
-          });
-
-          const state: ExecState = {
-            child,
-            stdout: makeTail(prepared.maxOutputBytes),
-            stderr: makeTail(prepared.maxOutputBytes),
-            stdoutBytes: 0,
-            stderrBytes: 0,
-            truncated: false,
-            cancelled: false,
-            timedOut: false,
-            startedAt: Date.now(),
+          const started = yield* BoundedExec.startBounded({
+            argv: input.argv,
+            cwd: prepared.cwd,
+            env: prepared.env,
+            timeoutMs: prepared.timeoutMs,
             maxOutputBytes: prepared.maxOutputBytes,
             platform,
-            settled: false,
-            settle: undefined,
-            timer: undefined,
-          };
+          }).pipe(
+            Effect.mapError(() => failure("invalid_request", "The command could not be started.")),
+          );
           yield* Ref.update(states, (current) => {
             const next = new Map(current);
-            next.set(input.execId, state);
+            next.set(input.execId, started);
             return next;
           });
 
-          const result = yield* Effect.callback<PeerExecResult>((resume) => {
-            const finish = (exitCode: number | null, signal: NodeJS.Signals | null) => {
-              if (state.settled) return;
-              state.settled = true;
-              if (state.timer !== undefined) clearTimeout(state.timer);
-              resume(
-                Effect.succeed(
-                  resultOf({ execId: input.execId, cwd: prepared.cwd }, state, exitCode, signal),
-                ),
-              );
-            };
-            state.settle = finish;
-            child.once("error", () => finish(null, null));
-            child.once("close", (code, signal) => finish(code, signal));
-            child.stdout?.on("data", (chunk: Buffer) => append(state, "stdout", chunk));
-            child.stderr?.on("data", (chunk: Buffer) => append(state, "stderr", chunk));
-            state.timer = setTimeout(() => {
-              state.timedOut = true;
-              killTree(state);
-            }, prepared.timeoutMs);
-            state.timer.unref();
-            return Effect.sync(() => {
-              if (!state.settled) {
-                state.cancelled = true;
-                killTree(state);
-              }
-            });
-          });
+          const outcome = yield* started.await;
+          const result: PeerExecResult = {
+            execId: input.execId,
+            ...outcome,
+            cwd: prepared.cwd,
+            platform,
+            outputRetained: true,
+          };
 
           yield* receipts.finish({
             execId: input.execId,
@@ -546,11 +393,9 @@ const make = Effect.gen(function* () {
     );
 
   const cancel: PeerExec["Service"]["cancel"] = Effect.fn("PeerExec.cancel")(function* (execId) {
-    const state = (yield* Ref.get(states)).get(execId);
-    if (state !== undefined) {
-      state.cancelled = true;
-      killTree(state);
-      state.settle?.(null, "SIGTERM");
+    const started = (yield* Ref.get(states)).get(execId);
+    if (started !== undefined) {
+      started.cancel();
       return { cancelled: true, state: "running" };
     }
     const stored = yield* receipts

@@ -30,6 +30,9 @@ export interface SwarmMemberSpec {
   readonly role?: string;
   readonly doneCriteria?: string;
   readonly verifyArgv?: ReadonlyArray<string>;
+  /** SW-A6: with `verifyArgv`; defaults 600,000 ms and 2 retries. */
+  readonly verifyTimeoutMs?: number;
+  readonly verifyMaxRetries?: number;
   /** swarm_add_members: the request key of the call that added this member, for replays. */
   readonly addRequestKey?: string;
   readonly isolation: "shared" | "worktree";
