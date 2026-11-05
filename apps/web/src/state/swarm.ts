@@ -38,3 +38,12 @@ export const swarmActCommand = createRuntimeCommand(connectionAtomRuntime, {
     return yield* registry.run(target.environmentId, request(WS_METHODS.swarmAct, target.input));
   }),
 });
+export const swarmSummariesCommand = createRuntimeCommand(connectionAtomRuntime, {
+  label: "environment-data:swarm:summaries",
+  execute: Effect.fn("swarmSummaries.execute")(function* (target: {
+    readonly environmentId: EnvironmentId;
+  }) {
+    const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
+    return yield* registry.run(target.environmentId, request(WS_METHODS.swarmSummaries, {}));
+  }),
+});

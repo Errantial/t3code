@@ -1,4 +1,5 @@
 import { attachSidebarTree, SIDEBAR_TREE_PROPS } from "../lib/sidebarTree";
+import { useSwarmSummariesPolling } from "../state/swarmSummaries";
 import { type EnvironmentId, type ScopedProjectRef } from "@t3tools/contracts";
 import type { EnvironmentServerConfig } from "@t3tools/client-runtime/connection";
 import { ThreadContextDragGhost } from "./chat/ThreadContextDragGhost";
@@ -889,6 +890,8 @@ function readRouteThreadKey(router: AnyRouter): string | null {
 }
 
 export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReveal }) {
+  // Swarm v2 chips: polls only environments with the Labs setting on.
+  useSwarmSummariesPolling();
   const {
     projects,
     serverConfigs,

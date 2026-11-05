@@ -1,4 +1,6 @@
 import { ThreadHoverCard, ThreadHoverCardPopup } from "../ThreadHoverCard";
+import { useAtomValue } from "@effect/atom-react";
+import { swarmChipLabel, swarmSummaryAtom, swarmSummaryKey } from "../../state/swarmSummaries";
 import { ThreadTerminalStatusButton } from "../ThreadStatusIndicators";
 import { discardComposerDraft } from "../../lib/discardComposerDraft";
 import { requestCustomSnooze } from "../CustomSnoozeDialog";
@@ -1132,8 +1134,13 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
   ) : null;
 
   const diff = latestRunDiff(thread);
+  // Swarm v2: counts for an architect thread; null unless its environment has Swarm v2 on.
+  const swarmChip = swarmChipLabel(
+    useAtomValue(swarmSummaryAtom(swarmSummaryKey(thread.environmentId, thread.id))),
+  );
   // Only the provider icon would remain, so the row drops the line instead of leaving it blank.
   const metaLineEmpty =
+    swarmChip === null &&
     !thread.branch &&
     !showsScratchMachine &&
     prBadge === null &&
@@ -1162,6 +1169,11 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
         <span className="flex-1" />
       )}
       {terminalStatusIcon}
+      {swarmChip !== null ? (
+        <span className="shrink-0 text-sidebar-muted-foreground" data-swarm-chip>
+          {swarmChip}
+        </span>
+      ) : null}
       {prBadge}
       {diff ? (
         <span className="shrink-0 font-mono">
