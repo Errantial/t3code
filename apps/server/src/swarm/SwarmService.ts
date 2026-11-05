@@ -624,7 +624,11 @@ const make = Effect.gen(function* () {
   });
 
   /** Only `auto` and `full-access` run commands without approval, so only they allow verify. */
-  const verifyPermitted = (mode: RuntimeMode) => mode === "auto" || mode === "full-access";
+  /**
+   * A server-run verify bypasses provider sandboxes and approval review, so only `full-access`
+   * allows it (decision 2026-11-04): `auto` still sandboxes or reviews commands in each driver.
+   */
+  const verifyPermitted = (mode: RuntimeMode) => mode === "full-access";
 
   const verifyRetryId = (member: SwarmStore.SwarmMemberRecord, retry: number) =>
     `swarm-verify:${member.swarmId}:${member.memberKey}:${retry}`;
@@ -2072,11 +2076,11 @@ const make = Effect.gen(function* () {
             `Member '${member.key}' has verify but runs in plan mode, which does not edit.`,
           );
         }
-        const permits = (mode: string) => mode === "auto" || mode === "full-access";
+        const permits = (mode: string) => mode === "full-access";
         if (!permits(architect.thread.runtimeMode) || !permits(runtimeCeiling)) {
           return yield* failure(
             "invalid_request",
-            `Member '${member.key}' has verify, which needs runtime mode auto or full-access for both this thread and the member.`,
+            `Member '${member.key}': verify requires full-access on the architect and the member.`,
           );
         }
       }

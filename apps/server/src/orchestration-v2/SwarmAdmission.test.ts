@@ -1762,12 +1762,19 @@ it.layer(layerSwarm)("swarm_create, admission, and the scheduler (SW-A3)", (it) 
         ),
         "invalid_request",
       );
-      // Verify needs auto or full-access for the member too (SW-A6 create-time check).
-      const approval = yield* createError(threadId, {
-        members: members(1, { runtimeMode: "approval-required", verify: { argv: ["x"] } }),
-      });
-      assert.equal(approval.code, "invalid_request");
-      assert.include(approval.message, "Member 'm0' has verify");
+      // Verify needs full-access for the member too; `auto` still sandboxes or reviews commands
+      // in its driver, which a server-run verify would bypass (decision 2026-11-04).
+      for (const runtimeMode of ["approval-required", "auto"] as const) {
+        const refused = yield* createError(threadId, {
+          members: members(1, { runtimeMode, verify: { argv: ["x"] } }),
+        });
+        assert.equal(refused.code, "invalid_request", runtimeMode);
+        assert.include(
+          refused.message,
+          "verify requires full-access on the architect and the member",
+          runtimeMode,
+        );
+      }
       const shared = yield* createError(threadId, { members: members(2) });
       assert.equal(shared.code, "invalid_request");
       assert.include(shared.message, `isolation: "worktree"`);
@@ -3341,7 +3348,8 @@ it.layer(layerSwarm)("verify (SW-A6)", (it) => {
         type: "thread.runtime-mode.set",
         commandId: CommandId.make("command:a6-downgrade"),
         threadId: row.childThreadId!,
-        runtimeMode: "approval-required",
+        // `auto` is below full-access for verify.
+        runtimeMode: "auto",
       });
       yield* finishRow(threadId, row, "m0 done");
       const done = yield* afterPasses(result.swarmId, "m0", 1);

@@ -86,7 +86,9 @@ Windows, run `.cmd` scripts through `["cmd", "/c", …]`.
   member a message while the check runs; the check then runs again once that turn ends.
 - Members that share one checkout are checked one at a time.
 
-Because the server runs the command without asking, `verify` needs the **Auto** or **Full access**
-runtime mode for both the agent that starts the swarm and the member. A swarm that asks for it in
-another mode is refused. If either thread's mode is lowered before the check runs, the check is
-skipped, and the member is reported as done but unchecked.
+Because the server runs the command itself, outside the provider's sandbox and approval review,
+`verify` needs the **Full access** runtime mode for both the agent that starts the swarm and the
+member. **Auto** is not enough, because providers still sandbox or review commands in it. A swarm
+that asks for `verify` in another mode is refused. If either thread's mode is lowered below Full
+access before a check runs, or the member is switched to plan mode, the check is skipped, and the
+member is reported as done but unchecked.
