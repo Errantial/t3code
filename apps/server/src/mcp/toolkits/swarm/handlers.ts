@@ -28,6 +28,14 @@ export const requireSwarmV2 = Effect.gen(function* () {
   }
 });
 
+const resolverOf = (
+  orchestrator: OrchestratorMcpService.OrchestratorMcpServiceShape,
+): SwarmService.SwarmTargetResolver => ({
+  resolveTarget: orchestrator.resolveSwarmTarget,
+  resolveWorktreeBase: orchestrator.resolveWorktreeBase,
+  countCommitsSince: orchestrator.countCommitsSince,
+});
+
 const notYetAvailable = (tool: string) =>
   requireSwarmV2.pipe(
     Effect.andThen(
@@ -45,10 +53,7 @@ export const layer = McpToolAccess.toLayer(SwarmToolkit, {
       return yield* swarms.create({
         scope,
         input,
-        resolver: {
-          resolveTarget: orchestrator.resolveSwarmTarget,
-          resolveWorktreeBase: orchestrator.resolveWorktreeBase,
-        },
+        resolver: resolverOf(orchestrator),
       });
     }),
   ),
@@ -56,6 +61,14 @@ export const layer = McpToolAccess.toLayer(SwarmToolkit, {
   swarm_cancel: McpToolAccess.actsAsCaller(() => notYetAvailable("swarm_cancel")),
   swarm_retry: McpToolAccess.actsAsCaller(() => notYetAvailable("swarm_retry")),
   swarm_collect: McpToolAccess.readsAsCaller(() => notYetAvailable("swarm_collect")),
-  swarm_add_members: McpToolAccess.actsAsCaller(() => notYetAvailable("swarm_add_members")),
+  swarm_add_members: McpToolAccess.actsAsCaller((input) =>
+    Effect.gen(function* () {
+      yield* requireSwarmV2;
+      const scope = yield* McpInvocationContext.McpInvocationContext;
+      const swarms = yield* SwarmService.SwarmService;
+      const orchestrator = yield* OrchestratorMcpService.OrchestratorMcpService;
+      return yield* swarms.addMembers({ scope, input, resolver: resolverOf(orchestrator) });
+    }),
+  ),
   swarm_followup: McpToolAccess.actsAsCaller(() => notYetAvailable("swarm_followup")),
 });

@@ -1431,6 +1431,8 @@ const layerSwarm = SwarmService.layer.pipe(
 );
 
 const resolverCalls: Array<string> = [];
+/** What the architect's checkout is ahead of a swarm's base commit; tests change it. */
+let commitsBehind = 0;
 const instanceIds = (...names: ReadonlyArray<string>) =>
   names.map((name) => ProviderInstanceId.make(name));
 
@@ -1456,6 +1458,7 @@ const resolver: SwarmService.SwarmTargetResolver = {
       };
     }),
   resolveWorktreeBase: () => Effect.succeed("0000000000000000000000000000000000000000"),
+  countCommitsSince: () => Effect.sync(() => commitsBehind),
 };
 
 const scopeFor = (threadId: ThreadId): McpInvocationScope => ({
@@ -1616,7 +1619,8 @@ it.layer(layerSwarm)("swarm_create, admission, and the scheduler (SW-A3)", (it) 
       assert.equal(
         code(
           yield* createError(threadId, {
-            map: { task: "t", title: "t", rows: [{ key: "r" }] },
+            members: members(1, { interactionMode: "plan" }),
+            dataShape: "{ findings: string[] }",
           }),
         ),
         "capability_denied",
@@ -2012,6 +2016,168 @@ it.layer(layerSwarm)("swarm_create, admission, and the scheduler (SW-A3)", (it) 
         [["queued", "any_of_unavailable", null]],
       );
       yield* retire(result.swarmId);
+    }),
+  );
+
+  it.effect("launches a 40-row map with 6 KB of shared context, then adds 8 after the anchor", () =>
+    Effect.gen(function* () {
+      const store = yield* SwarmStore.SwarmStore;
+      const { threadId, anchor } = yield* seedArchitect("a3c-map");
+      const rowsOf = (count: number, offset = 0) =>
+        Array.from({ length: count }, (_, index) => ({
+          key: `area-${offset + index}`,
+          vars: { area: `area ${offset + index}` },
+          ownsPaths: [`src/area-${offset + index}`],
+        }));
+      const input = {
+        clientRequestId: "a3c-map",
+        sharedContext: "Common background. ".repeat(320),
+        map: {
+          task: "Audit {{area}} against the shared checklist.",
+          title: "Audit {{key}}",
+          isolation: "worktree" as const,
+          rows: rowsOf(40),
+        },
+      };
+      assert.isAtLeast(Buffer.byteLength(input.sharedContext), 6_000);
+      assert.isBelow(Buffer.byteLength(JSON.stringify(input)), 12_000);
+      const created = yield* createSwarm(threadId, input);
+      assert.equal(created.members.length, 40);
+      assert.equal(created.members[0]?.title, "Audit area-0");
+      assert.deepEqual(
+        created.members.filter((row) => row.status === "launching").map((row) => row.key),
+        ["area-0", "area-1"],
+      );
+      const swarm = Option.getOrThrow(yield* store.getSwarm(created.swarmId));
+      assert.equal(swarm.sharedContext, input.sharedContext);
+      // The expanded member is stored, so retries and recovery never expand again.
+      const [first] = yield* rows(created.swarmId);
+      assert.include(first!.specJson, "Audit area 0 against the shared checklist.");
+
+      yield* endRun({ threadId, runId: anchor.id });
+      commitsBehind = 3;
+      const swarms = yield* SwarmService.SwarmService;
+      const added = yield* swarms.addMembers({
+        scope: scopeFor(threadId),
+        input: {
+          swarmId: created.swarmId,
+          clientRequestId: "a3c-add",
+          map: {
+            task: "Audit {{area}}.",
+            title: "Audit {{key}}",
+            isolation: "worktree",
+            rows: rowsOf(8, 40),
+          },
+        },
+        resolver,
+      });
+      commitsBehind = 0;
+      assert.equal(added.members.length, 48);
+      assert.deepEqual(added.warnings.map((warning) => warning.kind).toSorted(), [
+        "base_behind_head",
+        "no_retry_room",
+      ]);
+      const all = yield* rows(created.swarmId);
+      assert.deepEqual(
+        all.slice(40).map((row) => [row.memberKey, row.ordinal, row.status]),
+        Array.from({ length: 8 }, (_, index) => [`area-${40 + index}`, 40 + index, "queued"]),
+      );
+
+      // The 48 total holds across swarm_create and swarm_add_members.
+      const over = yield* swarms
+        .addMembers({
+          scope: scopeFor(threadId),
+          input: {
+            swarmId: created.swarmId,
+            members: [
+              { key: "one-more", title: "One more", task: "More.", interactionMode: "plan" },
+            ],
+          },
+          resolver,
+        })
+        .pipe(Effect.flip);
+      assert.equal(over.code, "invalid_request");
+      assert.include(over.message, "at most 48 members");
+
+      // A retried add with the same clientRequestId adds nothing twice.
+      const replay = yield* swarms.addMembers({
+        scope: scopeFor(threadId),
+        input: {
+          swarmId: created.swarmId,
+          clientRequestId: "a3c-add",
+          map: {
+            task: "Audit {{area}}.",
+            title: "Audit {{key}}",
+            isolation: "worktree",
+            rows: rowsOf(8, 40),
+          },
+        },
+        resolver,
+      });
+      assert.equal(replay.members.length, 48);
+      yield* retire(created.swarmId);
+    }),
+  );
+
+  it.effect("runs a planning map with no verify, and refuses oversized shared context", () =>
+    Effect.gen(function* () {
+      const { threadId } = yield* seedArchitect("a3c-plan-map");
+      const created = yield* createSwarm(threadId, {
+        map: {
+          task: "Read {{key}} and list risks.",
+          title: "Read {{key}}",
+          interactionMode: "plan",
+          rows: Array.from({ length: 40 }, (_, index) => ({ key: `part-${index}` })),
+        },
+      });
+      assert.equal(created.members.length, 40);
+      assert.isTrue(created.members.every((row) => row.interactionMode === "plan"));
+      yield* retire(created.swarmId);
+
+      // 16,384 characters fit the schema; the byte cap is checked separately.
+      const oversized = yield* createError(threadId, {
+        sharedContext: "€".repeat(6_000),
+        members: members(1, { interactionMode: "plan" }),
+      });
+      assert.equal(oversized.code, "invalid_request");
+      assert.include(oversized.message, "sharedContext");
+      const both = yield* createError(threadId, {
+        members: members(1, { interactionMode: "plan" }),
+        map: { task: "t", title: "t", rows: [{ key: "r" }] },
+      });
+      assert.include(both.message, "exactly one of `members` and `map`");
+      const badRow = yield* createError(threadId, {
+        map: { task: "Do {{nothing}}.", title: "t", rows: [{ key: "r" }] },
+      });
+      assert.include(badRow.message, "Map row 'r'");
+    }),
+  );
+
+  it.effect("refuses swarm_add_members from another thread and after cancel", () =>
+    Effect.gen(function* () {
+      const swarms = yield* SwarmService.SwarmService;
+      const { threadId } = yield* seedArchitect("a3c-add-guards");
+      const { threadId: otherThreadId } = yield* seedArchitect("a3c-add-other");
+      const created = yield* createSwarm(threadId, {
+        maxConcurrent: 1,
+        members: members(1, { interactionMode: "plan" }),
+      });
+      const add = (from: ThreadId) =>
+        swarms
+          .addMembers({
+            scope: scopeFor(from),
+            input: {
+              swarmId: created.swarmId,
+              members: [{ key: "late", title: "Late", task: "Late.", interactionMode: "plan" }],
+            },
+            resolver,
+          })
+          .pipe(Effect.flip);
+      assert.equal((yield* add(otherThreadId)).code, "capability_denied");
+      yield* retire(created.swarmId);
+      const afterCancel = yield* add(threadId);
+      assert.equal(afterCancel.code, "invalid_request");
+      assert.include(afterCancel.message, "cancelled");
     }),
   );
 
