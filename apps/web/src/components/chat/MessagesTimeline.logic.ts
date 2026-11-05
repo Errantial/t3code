@@ -1065,8 +1065,16 @@ function deriveTurnFolds(input: {
       continue;
     }
     // Resumed subagents keep their position and fold with their original turn.
+    // A late swarm member's card keeps its anchor run's id but is drawn after later turns: it
+    // folds with the turn it appears in, so it neither joins nor stretches the anchor's fold.
+    const lateCard =
+      responseKey !== null &&
+      ownRunId !== responseKey &&
+      entry.kind === "event" &&
+      entry.projectedItem.item.type === "subagent" &&
+      (promptIndexByRunId.get(ownRunId) ?? -1) < (promptIndexByRunId.get(responseKey) ?? -1);
     const runId =
-      responseKey !== null && (promptIndexByRunId.get(ownRunId) ?? -1) > index
+      responseKey !== null && ((promptIndexByRunId.get(ownRunId) ?? -1) > index || lateCard)
         ? responseKey
         : ownRunId;
     if (runId === runlessKey && timelineEntryFailedItem(entry) !== null) {
