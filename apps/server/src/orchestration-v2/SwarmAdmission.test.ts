@@ -3360,6 +3360,64 @@ it.layer(layerSwarm)("verify (SW-A6)", (it) => {
     }),
   );
 
+  it.effect("re-checks modes right before the command, as for a check re-run after a restart", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const store = yield* SwarmStore.SwarmStore;
+      resetVerify();
+      const { threadId, anchor } = yield* seedArchitect("a6-recheck");
+      const result = yield* createSwarm(threadId, {
+        members: verifyMembers(1, { argv: ["pnpm", "test"] }),
+      });
+      yield* endRun({ threadId, runId: anchor.id });
+      const row = (yield* rows(result.swarmId))[0]!;
+      yield* finishRow(threadId, row, "m0 done");
+      // A crash after the move to verifying: the row is verifying and no check runs. The member
+      // was lowered meanwhile, so the transition's check never saw it.
+      yield* store.updateMember({
+        swarmId: result.swarmId,
+        memberKey: "m0",
+        patch: { status: "verifying", updatedAt: DateTime.formatIso(yield* DateTime.now) },
+      });
+      yield* orchestrator.dispatch({
+        type: "thread.runtime-mode.set",
+        commandId: CommandId.make("command:a6-recheck"),
+        threadId: row.childThreadId!,
+        runtimeMode: "auto",
+      });
+      const done = yield* afterPasses(result.swarmId, "m0", 2);
+      assert.equal(done.status, "claimed_done");
+      assert.include(done.envelopeJson ?? "", `"verifySkipped":"runtime_mode"`);
+      assert.equal(verifyCalls.length, 0, "the command never started");
+      yield* retire(result.swarmId);
+    }),
+  );
+
+  it.effect("skips the check for a member switched to plan mode", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      resetVerify();
+      const { threadId, anchor } = yield* seedArchitect("a6-plan");
+      const result = yield* createSwarm(threadId, {
+        members: verifyMembers(1, { argv: ["pnpm", "test"] }),
+      });
+      yield* endRun({ threadId, runId: anchor.id });
+      const row = (yield* rows(result.swarmId))[0]!;
+      yield* orchestrator.dispatch({
+        type: "thread.interaction-mode.set",
+        commandId: CommandId.make("command:a6-plan"),
+        threadId: row.childThreadId!,
+        interactionMode: "plan",
+      });
+      yield* finishRow(threadId, row, "m0 done");
+      const done = yield* afterPasses(result.swarmId, "m0", 1);
+      assert.equal(done.status, "claimed_done");
+      assert.include(done.envelopeJson ?? "", `"verifySkipped":"plan_mode"`);
+      assert.equal(verifyCalls.length, 0);
+      yield* retire(result.swarmId);
+    }),
+  );
+
   it.effect("verifies shared-checkout members one at a time", () =>
     Effect.gen(function* () {
       resetVerify();
