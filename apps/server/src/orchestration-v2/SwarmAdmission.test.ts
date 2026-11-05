@@ -3412,7 +3412,7 @@ it.layer(layerSwarm)("verify (SW-A6)", (it) => {
         "nothing is sent for a task that is no longer held",
       );
       const notes = (yield* noticeTexts(threadId)).filter((text) =>
-        text.includes("m0's result could not be delivered; read it with swarm_collect"),
+        text.includes('member "m0" could not be delivered; read it with swarm_collect'),
       );
       assert.equal(notes.length, 1);
       yield* retire(result.swarmId);
@@ -4404,7 +4404,7 @@ it.layer(layerSwarm)("status, cancel, retry, collect, and follow-up (SW-A7)", (i
       for (let pass = 0; pass < 5; pass += 1) yield* swarms.tick;
       assert.notEqual((yield* rows(result.swarmId))[1]!.status, "cancelled");
       const notes = (yield* noticeTexts(threadId)).filter((text) =>
-        text.includes("member m1 could not be stopped"),
+        text.includes('member "m1" could not be stopped'),
       );
       assert.equal(notes.length, 1);
       failStopThreads.delete(m1!.childThreadId!);
