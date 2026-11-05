@@ -882,6 +882,28 @@ export const OrchestrationV2DelegatedCompletionDetail = Schema.String.check(
   ),
 );
 
+/**
+ * `completionWake` as clients receive it: encoding sends `held` as `settled_only`, the two values
+ * v1.2.0 clients know. Decoding accepts all three, since the server re-validates its own records
+ * through these schemas. Storage keeps `held` (`OrchestrationV2SubagentJson`).
+ */
+export const OrchestrationV2ClientCompletionWake = Schema.Literals([
+  "always",
+  "settled_only",
+  "held",
+]).pipe(
+  Schema.decodeTo(
+    OrchestrationV2DelegatedCompletionWake,
+    SchemaTransformation.transform<
+      OrchestrationV2DelegatedCompletionWake,
+      OrchestrationV2DelegatedCompletionWake
+    >({
+      decode: (wake) => wake,
+      encode: (wake) => (wake === "held" ? "settled_only" : wake),
+    }),
+  ),
+);
+
 export const OrchestrationV2Subagent = Schema.Struct({
   id: NodeId,
   threadId: ThreadId,
@@ -899,7 +921,7 @@ export const OrchestrationV2Subagent = Schema.Struct({
   title: Schema.NullOr(Schema.String),
   model: Schema.NullOr(Schema.String),
   modelSelection: Schema.optional(ModelSelection),
-  completionWake: Schema.optional(OrchestrationV2DelegatedCompletionWake),
+  completionWake: Schema.optional(OrchestrationV2ClientCompletionWake),
   completionDetail: Schema.optional(OrchestrationV2DelegatedCompletionDetail),
   completionDelivery: Schema.optional(OrchestrationV2DelegatedCompletionTaskDelivery),
   status: Schema.Literals([
@@ -2308,6 +2330,8 @@ export type OrchestrationV2ExecutionNodeJson = typeof OrchestrationV2ExecutionNo
 
 export const OrchestrationV2SubagentJson = OrchestrationV2Subagent.mapFields((fields) => ({
   ...fields,
+  // Storage keeps `held`; only the client wire form lowers it.
+  completionWake: Schema.optional(OrchestrationV2DelegatedCompletionWake),
   startedAt: Schema.NullOr(Schema.DateTimeUtcFromString),
   completedAt: Schema.NullOr(Schema.DateTimeUtcFromString),
   updatedAt: Schema.DateTimeUtcFromString,
