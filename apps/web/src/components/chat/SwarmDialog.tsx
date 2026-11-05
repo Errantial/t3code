@@ -19,10 +19,20 @@ import {
   buildSwarmBriefPrompt,
   SWARM_AGENT_LIMIT_OPTIONS,
   type SwarmIsolation,
+  type SwarmWakePolicy,
 } from "./swarmBrief";
 
 /** The command palette and the slash menu both open the same dialog. */
 export const OPEN_SWARM_EVENT = "t3:open-swarm";
+
+const WAKE_POLICY_ITEMS: ReadonlyArray<{
+  readonly value: SwarmWakePolicy;
+  readonly label: string;
+}> = [
+  { value: "group", label: "As each member finishes" },
+  { value: "failure", label: "Failures now, the rest at the end" },
+  { value: "batch", label: "In batches" },
+];
 
 const AGENT_LIMIT_ITEMS = [
   { value: "auto", label: "Let the architect decide" },
@@ -41,11 +51,14 @@ export function SwarmDialog(props: {
   readonly open: boolean;
   readonly onOpenChange: (open: boolean) => void;
   readonly onSubmit: (prompt: string) => void;
+  /** Set while the environment's Swarm v2 Labs setting is on; absent keeps the original flow. */
+  readonly swarmV2?: { readonly architectFullAccess: boolean };
 }) {
   const briefId = useId();
   const [brief, setBrief] = useState("");
   const [agentLimit, setAgentLimit] = useState("auto");
   const [isolation, setIsolation] = useState<SwarmIsolation>("shared");
+  const [wakePolicy, setWakePolicy] = useState<SwarmWakePolicy>("group");
   const trimmed = brief.trim();
   const close = () => props.onOpenChange(false);
 
@@ -56,11 +69,19 @@ export function SwarmDialog(props: {
         brief: trimmed,
         maxAgents: agentLimit === "auto" ? null : Number(agentLimit),
         isolation,
+        ...(props.swarmV2 === undefined
+          ? {}
+          : {
+              version: 2 as const,
+              wakePolicy,
+              architectFullAccess: props.swarmV2.architectFullAccess,
+            }),
       }),
     );
     setBrief("");
     setAgentLimit("auto");
     setIsolation("shared");
+    setWakePolicy("group");
     close();
   };
 
@@ -148,6 +169,31 @@ export function SwarmDialog(props: {
                       : "Members share this thread's checkout."}
                   </span>
                 </div>
+                {props.swarmV2 !== undefined ? (
+                  <div className="grid gap-1.5">
+                    <Label>Wake policy</Label>
+                    <Select
+                      value={wakePolicy}
+                      onValueChange={(value) => {
+                        if (value === "group" || value === "failure" || value === "batch") {
+                          setWakePolicy(value);
+                        }
+                      }}
+                      items={WAKE_POLICY_ITEMS}
+                    >
+                      <SelectTrigger size="sm" aria-label="When results wake the architect">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectPopup>
+                        {WAKE_POLICY_ITEMS.map((item) => (
+                          <SelectItem key={item.value} value={item.value}>
+                            {item.label}
+                          </SelectItem>
+                        ))}
+                      </SelectPopup>
+                    </Select>
+                  </div>
+                ) : null}
               </div>
             </div>
           </DialogPanel>
