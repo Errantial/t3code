@@ -1209,6 +1209,10 @@ const make = Effect.gen(function* () {
               onStarted: (started) => {
                 verifyStarts.set(ref, started);
               },
+              extraEnvNames: [
+                ...(input.settings.swarmVerifyEnv["*"] ?? []),
+                ...(input.settings.swarmVerifyEnv[child.value.thread.projectId] ?? []),
+              ],
             });
             verifyOutcomes.set(ref, { ...ids, outcome });
           }),

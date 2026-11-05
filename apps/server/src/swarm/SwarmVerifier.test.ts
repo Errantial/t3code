@@ -185,6 +185,28 @@ it("passes verify only an allowlisted environment, without the server's secrets"
   ).toEqual({ Path: "C:/bin", SystemRoot: "C:/Windows", LC_ALL: "C" });
 });
 
+it("passes toolchain, proxy, and XDG variables, and a project's extra names", () => {
+  expect(
+    SwarmVerifier.verifyEnvironment(
+      {
+        CARGO_HOME: "/c",
+        HTTPS_PROXY: "http://proxy",
+        XDG_CACHE_HOME: "/x",
+        PSModulePath: "C:/ps",
+        MY_TOOL_HOME: "/t",
+        GITHUB_TOKEN: "secret",
+      },
+      ["my_tool_home"],
+    ),
+  ).toEqual({
+    CARGO_HOME: "/c",
+    HTTPS_PROXY: "http://proxy",
+    XDG_CACHE_HOME: "/x",
+    PSModulePath: "C:/ps",
+    MY_TOOL_HOME: "/t",
+  });
+});
+
 it.live("runs verify without the server's other environment variables", () =>
   withRepo((repo) =>
     Effect.gen(function* () {

@@ -95,6 +95,13 @@ that asks for `verify` in another mode is refused. If either thread's mode is lo
 access before a check runs, or the member is switched to plan mode, the check is skipped, and the
 member is reported as done but unchecked.
 
+The command gets only part of the server's environment: what tools need to start and find their
+programs (paths, system and profile folders, toolchain homes such as `CARGO_HOME` or `JAVA_HOME`,
+proxies and certificates, locale), plus `CI=1`. Provider tokens and other secrets are left out. To
+pass more variables, list their names in the server setting `swarmVerifyEnv`, by project id, or
+under `*` for every project. The command still runs as you, with your `HOME`, so it can read files
+such as `~/.npmrc` and your git credentials; that is part of what Full access means.
+
 ### Managing a running swarm
 
 The agent that started a swarm manages it with these tools. Other threads cannot see or change
