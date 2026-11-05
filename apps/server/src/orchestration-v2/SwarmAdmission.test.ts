@@ -55,6 +55,7 @@ import * as ServerSettings from "../serverSettings.ts";
 import * as SwarmService from "../swarm/SwarmService.ts";
 import * as SwarmStore from "../swarm/SwarmStore.ts";
 import * as SwarmVerifier from "../swarm/SwarmVerifier.ts";
+import { makeSwarmRpc } from "../swarm/swarmRpc.ts";
 import {
   makeSwarmMemberContributor,
   makeSwarmNoticesContributor,
@@ -5701,6 +5702,395 @@ it.layer(layerSwarm)("panel and sidebar (SW-A10)", (it) => {
       assert.includeMembers([...all.done], ["m0", "m2"]);
       const store = yield* SwarmStore.SwarmStore;
       assert.equal(Option.getOrThrow(yield* store.getSwarm(result.swarmId)).status, "cancelled");
+      yield* retire(result.swarmId);
+    }),
+  );
+});
+
+// SW-A11 qualification rows that need no live provider: restarts in the remaining states, notices
+// across a restart, the flag toggle, panel actions on an idle architect, nested swarms, and anyOf
+// placement around signed-out and usage-limited instances.
+
+it.layer(layerSwarm)("qualification (SW-A11)", (it) => {
+  it.effect("restart: running, final but unreleased, queued, and a pending notice", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        const swarms = yield* SwarmService.SwarmService;
+        const store = yield* SwarmStore.SwarmStore;
+        yield* atHour(13);
+        const { threadId, anchor } = yield* seedArchitect("a11-restart-held");
+        const result = yield* createSwarm(threadId, {
+          wakePolicy: "batch",
+          wakeBatch: { minCount: 3 },
+          members: members(4, { interactionMode: "plan" }),
+        });
+        yield* endRun({ threadId, runId: anchor.id });
+        const [m0] = yield* rows(result.swarmId);
+        yield* finishRow(threadId, m0!, resultText({ summary: "m0 held" }));
+        yield* swarms.tick;
+        yield* store.putNotice({
+          swarmId: result.swarmId,
+          parentThreadId: threadId,
+          noticeKey: "a11:pending",
+          kind: "stopped",
+          text: "Swarm restart notice.",
+          createdAt: DateTime.formatIso(yield* DateTime.now),
+        });
+        const before = yield* rows(result.swarmId);
+        assert.deepEqual(
+          before.map((row) => [row.status, row.released]),
+          [
+            ["claimed_done", false],
+            ["launching", false],
+            ["launching", false],
+            ["queued", false],
+          ],
+        );
+        const tasksBefore = (yield* orchestrator.getThreadProjection(threadId)).subagents.length;
+        const runsBefore = (yield* orchestrator.getThreadProjection(threadId)).runs.length;
+
+        const restarted = yield* restartedSwarms;
+        yield* restarted.tick;
+        yield* restarted.tick;
+        const after = yield* rows(result.swarmId);
+        assert.deepEqual(
+          after.map((row) => [row.status, row.released, row.taskId, row.childThreadId]),
+          before.map((row) => [row.status, row.released, row.taskId, row.childThreadId]),
+          "no duplicate launch, and the held result is not released early",
+        );
+        const projection = yield* orchestrator.getThreadProjection(threadId);
+        assert.equal(projection.subagents.length, tasksBefore);
+        assert.equal(projection.runs.length, runsBefore, "no architect run");
+        // The notice survived and goes out once.
+        const contributor = makeSwarmNoticesContributor(store);
+        assert.include((yield* contributor.build({ threadId }))?.text ?? "", "restart notice");
+        assert.isUndefined(yield* contributor.build({ threadId }));
+        const again = yield* restartedSwarms;
+        yield* again.tick;
+        assert.isUndefined(yield* makeSwarmNoticesContributor(store).build({ threadId }));
+
+        // Finishing the rest on the restarted service releases every member once.
+        yield* finishRow(threadId, after[1]!, resultText({ summary: "m1 done" }));
+        yield* finishRow(threadId, after[2]!, resultText({ summary: "m2 done" }));
+        yield* restarted.tick;
+        yield* drainWakes(threadId, anchor.id);
+        const m3 = (yield* rows(result.swarmId))[3]!;
+        assert.equal(m3.status, "launching");
+        yield* finishRow(threadId, m3, resultText({ summary: "m3 done" }));
+        yield* restarted.tick;
+        yield* drainWakes(threadId, anchor.id);
+        yield* restarted.tick;
+        yield* drainWakes(threadId, anchor.id);
+        const final = yield* rows(result.swarmId);
+        assert.isTrue(final.every((row) => row.released && row.status === "claimed_done"));
+        const parent = yield* orchestrator.getThreadProjection(threadId);
+        assert.equal(parent.subagents.length, tasksBefore + 1, "only m3 launched");
+        const delivered = parent.subagents.filter(
+          (task) =>
+            final.some((row) => row.taskId === task.id) && task.completionDelivery !== undefined,
+        );
+        assert.equal(delivered.length, 4);
+        yield* retire(result.swarmId);
+      }),
+    ),
+  );
+
+  it.effect("restart: a superseded task still pending is disposed once and never wakes", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        const swarms = yield* SwarmService.SwarmService;
+        const store = yield* SwarmStore.SwarmStore;
+        yield* atHour(14);
+        const { threadId, anchor } = yield* seedArchitect("a11-restart-superseded");
+        const result = yield* createSwarm(threadId, {
+          wakePolicy: "batch",
+          wakeBatch: { minCount: 4 },
+          members: members(2, { interactionMode: "plan" }),
+        });
+        yield* endRun({ threadId, runId: anchor.id });
+        const [m0] = yield* rows(result.swarmId);
+        yield* finishRow(threadId, m0!, resultText({ summary: "failed" }), "failed");
+        yield* swarms.tick;
+        // The retry's row write landed, and the server stopped before the pass that disposes the
+        // earlier attempt's held task.
+        yield* store.updateMember({
+          swarmId: result.swarmId,
+          memberKey: "m0",
+          patch: {
+            status: "queued",
+            queueReason: null,
+            attempt: 2,
+            commandId: null,
+            taskId: null,
+            supersededTaskId: m0!.taskId,
+            childThreadId: null,
+            childRunId: null,
+            boundRunId: null,
+            updatedAt: DateTime.formatIso(yield* DateTime.now),
+          },
+        });
+        const tasksBefore = (yield* orchestrator.getThreadProjection(threadId)).subagents.length;
+
+        const restarted = yield* restartedSwarms;
+        yield* restarted.tick;
+        yield* restarted.tick;
+        const row = (yield* rows(result.swarmId))[0]!;
+        assert.isNull(row.supersededTaskId);
+        assert.equal(row.status, "launching");
+        assert.notEqual(row.taskId, m0!.taskId);
+        const parent = yield* orchestrator.getThreadProjection(threadId);
+        assert.equal(parent.subagents.length, tasksBefore + 1, "one new attempt");
+        const earlier = parent.subagents.find((task) => task.id === m0!.taskId);
+        assert.equal(earlier?.completionWake, "settled_only");
+        assert.isUndefined(earlier?.completionDelivery);
+        yield* retire(result.swarmId);
+      }),
+    ),
+  );
+
+  it.effect("restart: a pending stop retry keeps trying, with no lost stop or second note", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const swarms = yield* SwarmService.SwarmService;
+        yield* atHour(15);
+        const { threadId, anchor } = yield* seedArchitect("a11-restart-stop");
+        const result = yield* createSwarm(threadId, {
+          members: members(2, { interactionMode: "plan" }),
+        });
+        yield* endRun({ threadId, runId: anchor.id });
+        const [m0, m1] = yield* rows(result.swarmId);
+        failStopThreads.add(m0!.childThreadId!);
+        failStopThreads.add(m1!.childThreadId!);
+        yield* cancelIn(threadId, { swarmId: result.swarmId });
+        yield* swarms.tick;
+        const giveUps = Effect.map(
+          noticeTexts(threadId),
+          (texts) => texts.filter((text) => text.includes("could not be stopped")).length,
+        );
+        // The server restarts with both stops pending: it keeps trying them.
+        const restarted = yield* restartedSwarms;
+        yield* restarted.tick;
+        assert.deepEqual(
+          (yield* rows(result.swarmId)).map((row) => row.status),
+          [m0!.status, m1!.status],
+        );
+        failStopThreads.delete(m0!.childThreadId!);
+        yield* restarted.tick;
+        assert.equal((yield* rows(result.swarmId))[0]!.status, "cancelled", "no lost stop");
+        // m1 keeps failing: the restarted service gives up once; a second restart adds no note.
+        for (let pass = 0; pass < 6; pass += 1) yield* restarted.tick;
+        assert.equal(yield* giveUps, 1);
+        const again = yield* restartedSwarms;
+        for (let pass = 0; pass < 6; pass += 1) yield* again.tick;
+        assert.equal(yield* giveUps, 1);
+        failStopThreads.delete(m1!.childThreadId!);
+        yield* retire(result.swarmId);
+      }),
+    ),
+  );
+
+  it.effect("restart: an exhausted budget admits nothing and notes once", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const swarms = yield* SwarmService.SwarmService;
+        const store = yield* SwarmStore.SwarmStore;
+        yield* atHour(16);
+        const { threadId, anchor } = yield* seedArchitect("a11-restart-budget");
+        const result = yield* createSwarm(threadId, {
+          maxTotalTurns: 2,
+          members: members(3, { interactionMode: "plan" }),
+        });
+        yield* endRun({ threadId, runId: anchor.id });
+        yield* swarms.tick;
+        yield* swarms.tick;
+        const statuses = (yield* rows(result.swarmId)).map((row) => row.status);
+        const restarted = yield* restartedSwarms;
+        yield* restarted.tick;
+        yield* restarted.tick;
+        assert.isTrue(Option.getOrThrow(yield* store.getSwarm(result.swarmId)).budgetExhausted);
+        assert.deepEqual(
+          (yield* rows(result.swarmId)).map((row) => row.status),
+          statuses,
+        );
+        assert.equal(statuses[2], "cancelled");
+        assert.equal(
+          (yield* noticeTexts(threadId)).filter((text) => text.includes("used its turn budget"))
+            .length,
+          1,
+        );
+        yield* retire(result.swarmId);
+      }),
+    ),
+  );
+
+  it.effect("a Stop notice: no architect run, delivered once, and kept across a restart", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        const swarms = yield* SwarmService.SwarmService;
+        const store = yield* SwarmStore.SwarmStore;
+        yield* atHour(17);
+        const { threadId, anchor } = yield* seedArchitect("a11-stop-notice");
+        const result = yield* createSwarm(threadId, {
+          members: members(2, { interactionMode: "plan" }),
+        });
+        yield* endRun({ threadId, runId: anchor.id });
+        yield* orchestrator.dispatch({
+          type: "thread.stop",
+          commandId: CommandId.make("command:a11-stop-notice"),
+          threadId,
+        });
+        const before = yield* orchestrator.getThreadProjection(threadId);
+        yield* swarms.tick;
+        const restarted = yield* restartedSwarms;
+        yield* restarted.tick;
+        yield* restarted.tick;
+        const stopped = (yield* store.listNotices(threadId)).filter((n) => n.kind === "stopped");
+        assert.equal(stopped.length, 1);
+        assert.isNull(stopped[0]!.deliveredAt);
+        const after = yield* orchestrator.getThreadProjection(threadId);
+        assert.equal(after.runs.length, before.runs.length, "no architect run");
+        assert.equal(after.messages.length, before.messages.length, "no message");
+        const contributor = makeSwarmNoticesContributor(store);
+        assert.include((yield* contributor.build({ threadId }))?.text ?? "", "by your Stop");
+        const again = yield* restartedSwarms;
+        yield* again.tick;
+        assert.isUndefined(yield* contributor.build({ threadId }), "delivered once");
+        yield* retire(result.swarmId);
+      }),
+    ),
+  );
+
+  it.effect("flag off mid-swarm: nothing admitted, the panel refuses, and on resumes", () =>
+    Effect.gen(function* () {
+      const swarms = yield* SwarmService.SwarmService;
+      const settings = yield* ServerSettings.ServerSettingsService;
+      yield* atHour(18);
+      const rpc = makeSwarmRpc(settings, Option.some(swarms));
+      const { threadId, anchor } = yield* seedArchitect("a11-flag-toggle");
+      const result = yield* createSwarm(threadId, {
+        members: members(3, { interactionMode: "plan" }),
+      });
+      yield* endRun({ threadId, runId: anchor.id });
+      yield* settings.updateSettings({ swarmV2Enabled: false });
+      const panelOff = yield* rpc((service) => service.listForThread(threadId)).pipe(Effect.flip);
+      assert.equal(panelOff.reason, "disabled");
+      const chipOff = yield* rpc((service) => service.summaries).pipe(Effect.flip);
+      assert.equal(chipOff.reason, "disabled");
+      // A running member's run still ends; nothing is admitted or released while off.
+      const [m0] = yield* rows(result.swarmId);
+      yield* finishRow(threadId, m0!, resultText({ summary: "finished while off" }));
+      const frozen = yield* rows(result.swarmId);
+      yield* swarms.tick;
+      yield* swarms.tick;
+      assert.deepEqual(yield* rows(result.swarmId), frozen);
+      assert.equal(frozen[2]!.status, "queued");
+      yield* settings.updateSettings({ swarmV2Enabled: true });
+      const panelOn = yield* rpc((service) => service.listForThread(threadId));
+      assert.isTrue(panelOn.swarms.some((swarm) => swarm.swarmId === result.swarmId));
+      yield* swarms.tick;
+      assert.deepEqual(
+        (yield* rows(result.swarmId)).map((row) => row.status),
+        ["claimed_done", "launching", "launching"],
+      );
+      yield* drainWakes(threadId, anchor.id);
+      yield* retire(result.swarmId);
+    }),
+  );
+
+  it.effect("panel Stop, Retry, and Stop all on an idle architect start no architect turn", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const swarms = yield* SwarmService.SwarmService;
+      yield* atHour(19);
+      const { threadId, anchor } = yield* seedArchitect("a11-panel-idle");
+      const result = yield* createSwarm(threadId, {
+        members: members(2, { interactionMode: "plan" }),
+      });
+      yield* endRun({ threadId, runId: anchor.id });
+      const before = yield* orchestrator.getThreadProjection(threadId);
+      yield* swarms.act({ threadId, swarmId: result.swarmId, action: "stop", keys: ["m0"] });
+      yield* swarms.tick;
+      yield* swarms.act({ threadId, swarmId: result.swarmId, action: "retry", keys: ["m0"] });
+      yield* swarms.tick;
+      yield* swarms.act({ threadId, swarmId: result.swarmId, action: "stop_all" });
+      yield* swarms.tick;
+      yield* swarms.tick;
+      const after = yield* orchestrator.getThreadProjection(threadId);
+      assert.equal(after.runs.length, before.runs.length, "no architect run");
+      assert.equal(after.messages.length, before.messages.length, "no message");
+      assert.isTrue((yield* rows(result.swarmId)).every((row) => row.status === "cancelled"));
+      yield* retire(result.swarmId);
+    }),
+  );
+
+  it.effect("a member with allowNestedSwarm starts its own swarm", () =>
+    Effect.gen(function* () {
+      yield* atHour(20);
+      const { threadId } = yield* seedArchitect("a11-nested");
+      const parent = yield* createSwarm(threadId, {
+        members: [
+          {
+            key: "lead",
+            title: "Lead",
+            task: "Lead.",
+            interactionMode: "plan",
+            allowNestedSwarm: true,
+          },
+        ],
+      });
+      const lead = parent.members[0]!.childThreadId!;
+      const nested = yield* createSwarm(lead, { members: members(1, { interactionMode: "plan" }) });
+      assert.equal(nested.members.length, 1);
+      yield* retire(nested.swarmId);
+      yield* retire(parent.swarmId);
+    }),
+  );
+
+  it.effect("places anyOf members around a signed-out and a usage-limited instance", () =>
+    Effect.gen(function* () {
+      const store = yield* SwarmStore.SwarmStore;
+      yield* atHour(21);
+      const now = yield* DateTime.now;
+      providerHealth = [
+        {
+          instanceId: "codex-out",
+          enabled: true,
+          status: "ready",
+          auth: { status: "unauthenticated" },
+        },
+        {
+          instanceId: "codex-limited",
+          enabled: true,
+          status: "ready",
+          auth: { status: "authenticated" },
+        },
+        { instanceId: "codex", enabled: true, status: "ready", auth: { status: "authenticated" } },
+      ] as unknown as ReadonlyArray<ServerProvider>;
+      yield* store.setInstancePause({
+        providerInstanceId: ProviderInstanceId.make("codex-limited"),
+        pauseClass: "usage_limit",
+        until: DateTime.formatIso(DateTime.add(now, { hours: 1 })),
+        at: DateTime.formatIso(now),
+      });
+      const { threadId } = yield* seedArchitect("a11-anyof-health");
+      const result = yield* createSwarm(threadId, {
+        maxConcurrent: 2,
+        members: members(2, {
+          interactionMode: "plan",
+          target: { anyOf: instanceIds("codex-out", "codex-limited", "codex"), model: "m" },
+        }),
+      });
+      assert.deepEqual(
+        result.members.map((row) => [row.status, row.providerInstanceId]),
+        [
+          ["launching", "codex"],
+          ["launching", "codex"],
+        ],
+      );
+      providerHealth = [];
       yield* retire(result.swarmId);
     }),
   );
