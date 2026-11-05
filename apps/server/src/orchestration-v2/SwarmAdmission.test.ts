@@ -5162,6 +5162,73 @@ it.layer(layerSwarm)("failures, usage limits, and instance health (SW-A8)", (it)
       ),
   );
 
+  it.effect(
+    "restart qualification: run ended while down, lost ids, queued, and retry_after rows",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const orchestrator = yield* Orchestrator.OrchestratorV2;
+          const store = yield* SwarmStore.SwarmStore;
+          yield* atHour(12);
+          const { threadId, anchor } = yield* seedArchitect("a11-restart");
+          const result = yield* createSwarm(threadId, {
+            members: members(4, { interactionMode: "plan" }),
+          });
+          yield* endRun({ threadId, runId: anchor.id });
+          const [m0, m1] = yield* rows(result.swarmId);
+          const updatedAt = DateTime.formatIso(yield* DateTime.now);
+          // While the server was down: m0's run ended; m1 was dispatched but its ids were never
+          // stored; m3 was put on an automatic retry's backoff; m2 just waits.
+          yield* finishRow(threadId, m0!, resultText({ summary: "finished while down" }));
+          yield* store.updateMember({
+            swarmId: result.swarmId,
+            memberKey: "m1",
+            patch: {
+              taskId: null,
+              childThreadId: null,
+              childRunId: null,
+              boundRunId: null,
+              updatedAt,
+            },
+          });
+          const retryAfter = DateTime.formatIso(DateTime.add(yield* DateTime.now, { seconds: 40 }));
+          yield* store.updateMember({
+            swarmId: result.swarmId,
+            memberKey: "m3",
+            patch: { retryAfter, queueReason: `retry_after:${retryAfter}`, attempt: 2, updatedAt },
+          });
+          const tasksBefore = (yield* orchestrator.getThreadProjection(threadId)).subagents.length;
+
+          const restarted = yield* restartedSwarms;
+          yield* restarted.tick;
+          yield* drainWakes(threadId, anchor.id);
+          yield* restarted.tick;
+          const after = yield* rows(result.swarmId);
+          // m0: final, released once with its digest.
+          assert.equal(after[0]!.status, "claimed_done");
+          assert.isTrue(after[0]!.released);
+          const task0 = (yield* orchestrator.getThreadProjection(threadId)).subagents.find(
+            (task) => task.id === m0!.taskId,
+          );
+          assert.include(task0?.completionDetail ?? "", "finished while down");
+          // m1: its dispatch replayed onto the same task; no duplicate launch.
+          assert.equal(after[1]!.taskId, m1!.taskId);
+          assert.equal(after[1]!.childThreadId, m1!.childThreadId);
+          // m2 took m0's freed slot; m3 still waits out its backoff.
+          assert.equal(after[2]!.status, "launching");
+          assert.equal(after[3]!.status, "queued");
+          assert.isTrue(after[3]!.queueReason?.startsWith("retry_after:"));
+          // Only m2 added a task.
+          assert.equal(
+            (yield* orchestrator.getThreadProjection(threadId)).subagents.length,
+            tasksBefore + 1,
+          );
+          yield* resetHealth;
+          yield* retire(result.swarmId);
+        }),
+      ),
+  );
+
   it.effect("lowers member limits above the settings, with a limit_lowered warning", () =>
     Effect.gen(function* () {
       yield* atHour(11);
