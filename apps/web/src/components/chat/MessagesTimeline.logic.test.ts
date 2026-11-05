@@ -4358,6 +4358,56 @@ describe("a late swarm member's card (SW-A0 Q5, SW-A10)", () => {
     result: status === "running" ? null : "done",
   });
 
+  it("leaves an ordinary delegate_task card that finishes after later turns where it was", () => {
+    // Launched inside its own turn (ordinal between that turn's prompt and answer), it finishes
+    // long after; only cards drawn after a later turn's prompt move.
+    const card = {
+      ...lateCard("completed"),
+      id: TurnItemId.make("delegate"),
+      subagentId: NodeId.make("delegate"),
+      ordinal: 1_000_002,
+      startedAt: at(2),
+    } as OrchestrationV2TurnItem;
+    const items: OrchestrationV2TurnItem[] = [
+      user("prompt-1", run1, 1_000_001, 0),
+      card,
+      assistant("answer-1", run1, 1_000_003, 10),
+      user("prompt-2", run2, 2_000_001, 300),
+      reasoning("reasoning-2", run2, 2_000_002, 301),
+      assistant("answer-2", run2, 2_000_003, 310),
+    ];
+    const rows = deriveMessagesTimelineRows({
+      timelineEntries: deriveTimelineEntriesFromVisibleTurnItems({
+        visibleTurnItems: items.map((item) => ({
+          position: item.ordinal,
+          visibility: "local",
+          sourceThreadId: threadId,
+          sourceItemId: item.id,
+          item,
+        })),
+        optimisticMessages: [],
+      }),
+      latestRun: {
+        runId: run2,
+        status: "completed",
+        startedAt: DateTime.formatIso(at(300)),
+        completedAt: DateTime.formatIso(at(310)),
+      },
+      isWorking: false,
+      turnDiffSummaries: [],
+      supportsConversationRollback: false,
+    });
+    // The card stays in its own turn's fold, before that turn's answer.
+    expect(rows.map((row) => row.id)).toEqual([
+      "prompt-1",
+      `turn-fold:${run1}`,
+      "answer-1",
+      "prompt-2",
+      `turn-fold:${run2}`,
+      "answer-2",
+    ]);
+  });
+
   it.each(["completed", "running"] as const)(
     "stays at the bottom as its own row (%s) and does not stretch the anchor's Worked for",
     (status) => {
