@@ -33,6 +33,13 @@ export interface SwarmMemberSpec {
   /** SW-A6: with `verifyArgv`; defaults 600,000 ms and 2 retries. */
   readonly verifyTimeoutMs?: number;
   readonly verifyMaxRetries?: number;
+  /** SW-A9: this member's limits, already lowered to the server settings. */
+  readonly maxTurns?: number;
+  readonly maxWallClockMs?: number;
+  /** SW-A9: turns of earlier attempts, so `turns_used` stays a total across retries. */
+  readonly priorTurns?: number;
+  /** SW-A9: when the latest follow-up was sent; the wall clock restarts there. */
+  readonly followupStartedAt?: string;
   /** swarm_retry: the previous attempt's result, wrapped as data, put before the task. */
   readonly previousAttempt?: string;
   /** swarm_followup: the latest follow-up's text and request key, for re-dispatch and replays. */

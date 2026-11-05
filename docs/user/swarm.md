@@ -136,3 +136,19 @@ not instructions.
 - A member that fails with a connection or provider error is retried once, automatically, after
   about 30-45 seconds. The server setting `swarmAutoRetryTransient` (on by default) turns this
   off. A provider error marked as not retryable is never retried.
+
+### Limits
+
+- Each member has a turn limit (`maxTurns`, 20 by default) and a time limit (`maxWallClockMs`,
+  2 hours by default). The time restarts with each follow-up. A member past either limit is
+  stopped and reported as stopped by its budget.
+- A whole swarm has a turn budget (`maxTotalTurns`, 240 by default). Every turn of every member
+  counts, retries and follow-ups included. Once the budget is used:
+  - queued members never start;
+  - running members finish their current turn, but get no verify retry, follow-up, or automatic
+    retry;
+  - members waiting on a usage limit are stopped and do not resume;
+  - `swarm_add_members`, `swarm_followup`, and `swarm_retry` are refused.
+- A swarm or member can lower these limits but not raise them. The server settings
+  `swarmDefaultMaxTurns`, `swarmDefaultMaxWallClockMs`, and `swarmDefaultMaxTotalTurns` set the
+  defaults.

@@ -1761,15 +1761,13 @@ it.layer(layerSwarm)("swarm_create, admission, and the scheduler (SW-A3)", (it) 
         ),
         "capability_denied",
       );
-      assert.equal(
-        code(
-          yield* createError(threadId, {
-            members: members(1, { interactionMode: "plan" }),
-            maxTotalTurns: 10,
-          }),
-        ),
-        "capability_denied",
-      );
+      // SW-A9: a swarm's turn budget can only lower the server's (240 by default).
+      const overBudget = yield* createError(threadId, {
+        members: members(1, { interactionMode: "plan" }),
+        maxTotalTurns: 241,
+      });
+      assert.equal(overBudget.code, "invalid_request");
+      assert.include(overBudget.message, "maxTotalTurns 241 is above this machine's limit of 240");
       assert.equal(
         code(
           yield* createError(threadId, {
@@ -4963,6 +4961,197 @@ it.layer(layerSwarm)("failures, usage limits, and instance health (SW-A8)", (it)
       assert.equal(pause?.pauseClass, "usage_limit");
       assert.equal(Date.parse(pause!.until) - DateTime.toEpochMillis(now), 15 * 60_000);
       yield* resetHealth;
+      yield* retire(result.swarmId);
+    }),
+  );
+});
+
+// SW-A9: per-member turns and wall clock, and the swarm's turn budget, with TestClock.
+
+it.layer(layerSwarm)("limits (SW-A9)", (it) => {
+  it.effect("stops a member past its maxTurns with class budget", () =>
+    Effect.gen(function* () {
+      const swarms = yield* SwarmService.SwarmService;
+      const { threadId, anchor } = yield* seedArchitect("a9-turns");
+      const result = yield* createSwarm(threadId, {
+        members: members(1, { interactionMode: "plan", maxTurns: 1 }),
+      });
+      yield* endRun({ threadId, runId: anchor.id });
+      const row = (yield* rows(result.swarmId))[0]!;
+      yield* swarms.tick;
+      assert.notEqual((yield* rows(result.swarmId))[0]!.status, "cancelled", "one turn is allowed");
+      // A second turn on the member's thread is one more than allowed.
+      yield* startRun({ threadId: row.childThreadId!, ordinal: 2 });
+      yield* swarms.tick;
+      const stopped = (yield* rows(result.swarmId))[0]!;
+      assert.equal(stopped.status, "cancelled");
+      assert.equal(stopped.failureClass, "budget");
+      assert.equal(stopped.turnsUsed, 2);
+      yield* retire(result.swarmId);
+    }),
+  );
+
+  it.effect("stops members past maxWallClockMs, a limit_wait one included", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const swarms = yield* SwarmService.SwarmService;
+      const store = yield* SwarmStore.SwarmStore;
+      const { threadId, anchor } = yield* seedArchitect("a9-clock");
+      const result = yield* createSwarm(threadId, {
+        members: members(2, { interactionMode: "plan", maxWallClockMs: 60_000 }),
+      });
+      yield* endRun({ threadId, runId: anchor.id });
+      yield* store.updateMember({
+        swarmId: result.swarmId,
+        memberKey: "m1",
+        patch: { status: "limit_wait", updatedAt: DateTime.formatIso(yield* DateTime.now) },
+      });
+      yield* TestClock.adjust(Duration.seconds(59));
+      yield* swarms.tick;
+      assert.deepEqual(
+        (yield* rows(result.swarmId)).map((row) => row.status),
+        ["launching", "limit_wait"],
+      );
+      yield* TestClock.adjust(Duration.seconds(2));
+      yield* swarms.tick;
+      const after = yield* rows(result.swarmId);
+      assert.deepEqual(
+        after.map((row) => [row.status, row.failureClass]),
+        [
+          ["cancelled", "budget"],
+          ["cancelled", "budget"],
+        ],
+      );
+      const child = yield* orchestrator.getThreadProjection(after[0]!.childThreadId!);
+      assert.isFalse(child.runs.some(ThreadManagementService.isActiveRun), "m0 was stopped");
+      yield* retire(result.swarmId);
+    }),
+  );
+
+  it.effect("restarts the wall clock at each follow-up", () =>
+    Effect.gen(function* () {
+      const swarms = yield* SwarmService.SwarmService;
+      const { threadId, anchor } = yield* seedArchitect("a9-clock-followup");
+      const result = yield* createSwarm(threadId, {
+        members: members(1, { interactionMode: "plan", maxWallClockMs: 60_000 }),
+      });
+      yield* endRun({ threadId, runId: anchor.id });
+      yield* finishRow(threadId, (yield* rows(result.swarmId))[0]!, resultText({ summary: "a" }));
+      yield* swarms.tick;
+      yield* drainWakes(threadId, anchor.id);
+      // Well past a minute from the member's start, a follow-up gets a fresh minute.
+      yield* TestClock.adjust(Duration.minutes(5));
+      yield* followupIn(threadId, { swarmId: result.swarmId, key: "m0", message: "More." });
+      yield* TestClock.adjust(Duration.seconds(30));
+      yield* swarms.tick;
+      assert.equal((yield* rows(result.swarmId))[0]!.status, "running");
+      yield* TestClock.adjust(Duration.seconds(31));
+      yield* swarms.tick;
+      const stopped = (yield* rows(result.swarmId))[0]!;
+      assert.equal(stopped.status, "cancelled");
+      assert.equal(stopped.failureClass, "budget");
+      yield* retire(result.swarmId);
+    }),
+  );
+
+  it.effect("exhausts the swarm turn budget: queued rows cancelled, tools refused, one note", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const swarms = yield* SwarmService.SwarmService;
+      const store = yield* SwarmStore.SwarmStore;
+      const { threadId, anchor } = yield* seedArchitect("a9-budget");
+      const result = yield* createSwarm(threadId, {
+        maxTotalTurns: 2,
+        members: members(3, { interactionMode: "plan" }),
+      });
+      yield* endRun({ threadId, runId: anchor.id });
+      // m0 and m1 run one turn each: the budget of 2 is used.
+      yield* swarms.tick;
+      const swarm = Option.getOrThrow(yield* store.getSwarm(result.swarmId));
+      assert.isTrue(swarm.budgetExhausted);
+      const after = yield* rows(result.swarmId);
+      assert.deepEqual(
+        after.map((row) => row.status),
+        ["launching", "launching", "cancelled"],
+        "running members finish; the queued one never starts",
+      );
+      assert.equal(after[2]!.failureClass, "budget");
+      // The note goes out on the next pass, which reads the exhausted swarm; only once.
+      yield* swarms.tick;
+      yield* swarms.tick;
+      const summaries = (yield* orchestrator.getThreadProjection(threadId)).messages.flatMap(
+        (message) => (message.notification === undefined ? [] : [message.notification.summary]),
+      );
+      assert.equal(
+        summaries.filter((summary) => summary === "Swarm stopped admitting members").length,
+        1,
+      );
+      // Then the three tools refuse.
+      yield* finishRow(threadId, after[0]!, resultText({ summary: "done" }));
+      yield* swarms.tick;
+      const refusals = [
+        yield* retryIn(threadId, { swarmId: result.swarmId, keys: ["m2"] }).pipe(Effect.flip),
+        yield* followupIn(threadId, {
+          swarmId: result.swarmId,
+          key: "m0",
+          message: "More.",
+        }).pipe(Effect.flip),
+        yield* (yield* SwarmService.SwarmService)
+          .addMembers({
+            scope: scopeFor(threadId),
+            input: { swarmId: result.swarmId, members: [{ key: "x", title: "X", task: "X." }] },
+            resolver,
+          })
+          .pipe(Effect.flip),
+      ];
+      for (const refusal of refusals) {
+        assert.equal(refusal.code, "invalid_request");
+        assert.include(refusal.message, "swarm turn budget used");
+      }
+      yield* retire(result.swarmId);
+    }),
+  );
+
+  it.effect("stops a limit_wait member when the budget is used, so it never resumes", () =>
+    Effect.gen(function* () {
+      const swarms = yield* SwarmService.SwarmService;
+      const store = yield* SwarmStore.SwarmStore;
+      const { threadId, anchor } = yield* seedArchitect("a9-budget-limit");
+      const result = yield* createSwarm(threadId, {
+        maxTotalTurns: 1,
+        members: members(1, { interactionMode: "plan" }),
+      });
+      yield* endRun({ threadId, runId: anchor.id });
+      yield* store.updateMember({
+        swarmId: result.swarmId,
+        memberKey: "m0",
+        patch: { status: "limit_wait", updatedAt: DateTime.formatIso(yield* DateTime.now) },
+      });
+      yield* swarms.tick;
+      assert.isTrue(Option.getOrThrow(yield* store.getSwarm(result.swarmId)).budgetExhausted);
+      const stopped = (yield* rows(result.swarmId))[0]!;
+      assert.equal(stopped.status, "cancelled");
+      assert.equal(stopped.failureClass, "budget");
+      yield* retire(result.swarmId);
+    }),
+  );
+
+  it.effect("after the budget is used, a failed check is final with 'budget: no retry'", () =>
+    Effect.gen(function* () {
+      resetVerify();
+      verifyScript.push(verifyFail);
+      const { threadId, anchor } = yield* seedArchitect("a9-budget-verify");
+      const result = yield* createSwarm(threadId, {
+        maxTotalTurns: 1,
+        members: verifyMembers(1, { argv: ["pnpm", "test"] }),
+      });
+      yield* endRun({ threadId, runId: anchor.id });
+      yield* finishRow(threadId, (yield* rows(result.swarmId))[0]!, "m0 done");
+      const failed = yield* afterPasses(result.swarmId, "m0", 2);
+      assert.equal(failed.status, "failed");
+      assert.equal(failed.failureClass, "verify");
+      assert.equal(failed.verifyAttempts, 0, "no retry message");
+      assert.include(failed.envelopeJson ?? "", "budget: no retry");
       yield* retire(result.swarmId);
     }),
   );
