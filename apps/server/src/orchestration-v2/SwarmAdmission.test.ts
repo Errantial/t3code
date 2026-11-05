@@ -1417,6 +1417,8 @@ const verifyScript: Array<
   | { readonly hold: Deferred.Deferred<SwarmVerifier.SwarmVerifyOutcome> }
 > = [];
 let verifyKills = 0;
+/** Processes the fake was asked to kill as left by an earlier server process. */
+const staleKills: Array<SwarmVerifier.VerifyProcess> = [];
 /** Each call completes the oldest waiter: a milestone for a check that starts later. */
 const verifyCallWaiters: Array<Deferred.Deferred<void>> = [];
 const verifyPass: SwarmVerifier.SwarmVerifyOutcome = {
@@ -1437,8 +1439,14 @@ const layerFakeVerifier = Layer.succeed(
   SwarmVerifier.SwarmVerifier,
   SwarmVerifier.SwarmVerifier.of({
     checkoutOf: (thread) => Effect.succeed(thread.worktreePath ?? `checkout:${thread.projectId}`),
+    killStale: (stale) =>
+      Effect.sync(() => {
+        staleKills.push(stale);
+        return true;
+      }),
     run: (input) =>
       Effect.suspend(() => {
+        input.onStarted?.({ pid: 4242, startedAtMs: 1_000 });
         verifyCalls.push({ argv: input.argv, cwd: input.cwd });
         const waiter = verifyCallWaiters.shift();
         if (waiter !== undefined) Deferred.doneUnsafe(waiter, Effect.void);
@@ -3523,6 +3531,58 @@ it.layer(layerSwarm)("verify (SW-A6)", (it) => {
       assert.equal(done.status, "claimed_done");
       assert.include(done.envelopeJson ?? "", `"verifySkipped":"runtime_mode"`);
       assert.equal(verifyCalls.length, 0, "the command never started");
+      yield* retire(result.swarmId);
+    }),
+  );
+
+  it.effect("persists a running check's process", () =>
+    Effect.gen(function* () {
+      resetVerify();
+      const held = yield* Deferred.make<SwarmVerifier.SwarmVerifyOutcome>();
+      verifyScript.push({ hold: held });
+      const { threadId, anchor } = yield* seedArchitect("a6-pid");
+      const result = yield* createSwarm(threadId, {
+        members: verifyMembers(1, { argv: ["pnpm", "test"] }),
+      });
+      yield* endRun({ threadId, runId: anchor.id });
+      yield* finishRow(threadId, (yield* rows(result.swarmId))[0]!, "m0 done");
+      // The running check's pid and start are stored on the next pass.
+      const running = yield* afterPasses(result.swarmId, "m0", 2);
+      assert.equal(running.status, "verifying");
+      assert.equal(running.verifyPid, 4242);
+      assert.equal(running.verifyStartedAt, "1970-01-01T00:00:01.000Z");
+      yield* retire(result.swarmId);
+      yield* afterPasses(result.swarmId, "m0", 1);
+    }),
+  );
+
+  it.effect("kills a check left by an earlier server process before running it again", () =>
+    Effect.gen(function* () {
+      const store = yield* SwarmStore.SwarmStore;
+      resetVerify();
+      staleKills.length = 0;
+      const { threadId, anchor } = yield* seedArchitect("a6-stale");
+      const result = yield* createSwarm(threadId, {
+        members: verifyMembers(1, { argv: ["pnpm", "test"] }),
+      });
+      yield* endRun({ threadId, runId: anchor.id });
+      yield* finishRow(threadId, (yield* rows(result.swarmId))[0]!, "m0 done");
+      // Verifying with a process from before a restart, and no check running here.
+      yield* store.updateMember({
+        swarmId: result.swarmId,
+        memberKey: "m0",
+        patch: {
+          status: "verifying",
+          verifyPid: 777,
+          verifyStartedAt: "1970-01-01T00:00:05.000Z",
+          updatedAt: DateTime.formatIso(yield* DateTime.now),
+        },
+      });
+      yield* afterPasses(result.swarmId, "m0", 1);
+      assert.deepEqual(staleKills, [{ pid: 777, startedAtMs: 5_000 }]);
+      const rerun = yield* afterPasses(result.swarmId, "m0", 1);
+      assert.equal(rerun.status, "verified");
+      assert.isNull(rerun.verifyPid, "cleared once applied");
       yield* retire(result.swarmId);
     }),
   );

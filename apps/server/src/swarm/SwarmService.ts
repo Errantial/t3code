@@ -421,6 +421,7 @@ const make = Effect.gen(function* () {
   >();
   // Finished checks waiting for the next pass, which applies them under the pass lock.
   const verifyOutcomes = new Map<string, VerifyResult>();
+  const verifyStarts = new Map<string, SwarmVerifier.VerifyProcess>();
   // Shared-checkout members verify one at a time per checkout.
   const checkoutLocks = new Map<string, Semaphore.Semaphore>();
   // Admission passes run one at a time, so a create and a tick never admit the same row twice.
@@ -1102,6 +1103,23 @@ const make = Effect.gen(function* () {
       boundRunId: input.run.id,
       verifyAttempts: member.verifyAttempts,
     };
+    // A check left running by an earlier server process is killed before this one starts.
+    if (member.verifyPid !== null && member.verifyStartedAt !== null) {
+      const killed = yield* verifier.killStale({
+        pid: member.verifyPid,
+        startedAtMs: Date.parse(member.verifyStartedAt),
+      });
+      yield* Effect.logInfo("swarm.verify-stale", {
+        swarmId: member.swarmId,
+        memberKey: member.memberKey,
+        killed,
+      });
+      yield* store.updateMember({
+        swarmId: member.swarmId,
+        memberKey: member.memberKey,
+        patch: { verifyPid: null, verifyStartedAt: null, updatedAt: yield* nowIso },
+      });
+    }
     verifyMembers.set(ref, { swarmId: member.swarmId, memberKey: member.memberKey });
     yield* Effect.logInfo("swarm.verify-started", {
       swarmId: member.swarmId,
@@ -1131,6 +1149,9 @@ const make = Effect.gen(function* () {
               argv: spec.verifyArgv ?? [],
               cwd: cwd.value,
               timeoutMs: spec.verifyTimeoutMs ?? VERIFY_DEFAULT_TIMEOUT_MS,
+              onStarted: (started) => {
+                verifyStarts.set(ref, started);
+              },
             });
             verifyOutcomes.set(ref, { ...ids, outcome });
           }),
@@ -2171,12 +2192,36 @@ const make = Effect.gen(function* () {
         yield* dropStaleVerifies.pipe(logged("swarm.verify-sweep-error", {}));
         for (const [ref, result] of verifyOutcomes) {
           verifyOutcomes.delete(ref);
+          verifyStarts.delete(ref);
           yield* applyVerifyOutcome(result).pipe(
+            Effect.andThen(
+              store.updateMember({
+                swarmId: result.swarmId,
+                memberKey: result.memberKey,
+                patch: { verifyPid: null, verifyStartedAt: null, updatedAt: yield* nowIso },
+              }),
+            ),
             logged("swarm.verify-apply-error", {
               swarmId: result.swarmId,
               memberKey: result.memberKey,
             }),
           );
+        }
+        // A running check's process, kept so a restart can kill it before checking again.
+        for (const [ref, started] of verifyStarts) {
+          verifyStarts.delete(ref);
+          const ids = verifyMembers.get(ref);
+          if (ids === undefined) continue;
+          yield* store
+            .updateMember({
+              ...ids,
+              patch: {
+                verifyPid: started.pid,
+                verifyStartedAt: DateTime.formatIso(DateTime.makeUnsafe(started.startedAtMs)),
+                updatedAt: yield* nowIso,
+              },
+            })
+            .pipe(logged("swarm.verify-pid-error", ids));
         }
         // Cancelled and detached swarms are followed until their launched members end:
         // cancelled ones still hold slots and release while their anchor is open, detached

@@ -78,6 +78,12 @@ export interface SwarmVerifyOutcome {
   readonly outputTail: string;
 }
 
+/** A running verify command: its OS pid and when it started (epoch ms). */
+export interface VerifyProcess {
+  readonly pid: number;
+  readonly startedAtMs: number;
+}
+
 export class SwarmVerifyCheckoutError extends Data.TaggedError("SwarmVerifyCheckoutError")<{}> {}
 
 export class SwarmVerifier extends Context.Service<
@@ -92,7 +98,11 @@ export class SwarmVerifier extends Context.Service<
       readonly argv: ReadonlyArray<string>;
       readonly cwd: string;
       readonly timeoutMs: number;
+      /** Called once the process exists, so its pid can be persisted. */
+      readonly onStarted?: (process: VerifyProcess) => void;
     }) => Effect.Effect<SwarmVerifyOutcome>;
+    /** Kills a check's process tree left by an earlier server process, if it is still that one. */
+    readonly killStale: (process: VerifyProcess) => Effect.Effect<boolean>;
   }
 >()("t3/swarm/SwarmVerifier") {}
 
@@ -124,7 +134,7 @@ const make = Effect.gen(function* () {
   );
 
   const run: SwarmVerifier["Service"]["run"] = (input) =>
-    BoundedExec.runBounded({
+    BoundedExec.startBounded({
       argv: input.argv,
       cwd: input.cwd,
       env: { ...verifyEnvironment(process.env), CI: "1" },
@@ -133,6 +143,14 @@ const make = Effect.gen(function* () {
       maxOutputBytes: VERIFY_STREAM_TAIL_BYTES,
       platform,
     }).pipe(
+      Effect.tap((started) =>
+        Effect.sync(() => {
+          if (started.pid !== undefined) {
+            input.onStarted?.({ pid: started.pid, startedAtMs: started.startedAtMs });
+          }
+        }),
+      ),
+      Effect.flatMap((started) => started.await),
       Effect.map((outcome): SwarmVerifyOutcome => ({
         passed: outcome.exitCode === 0 && !outcome.timedOut && !outcome.cancelled,
         exitCode: outcome.exitCode,
@@ -152,7 +170,10 @@ const make = Effect.gen(function* () {
       }),
     );
 
-  return SwarmVerifier.of({ checkoutOf, run });
+  const killStale: SwarmVerifier["Service"]["killStale"] = (stale) =>
+    BoundedExec.killStaleTree({ ...stale, platform });
+
+  return SwarmVerifier.of({ checkoutOf, run, killStale });
 });
 
 export const layer = Layer.effect(SwarmVerifier, make);

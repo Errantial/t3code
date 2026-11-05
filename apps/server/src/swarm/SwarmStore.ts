@@ -73,6 +73,9 @@ export interface SwarmMemberRecord {
   readonly envelopeJson: string | null;
   readonly turnsUsed: number;
   readonly verifyAttempts: number;
+  /** The running verify command's process and start time (migration 077). */
+  readonly verifyPid: number | null;
+  readonly verifyStartedAt: string | null;
   readonly followups: number;
   readonly followupNotified: boolean;
   readonly autoRetries: number;
@@ -114,6 +117,8 @@ const MEMBER_PATCH_COLUMNS = {
   envelopeJson: "envelope_json",
   turnsUsed: "turns_used",
   verifyAttempts: "verify_attempts",
+  verifyPid: "verify_pid",
+  verifyStartedAt: "verify_started_at",
   followups: "followups",
   followupNotified: "followup_notified",
   autoRetries: "auto_retries",
@@ -202,6 +207,8 @@ const memberOf = (row: Row): SwarmMemberRecord => ({
   envelopeJson: nullableString(row.envelope_json),
   turnsUsed: Number(row.turns_used),
   verifyAttempts: Number(row.verify_attempts),
+  verifyPid: row.verify_pid == null ? null : Number(row.verify_pid),
+  verifyStartedAt: nullableString(row.verify_started_at),
   followups: Number(row.followups),
   followupNotified: bool(row.followup_notified),
   autoRetries: Number(row.auto_retries),
