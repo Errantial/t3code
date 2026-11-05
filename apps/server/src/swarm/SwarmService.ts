@@ -44,11 +44,13 @@ import {
 import type * as Orchestrator from "../orchestration-v2/Orchestrator.ts";
 import * as ThreadLaunchService from "../orchestration-v2/ThreadLaunchService.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
+import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as SwarmStore from "./SwarmStore.ts";
 import {
   type SwarmCaps,
   type SwarmMemberSpec,
+  type SwarmPlacementOption,
   isFinalMemberStatus,
   isWriter,
   memberRef,
@@ -110,6 +112,22 @@ const decodeSpecJson = Schema.decodeUnknownSync(SpecJson);
 const encodeSpecJson = Schema.encodeSync(SpecJson);
 /** Rows are written only by this service, from a `SwarmMemberSpec`. */
 const parseSpec = (specJson: string) => decodeSpecJson(specJson) as SwarmMemberSpec;
+
+/** The instance a member runs on: its placement for `anyOf`, else its single target. */
+const optionFor = (spec: SwarmMemberSpec, instanceId: string | null): SwarmPlacementOption =>
+  spec.anyOf?.find((option) => option.modelSelection.instanceId === instanceId) ?? {
+    modelSelection: spec.modelSelection,
+    ...(spec.supportedRuntimeModes === undefined
+      ? {}
+      : { supportedRuntimeModes: spec.supportedRuntimeModes }),
+    driver: spec.driver,
+  };
+
+/** A queued `anyOf` member is bound to no instance until it is placed. */
+const rowInstanceId = (spec: SwarmMemberSpec) =>
+  spec.anyOf === undefined ? spec.modelSelection.instanceId : null;
+
+const RECENT_FAILURE_WINDOW_MINUTES = 10;
 
 const capsOf = (settings: {
   readonly swarmMaxConcurrent: number;
@@ -173,7 +191,6 @@ const unsupportedFields = (input: SwarmCreateInput): string | undefined => {
     if (member.doneCriteria !== undefined) return "`doneCriteria`";
     if (member.maxTurns !== undefined) return "`maxTurns`";
     if (member.maxWallClockMs !== undefined) return "`maxWallClockMs`";
-    if (member.target?.anyOf !== undefined) return "`target.anyOf`";
   }
   return undefined;
 };
@@ -183,6 +200,7 @@ const make = Effect.gen(function* () {
   const threads = yield* ThreadManagementService.ThreadManagementService;
   const threadLaunch = yield* ThreadLaunchService.ThreadLaunchService;
   const settingsService = yield* ServerSettings.ServerSettingsService;
+  const providerRegistry = yield* ProviderRegistry.ProviderRegistry;
   // Admission passes run one at a time, so a create and a tick never admit the same row twice.
   const passLock = yield* Semaphore.make(1);
   const wakes = yield* Queue.sliding<void>(1);
@@ -210,6 +228,7 @@ const make = Effect.gen(function* () {
   const admissionCommand = (
     swarm: SwarmStore.SwarmRecord,
     spec: SwarmMemberSpec,
+    option: SwarmPlacementOption,
     input: {
       readonly commandId: CommandId;
       readonly runtimeMode: RuntimeMode;
@@ -226,7 +245,7 @@ const make = Effect.gen(function* () {
       parentNodeId: swarm.anchorNodeId,
       task: spec.task,
       title: spec.title,
-      modelSelection: spec.modelSelection,
+      modelSelection: option.modelSelection,
       runtimeMode: input.runtimeMode,
       interactionMode: input.interactionMode,
       ...(spec.isolation === "worktree" && swarm.baseCommit !== null
@@ -246,11 +265,11 @@ const make = Effect.gen(function* () {
   const finishAdmission = Effect.fn("SwarmService.finishAdmission")(function* (input: {
     readonly swarm: SwarmStore.SwarmRecord;
     readonly member: SwarmStore.SwarmMemberRecord;
-    readonly spec: SwarmMemberSpec;
+    readonly option: SwarmPlacementOption;
     readonly commandId: CommandId;
     readonly dispatched: Result.Result<Orchestrator.OrchestratorV2DispatchResult, unknown>;
   }) {
-    const { swarm, member, spec, commandId, dispatched } = input;
+    const { swarm, member, option, commandId, dispatched } = input;
     const endedAt = yield* nowIso;
     const events = Result.isSuccess(dispatched) ? dispatched.success.storedEvents : [];
     const task = events.flatMap((stored) =>
@@ -275,7 +294,7 @@ const make = Effect.gen(function* () {
           failureClass: "launch",
           lastFailureClass: "launch",
           lastFailedAt: endedAt,
-          lastFailedInstanceId: spec.modelSelection.instanceId,
+          lastFailedInstanceId: option.modelSelection.instanceId,
           endedAt,
           updatedAt: endedAt,
         },
@@ -295,7 +314,7 @@ const make = Effect.gen(function* () {
         taskId: task.id,
         childThreadId,
         ...(childRun === undefined ? {} : { childRunId: childRun.id, boundRunId: childRun.id }),
-        providerInstanceId: spec.modelSelection.instanceId,
+        providerInstanceId: option.modelSelection.instanceId,
         updatedAt: endedAt,
       },
     });
@@ -309,13 +328,19 @@ const make = Effect.gen(function* () {
     swarm: SwarmStore.SwarmRecord,
     member: SwarmStore.SwarmMemberRecord,
     architect: Pick<OrchestrationV2ThreadProjection, "thread">,
+    placedInstanceId: string | null,
   ) {
     const spec = parseSpec(member.specJson);
-    // Ceilings never rise; the architect's current modes can only lower them.
+    const option = optionFor(spec, placedInstanceId);
+    // Ceilings never rise; the architect's current modes can only lower them. The runtime mode
+    // steps down if the placed instance does not offer it (rev 3.2).
     const runtimeMode = yield* resolveRuntimeMode(
       narrowerRuntimeMode(spec.runtimeCeiling, architect.thread.runtimeMode),
       undefined,
-      { modelSelection: spec.modelSelection, supportedRuntimeModes: spec.supportedRuntimeModes },
+      {
+        modelSelection: option.modelSelection,
+        supportedRuntimeModes: option.supportedRuntimeModes,
+      },
     );
     const interactionMode = narrowerInteractionMode(
       spec.interactionCeiling,
@@ -324,7 +349,8 @@ const make = Effect.gen(function* () {
     const commandId = CommandId.make(
       `swarm-admit:${swarm.swarmId}:${member.memberKey}:${member.attempt}`,
     );
-    // Written before the dispatch, so a crash replays the same command (resumeAdmission).
+    // Written with the placement before the dispatch, so a crash replays the same command on
+    // the same instance (resumeAdmission) instead of placing again. Sticky from here on.
     yield* store.updateMember({
       swarmId: swarm.swarmId,
       memberKey: member.memberKey,
@@ -332,15 +358,16 @@ const make = Effect.gen(function* () {
         status: "launching",
         queueReason: null,
         commandId,
+        providerInstanceId: option.modelSelection.instanceId,
         effectiveRuntimeMode: runtimeMode,
         effectiveInteractionMode: interactionMode,
         updatedAt: yield* nowIso,
       },
     });
     const dispatched = yield* threads
-      .dispatch(admissionCommand(swarm, spec, { commandId, runtimeMode, interactionMode }))
+      .dispatch(admissionCommand(swarm, spec, option, { commandId, runtimeMode, interactionMode }))
       .pipe(Effect.result);
-    yield* finishAdmission({ swarm, member, spec, commandId, dispatched });
+    yield* finishAdmission({ swarm, member, option, commandId, dispatched });
   });
 
   /**
@@ -352,16 +379,17 @@ const make = Effect.gen(function* () {
     member: SwarmStore.SwarmMemberRecord & { readonly commandId: CommandId },
   ) {
     const spec = parseSpec(member.specJson);
+    const option = optionFor(spec, member.providerInstanceId);
     const dispatched = yield* threads
       .dispatch(
-        admissionCommand(swarm, spec, {
+        admissionCommand(swarm, spec, option, {
           commandId: member.commandId,
           runtimeMode: member.effectiveRuntimeMode ?? spec.runtimeCeiling,
           interactionMode: member.effectiveInteractionMode ?? spec.interactionCeiling,
         }),
       )
       .pipe(Effect.result);
-    yield* finishAdmission({ swarm, member, spec, commandId: member.commandId, dispatched });
+    yield* finishAdmission({ swarm, member, option, commandId: member.commandId, dispatched });
   });
 
   const logged =
@@ -564,6 +592,29 @@ const make = Effect.gen(function* () {
           (yield* store.listInstancePauses).map((pause) => [pause.providerInstanceId, pause.until]),
         );
         const now = yield* nowIso;
+        const healthy = new Set(
+          (yield* providerRegistry.getProviders)
+            .filter(
+              (provider) =>
+                provider.enabled &&
+                provider.status !== "error" &&
+                provider.status !== "disabled" &&
+                provider.auth.status !== "unauthenticated",
+            )
+            .map((provider) => String(provider.instanceId)),
+        );
+        const failureSince = DateTime.formatIso(
+          DateTime.subtract(yield* DateTime.now, { minutes: RECENT_FAILURE_WINDOW_MINUTES }),
+        );
+        const recentFailures = new Map<string, number>();
+        for (const member of [...membersBySwarm.values()].flat()) {
+          if (member.lastFailedInstanceId === null || member.lastFailedAt === null) continue;
+          if (member.lastFailedAt < failureSince) continue;
+          recentFailures.set(
+            member.lastFailedInstanceId,
+            (recentFailures.get(member.lastFailedInstanceId) ?? 0) + 1,
+          );
+        }
         const tracked = swarms.filter((swarm) => membersBySwarm.has(swarm.swarmId));
         const plan = planAdmissions({
           swarms: tracked.map((swarm) => ({
@@ -574,18 +625,24 @@ const make = Effect.gen(function* () {
           })),
           members: [...membersBySwarm.values()].flat().map((member) => {
             const spec = parseSpec(member.specJson);
+            const unplaced = member.providerInstanceId === null && spec.anyOf !== undefined;
             return {
               swarmId: member.swarmId,
               memberKey: member.memberKey,
               ordinal: member.ordinal,
               status: member.status,
-              providerInstanceId: member.providerInstanceId ?? spec.modelSelection.instanceId,
+              providerInstanceId: member.providerInstanceId ?? rowInstanceId(spec),
               driver: spec.driver,
+              ...(unplaced
+                ? { anyOf: spec.anyOf!.map((option) => String(option.modelSelection.instanceId)) }
+                : {}),
             };
           }),
           caps: capsOf(settings),
           pauses,
           now,
+          healthy,
+          recentFailures,
         });
         const swarmById = new Map(tracked.map((swarm) => [swarm.swarmId, swarm]));
         for (const planned of plan.admit) {
@@ -595,7 +652,7 @@ const make = Effect.gen(function* () {
             .find((candidate) => candidate.memberKey === planned.memberKey)!;
           const architect = architects.get(swarm.swarmId);
           if (architect === undefined || Option.isNone(architect)) continue;
-          yield* dispatchAdmission(swarm, member, architect.value).pipe(
+          yield* dispatchAdmission(swarm, member, architect.value, planned.placedInstanceId).pipe(
             logged("swarm.admission-error", {
               swarmId: swarm.swarmId,
               memberKey: member.memberKey,
@@ -684,7 +741,10 @@ const make = Effect.gen(function* () {
             childThreadId: member.childThreadId,
             link: threadLinkFor(scope, member.childThreadId),
           }),
-      providerInstanceId: member.providerInstanceId ?? spec.modelSelection.instanceId,
+      providerInstanceId: member.providerInstanceId ?? rowInstanceId(spec),
+      ...(spec.anyOf === undefined
+        ? {}
+        : { anyOf: spec.anyOf.map((option) => option.modelSelection.instanceId) }),
       model: spec.modelSelection.model,
       ...(spec.modelSelection.options === undefined
         ? {}
@@ -788,18 +848,91 @@ const make = Effect.gen(function* () {
     // One target resolution per distinct target.
     const targets = new Map<string, ResolvedTarget>();
     const specs: Array<SwarmMemberSpec & { readonly writer: boolean }> = [];
+    const resolveOnce = Effect.fn("SwarmService.resolveTargetOnce")(function* (
+      target: OrchestratorMcpTarget | undefined,
+    ) {
+      const targetKey = encodeSpecJson(target ?? null);
+      const known = targets.get(targetKey);
+      if (known !== undefined) return known;
+      const resolved = yield* resolver.resolveTarget(architect, target);
+      targets.set(targetKey, resolved);
+      return resolved;
+    });
     for (const member of members) {
-      const targetKey = encodeSpecJson(member.target ?? null);
-      let target = targets.get(targetKey);
-      if (target === undefined) {
-        target = yield* resolver.resolveTarget(architect, member.target);
-        targets.set(targetKey, target);
+      const anyOf = member.target?.anyOf;
+      let target: ResolvedTarget;
+      let options: ReadonlyArray<SwarmPlacementOption> | undefined;
+      let runtimeCeiling: RuntimeMode;
+      if (anyOf === undefined) {
+        target = yield* resolveOnce(member.target);
+        runtimeCeiling = yield* resolveRuntimeMode(
+          architect.thread.runtimeMode,
+          member.runtimeMode,
+          target,
+        );
+      } else {
+        const { anyOf: _anyOf, ...single } = member.target!;
+        for (const field of [
+          "providerInstanceId",
+          "driverKind",
+          "environmentId",
+          "projectId",
+        ] as const) {
+          if (single[field] !== undefined) {
+            return yield* failure(
+              "invalid_request",
+              `Member '${member.key}': target.anyOf excludes target.${field}.`,
+            );
+          }
+        }
+        if (single.model === undefined) {
+          return yield* failure(
+            "invalid_request",
+            `Member '${member.key}': target.anyOf requires target.model.`,
+          );
+        }
+        const resolved: Array<ResolvedTarget> = [];
+        for (const instanceId of new Set(anyOf)) {
+          resolved.push(
+            yield* resolveOnce({ ...single, providerInstanceId: instanceId }).pipe(
+              Effect.mapError((error) =>
+                failure(
+                  "invalid_request",
+                  `Member '${member.key}': anyOf instance ${instanceId} cannot run it. ${error.message}`,
+                ),
+              ),
+            ),
+          );
+        }
+        const first = resolved[0]!;
+        const otherDriver = resolved.find((option) => option.driver !== first.driver);
+        if (otherDriver !== undefined) {
+          return yield* failure(
+            "invalid_request",
+            `Member '${member.key}': anyOf instance ${otherDriver.modelSelection.instanceId} uses driver ${otherDriver.driver}, not ${first.driver}. List instances of one driver.`,
+          );
+        }
+        // An explicit mode must be offered by every instance; an inherited one steps down per
+        // instance, so the ceiling is the narrowest across them.
+        let ceiling: RuntimeMode | undefined;
+        for (const option of resolved) {
+          const mode = yield* resolveRuntimeMode(
+            architect.thread.runtimeMode,
+            member.runtimeMode,
+            option,
+          );
+          ceiling = ceiling === undefined ? mode : narrowerRuntimeMode(ceiling, mode);
+        }
+        runtimeCeiling = ceiling!;
+        target = first;
+        options = resolved.map((option) => ({
+          modelSelection: option.modelSelection,
+          ...(option.supportedRuntimeModes === undefined
+            ? {}
+            : { supportedRuntimeModes: option.supportedRuntimeModes }),
+          driver: option.driver,
+        }));
       }
-      const runtimeCeiling = yield* resolveRuntimeMode(
-        architect.thread.runtimeMode,
-        member.runtimeMode,
-        target,
-      );
       const interactionCeiling = yield* resolveInteractionMode(
         architect.thread.interactionMode,
         member.interactionMode,
@@ -838,6 +971,7 @@ const make = Effect.gen(function* () {
           ? {}
           : { supportedRuntimeModes: target.supportedRuntimeModes }),
         driver: target.driver,
+        ...(options === undefined ? {} : { anyOf: options }),
         runtimeCeiling,
         interactionCeiling,
         writer: isWriter(interactionCeiling),
@@ -880,11 +1014,13 @@ const make = Effect.gen(function* () {
     const warnings: ReadonlyArray<SwarmWarning> = [
       ...ownsPathsOverlapWarnings(candidates.slice(0, specs.length)),
       ...serialInstanceWarnings({
-        members: specs.map((spec) => ({
-          key: spec.key,
-          instanceId: spec.modelSelection.instanceId,
-          driver: spec.driver,
-        })),
+        members: specs.flatMap((spec) =>
+          (spec.anyOf ?? [spec]).map((option) => ({
+            key: spec.key,
+            instanceId: option.modelSelection.instanceId,
+            driver: option.driver,
+          })),
+        ),
         caps,
       }),
     ];
@@ -938,7 +1074,7 @@ const make = Effect.gen(function* () {
           specJson: encodeSpecJson(spec),
           queuedAt: now,
           writer,
-          providerInstanceId: spec.modelSelection.instanceId,
+          providerInstanceId: rowInstanceId(spec),
         })),
       })
       .pipe(Effect.result);

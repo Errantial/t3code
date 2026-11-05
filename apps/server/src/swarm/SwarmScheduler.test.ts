@@ -228,3 +228,120 @@ describe("writers and paths", () => {
     expect(narrowerInteractionMode("plan", "default")).toBe("plan");
   });
 });
+
+describe("anyOf placement", () => {
+  const anyOf = ["a", "b", "c"];
+  const queued = (ordinal: number, overrides: Partial<PlannedMember> = {}) =>
+    member(swarmA, ordinal, { providerInstanceId: null, anyOf, ...overrides });
+  const placed = (plan: ReturnType<typeof planAdmissions>) =>
+    plan.admit.map((admission) => admission.placedInstanceId);
+  const healthy = new Set(anyOf);
+
+  it("places on the instance with the fewest active members", () => {
+    const plan = planAdmissions({
+      swarms: [swarm(swarmA, now)],
+      members: [
+        member(swarmA, 0, { status: "running", providerInstanceId: "a" }),
+        member(swarmA, 1, { status: "running", providerInstanceId: "c" }),
+        queued(2),
+      ],
+      caps,
+      pauses: new Map(),
+      now,
+      healthy,
+    });
+    expect(placed(plan)).toEqual(["b"]);
+  });
+
+  it("breaks ties by fewer recent failures, then by anyOf order", () => {
+    const tie = (recentFailures: ReadonlyMap<string, number>) =>
+      placed(
+        planAdmissions({
+          swarms: [swarm(swarmA, now)],
+          members: [queued(0)],
+          caps,
+          pauses: new Map(),
+          now,
+          healthy,
+          recentFailures,
+        }),
+      );
+    expect(tie(new Map())).toEqual(["a"]);
+    expect(
+      tie(
+        new Map([
+          ["a", 2],
+          ["b", 1],
+        ]),
+      ),
+    ).toEqual(["c"]);
+  });
+
+  it("skips paused, unhealthy, and full instances, and queues when none qualifies", () => {
+    const plan = planAdmissions({
+      swarms: [swarm(swarmA, now)],
+      members: [
+        member(swarmA, 0, { status: "running", providerInstanceId: "c" }),
+        queued(1),
+        queued(2),
+      ],
+      caps: { ...caps, instanceOverrides: { c: 1 } },
+      pauses: new Map([["a", "2026-11-04T12:05:00.000Z"]]),
+      now,
+      // b is in error or signed out, so the registry does not list it as healthy.
+      healthy: new Set(["a", "c"]),
+    });
+    expect(placed(plan)).toEqual([]);
+    expect(plan.queueReasons.get(memberRef(queued(1)))).toBe("any_of_unavailable");
+    expect(plan.queueReasons.get(memberRef(queued(2)))).toBe("any_of_unavailable");
+  });
+
+  it("avoids a failed instance whenever another one qualifies", () => {
+    const plan = planAdmissions({
+      swarms: [swarm(swarmA, now)],
+      members: [
+        queued(0, { avoidInstanceId: "a" }),
+        queued(1, { anyOf: ["a"], avoidInstanceId: "a" }),
+      ],
+      caps,
+      pauses: new Map(),
+      now,
+      healthy,
+    });
+    expect(placed(plan)).toEqual(["b", "a"]);
+  });
+
+  it("spreads 12 members 2/2/2 over three instances, and a pause moves the rest", () => {
+    const tight: SwarmCaps = { global: 6, perInstance: 2, instanceOverrides: {} };
+    const members = Array.from({ length: 12 }, (_, index) => queued(index));
+    const first = planAdmissions({
+      swarms: [swarm(swarmA, now)],
+      members,
+      caps: tight,
+      pauses: new Map(),
+      now,
+      healthy,
+    });
+    const spread = (instances: ReadonlyArray<string | null>) =>
+      Object.fromEntries(anyOf.map((id) => [id, instances.filter((value) => value === id).length]));
+    expect(spread(placed(first))).toEqual({ a: 2, b: 2, c: 2 });
+
+    // Three finish, one per instance; then c pauses. Its free slot is not used.
+    const running = first.admit.map(
+      ({ anyOf: _anyOf, placedInstanceId, ...admission }, index): PlannedMember => ({
+        ...admission,
+        status: index % 2 === 0 ? "claimed_done" : "running",
+        providerInstanceId: placedInstanceId,
+      }),
+    );
+    const second = planAdmissions({
+      swarms: [swarm(swarmA, now)],
+      members: [...running, ...members.slice(6)],
+      caps: tight,
+      pauses: new Map([["c", "2026-11-04T12:30:00.000Z"]]),
+      now,
+      healthy,
+    });
+    expect(spread(placed(second))).toEqual({ a: 1, b: 1, c: 0 });
+  });
+});
