@@ -111,6 +111,41 @@ it.live("runs argv in the checkout and reports a pass, a failure, and the output
   ),
 );
 
+it("passes verify only an allowlisted environment, without the server's secrets", () => {
+  expect(
+    SwarmVerifier.verifyEnvironment({
+      Path: "C:/bin",
+      SystemRoot: "C:/Windows",
+      LC_ALL: "C",
+      OPENAI_API_KEY: "secret",
+      T3_CONTROLLER_TOKEN: "secret",
+      HOME: undefined,
+    }),
+  ).toEqual({ Path: "C:/bin", SystemRoot: "C:/Windows", LC_ALL: "C" });
+});
+
+it.live("runs verify without the server's other environment variables", () =>
+  withRepo((repo) =>
+    Effect.gen(function* () {
+      const verifier = yield* SwarmVerifier.SwarmVerifier;
+      process.env.T3_VERIFY_TEST_SECRET = "must-not-leak";
+      const outcome = yield* verifier
+        .run({
+          argv: [
+            node,
+            "-e",
+            "process.stdout.write(`${process.env.T3_VERIFY_TEST_SECRET}|${process.env.CI}`)",
+          ],
+          cwd: repo,
+          timeoutMs: 30_000,
+        })
+        .pipe(Effect.ensuring(Effect.sync(() => delete process.env.T3_VERIFY_TEST_SECRET)));
+      expect(outcome.passed).toBe(true);
+      expect(outcome.outputTail).toBe("undefined|1");
+    }).pipe(Effect.provide(layerFor(repo))),
+  ),
+);
+
 it.live.skipIf(HostProcess.Platform.defaultValue() !== "win32")(
   "kills the whole tree on timeout and on interruption (Windows taskkill /T)",
   () =>
