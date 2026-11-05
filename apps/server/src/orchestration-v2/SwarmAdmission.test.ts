@@ -5628,6 +5628,36 @@ it.layer(layerSwarm)("panel and sidebar (SW-A10)", (it) => {
     }),
   );
 
+  it.effect("delivers more than 4 KB of notices over several turns, none lost or repeated", () =>
+    Effect.gen(function* () {
+      const store = yield* SwarmStore.SwarmStore;
+      const threadId = ThreadId.make("thread:a10-notices-cap");
+      const swarmId = SwarmId.make("swarm:a10-notices-cap");
+      const now = DateTime.formatIso(yield* DateTime.now);
+      for (let index = 0; index < 30; index += 1) {
+        yield* store.putNotice({
+          swarmId,
+          parentThreadId: threadId,
+          noticeKey: `test:${String(index).padStart(2, "0")}`,
+          kind: "test",
+          text: `Notice ${String(index).padStart(2, "0")}: ${"x".repeat(180)}`,
+          createdAt: now,
+        });
+      }
+      const contributor = makeSwarmNoticesContributor(store);
+      const seen: Array<string> = [];
+      for (let turn = 0; turn < 10; turn += 1) {
+        const entry = yield* contributor.build({ threadId });
+        if (entry === undefined) break;
+        assert.isAtMost(new TextEncoder().encode(entry.text).length, 4_096);
+        seen.push(...(entry.text.match(/Notice \d\d/g) ?? []));
+      }
+      assert.equal(seen.length, 30, "none lost");
+      assert.equal(new Set(seen).size, 30, "none shown twice");
+      assert.deepEqual(seen, [...seen].toSorted(), "oldest first");
+    }),
+  );
+
   it.effect("acts only on its own thread's swarm: stop, stop all, and retry", () =>
     Effect.gen(function* () {
       const swarms = yield* SwarmService.SwarmService;

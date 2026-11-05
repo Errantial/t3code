@@ -153,6 +153,8 @@ export const makeSwarmSharedContributor = (
 const SWARM_NOTICES_KEY = "swarm_notices";
 const SWARM_NOTICES_PRIORITY = 90;
 const SWARM_NOTICES_MAX_BYTES = 4_096;
+/** What the notices themselves may use, leaving room for the heading under the entry's cap. */
+const SWARM_NOTICES_TAKE_BYTES = 3_584;
 
 /** Server-authored notices about the architect's swarms, as one entry. */
 const formatSwarmNotices = (notices: ReadonlyArray<{ readonly text: string }>): string =>
@@ -167,6 +169,7 @@ const buildNoticesEntry = Effect.fn("SwarmTurnContext.buildNotices")(function* (
   const notices = yield* store.takeNotices({
     parentThreadId: ThreadId.make(threadId),
     deliveredAt: DateTime.formatIso(yield* DateTime.now),
+    maxBytes: SWARM_NOTICES_TAKE_BYTES,
   });
   if (notices.length === 0) return undefined;
   return {
