@@ -265,8 +265,6 @@ const encodeWakeBatch = Schema.encodeSync(WakeBatchJson);
 const decodeEnvelope = (json: string) => decodeSpecJson(json) as SwarmEnvelope;
 
 type SwarmNoteKind =
-  | "cancelled"
-  | "detached"
   | "budget"
   | "instance_paused"
   | "approvals"
@@ -1605,6 +1603,21 @@ const make = Effect.gen(function* () {
       const swarm = yield* store.getSwarm(note.swarmId);
       if (Option.isNone(swarm)) continue;
       const entries = decodeFollowupEntries(note.membersJson);
+      // After a Stop or a detach a note would start an architect turn the user ended: it is
+      // dropped, marked sent, and the result stays in swarm_collect.
+      const architect = yield* loadRuns(swarm.value.parentThreadId).pipe(Effect.option);
+      if (anchorStateOf(swarm.value, architect) !== "open") {
+        yield* store.markNoteSent({
+          swarmId: note.swarmId,
+          seq: note.seq,
+          memberKeys: entries.map((entry) => entry.key),
+        });
+        yield* Effect.logInfo("swarm.note-dropped", {
+          swarmId: note.swarmId,
+          kind: "followup_result",
+        });
+        continue;
+      }
       const members = yield* store.listMembers(note.swarmId);
       const id = `swarm-note:${note.swarmId}:followup_result:${note.seq}`;
       const sent = yield* threads
@@ -1753,26 +1766,16 @@ const make = Effect.gen(function* () {
     const undelivered = members.filter(
       (member) => isFinalMemberStatus(member.status) && !member.released && member.taskId !== null,
     ).length;
-    // Sent before the state changes: a crash in between replays this note, never loses it.
-    if (outcome === "stopped") {
-      yield* notifyArchitect(swarm, {
-        kind: "cancelled",
-        key: "1",
-        summary: "Swarm cancelled by Stop",
-        text: `Swarm ${swarm.swarmId} was cancelled by Stop: ${queued} queued member${queued === 1 ? "" : "s"} will not start, and running members were stopped. Results so far: swarm_collect.`,
-        outcome: "cancelled",
-        routine: false,
-      });
-    } else if (outcome === "detached") {
-      yield* notifyArchitect(swarm, {
-        kind: "detached",
-        key: "1",
-        summary: "Swarm detached",
-        text: `Swarm ${swarm.swarmId} was detached because its wake was cancelled: ${queued} queued member${queued === 1 ? "" : "s"} will not start, ${running} running member${running === 1 ? "" : "s"} continue unmanaged, and ${undelivered} result${undelivered === 1 ? " was" : "s were"} not delivered. Read them with swarm_collect.`,
-        outcome: "cancelled",
-        routine: false,
-      });
-    }
+    // No message to the architect: a Stop or a cancelled wake is the user's own action, and any
+    // server message would start an architect turn and undo it (an idle thread starts what is
+    // queued). The swarm's status records the outcome for swarm_status and the panel.
+    yield* Effect.logInfo("swarm.closing", {
+      swarmId: swarm.swarmId,
+      outcome,
+      queued,
+      running,
+      undelivered,
+    });
     let cancelled = 0;
     let detached = 0;
     for (const member of members) {
