@@ -234,6 +234,11 @@ export const planAdmissions = (input: {
   readonly now: string;
   /** Instances placement may use: not `error`/`disabled` and not signed out. */
   readonly healthy?: ReadonlySet<string>;
+  /**
+   * Listed instances that are signed out, in error, or disabled. A pinned member waits on one
+   * rather than being admitted to fail; an instance the registry does not list is not judged.
+   */
+  readonly unhealthy?: ReadonlySet<string>;
   /** Failures per instance in the last 10 minutes; placement's tie-break. */
   readonly recentFailures?: ReadonlyMap<string, number>;
 }): AdmissionPlan => {
@@ -312,6 +317,10 @@ export const planAdmissions = (input: {
         }
         instanceId = placed;
       } else if (instanceId !== null) {
+        if (input.unhealthy?.has(instanceId) === true) {
+          queueReasons.set(memberRef(member), `instance_unhealthy:${instanceId}`);
+          continue;
+        }
         if (isPaused(instanceId)) {
           queueReasons.set(
             memberRef(member),

@@ -76,6 +76,7 @@ export const SwarmQueueReasonKind = Schema.Literals([
   "swarm_cap", // the swarm's own maxConcurrent
   "instance_cap",
   "instance_paused",
+  "instance_unhealthy", // a pinned member's instance is signed out, in error, or disabled
   "any_of_unavailable",
   "retry_after",
   "budget",

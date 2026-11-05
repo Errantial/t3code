@@ -313,6 +313,19 @@ const TRANSIENT_FAILURE_CLASSES: ReadonlyArray<SwarmFailureClass> = [
   "transport_error",
   "provider_error",
 ];
+/**
+ * Classes that count toward an instance being down: three within 60 s pause it (two for the
+ * transient ones). Not verify, budget, or a Stop, which say nothing of the instance; a usage
+ * limit pauses on its own.
+ */
+const DOWN_FAILURE_CLASSES: ReadonlyArray<SwarmFailureClass> = [
+  "launch",
+  "provider_error",
+  "transport_error",
+  "permission_error",
+  "validation_error",
+  "unknown",
+];
 const USAGE_LIMIT_PAUSE_MS = 15 * 60_000;
 const INSTANCE_DOWN_WINDOW_MS = 60_000;
 const INSTANCE_DOWN_PAUSE_MS = 5 * 60_000;
@@ -548,6 +561,16 @@ const make = Effect.gen(function* () {
           updatedAt: endedAt,
         },
       });
+      // Repeated launch failures on one instance count toward it being down (review I2).
+      const pausedUntil = yield* checkInstanceDown(
+        option.modelSelection.instanceId,
+        yield* DateTime.now,
+      );
+      if (pausedUntil !== undefined) {
+        yield* instanceDownNotes(String(option.modelSelection.instanceId), pausedUntil).pipe(
+          logged("swarm.note-error", { swarmId: swarm.swarmId }),
+        );
+      }
       return;
     }
     const childThreadId = task.childThreadId;
@@ -1231,14 +1254,23 @@ const make = Effect.gen(function* () {
     nowDt: DateTime.Utc,
   ) {
     const now = DateTime.formatIso(nowDt);
-    const failures = yield* store.countRecentInstanceFailures({
+    const since = DateTime.formatIso(
+      DateTime.subtract(nowDt, { milliseconds: INSTANCE_DOWN_WINDOW_MS }),
+    );
+    const transient = yield* store.countRecentInstanceFailures({
       providerInstanceId,
-      since: DateTime.formatIso(
-        DateTime.subtract(nowDt, { milliseconds: INSTANCE_DOWN_WINDOW_MS }),
-      ),
+      since,
       classes: TRANSIENT_FAILURE_CLASSES,
     });
-    if (failures < 2) return undefined;
+    const any =
+      transient >= 2
+        ? transient
+        : yield* store.countRecentInstanceFailures({
+            providerInstanceId,
+            since,
+            classes: DOWN_FAILURE_CLASSES,
+          });
+    if (transient < 2 && any < 3) return undefined;
     const existing = (yield* store.listInstancePauses).find(
       (pause) => pause.providerInstanceId === providerInstanceId,
     );
@@ -1416,7 +1448,7 @@ const make = Effect.gen(function* () {
         });
         // Before any retry is scheduled, so the history this failure adds is counted.
         const paused =
-          transient && instanceId !== null
+          DOWN_FAILURE_CLASSES.includes(failureClass) && instanceId !== null
             ? yield* checkInstanceDown(instanceId, nowDt)
             : undefined;
         if (retry) {
@@ -2402,15 +2434,18 @@ const make = Effect.gen(function* () {
           (yield* store.listInstancePauses).map((pause) => [pause.providerInstanceId, pause.until]),
         );
         const now = yield* nowIso;
+        const providers = yield* providerRegistry.getProviders;
+        const isHealthy = (provider: (typeof providers)[number]) =>
+          provider.enabled &&
+          provider.status !== "error" &&
+          provider.status !== "disabled" &&
+          provider.auth.status !== "unauthenticated";
         const healthy = new Set(
-          (yield* providerRegistry.getProviders)
-            .filter(
-              (provider) =>
-                provider.enabled &&
-                provider.status !== "error" &&
-                provider.status !== "disabled" &&
-                provider.auth.status !== "unauthenticated",
-            )
+          providers.filter(isHealthy).map((provider) => String(provider.instanceId)),
+        );
+        const unhealthy = new Set(
+          providers
+            .filter((provider) => !isHealthy(provider))
             .map((provider) => String(provider.instanceId)),
         );
         const failureSince = DateTime.formatIso(
@@ -2457,6 +2492,7 @@ const make = Effect.gen(function* () {
           pauses,
           now,
           healthy,
+          unhealthy,
           recentFailures,
         });
         // A usage-limit continuation starts outside admission and may exceed the cap briefly.

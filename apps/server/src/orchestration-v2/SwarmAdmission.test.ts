@@ -1638,8 +1638,12 @@ const finishRow = (
         );
       });
 
-/** Tests share one database and cap; a finished test's swarm stops counting toward the cap. */
-const retire = (swarmId: SwarmId) =>
+/**
+ * Tests share one database and cap; a finished test's swarm stops counting toward the cap. Each
+ * test's TestClock starts at 0, so its failure history and pauses are cleared too: otherwise
+ * they would count toward the next test's instance-down check.
+ */
+const retire = (swarmId: SwarmId, options: { readonly keepPauses?: boolean } = {}) =>
   Effect.gen(function* () {
     const store = yield* SwarmStore.SwarmStore;
     const updatedAt = DateTime.formatIso(yield* DateTime.now);
@@ -1647,10 +1651,14 @@ const retire = (swarmId: SwarmId) =>
       yield* store.updateMember({
         swarmId,
         memberKey: row.memberKey,
-        patch: { status: "cancelled", updatedAt },
+        patch: { status: "cancelled", lastFailedAt: null, updatedAt },
       });
     }
     yield* store.updateSwarm(swarmId, { status: "cancelled", updatedAt });
+    if (options.keepPauses === true) return;
+    for (const pause of yield* store.listInstancePauses) {
+      yield* store.clearInstancePause(pause.providerInstanceId);
+    }
   });
 
 const slotCount = (list: ReadonlyArray<SwarmStore.SwarmMemberRecord>) =>
@@ -4808,7 +4816,8 @@ it.layer(layerSwarm)("failures, usage limits, and instance health (SW-A8)", (it)
       const pause = yield* pauseOf(instanceId);
       assert.equal(pause?.pauseClass, "instance_down");
       assert.equal(Date.parse(pause!.until) - Date.parse(before), 5 * 60_000, "five minutes");
-      yield* retire(down.result.swarmId);
+      // The repeat below needs this pause on record.
+      yield* retire(down.result.swarmId, { keepPauses: true });
 
       // Again within 5 minutes after that pause ended: 15 minutes.
       yield* TestClock.adjust(Duration.minutes(6));
@@ -4936,6 +4945,65 @@ it.layer(layerSwarm)("failures, usage limits, and instance health (SW-A8)", (it)
         (candidate) => candidate.id === m0.taskId,
       );
       assert.include(task?.completionDetail ?? "", "done after the reset");
+      yield* resetHealth;
+      yield* retire(result.swarmId);
+    }),
+  );
+
+  it.effect("queues a pinned member on a signed-out instance instead of starting it", () =>
+    Effect.gen(function* () {
+      const swarms = yield* SwarmService.SwarmService;
+      yield* atHour(8);
+      providerHealth = [
+        {
+          instanceId: "codex",
+          enabled: true,
+          status: "ready",
+          auth: { status: "unauthenticated" },
+        },
+      ] as unknown as ReadonlyArray<ServerProvider>;
+      const { threadId, anchor } = yield* seedArchitect("a8-unhealthy");
+      const result = yield* createSwarm(threadId, {
+        members: members(1, { interactionMode: "plan" }),
+      });
+      assert.equal(result.members[0]!.status, "queued");
+      assert.equal(result.members[0]!.queueReason, "instance_unhealthy:codex");
+      yield* endRun({ threadId, runId: anchor.id });
+      // Signed in again: the member starts.
+      providerHealth = [
+        { instanceId: "codex", enabled: true, status: "ready", auth: { status: "authenticated" } },
+      ] as unknown as ReadonlyArray<ServerProvider>;
+      yield* swarms.tick;
+      assert.equal((yield* rows(result.swarmId))[0]!.status, "launching");
+      providerHealth = [];
+      yield* resetHealth;
+      yield* retire(result.swarmId);
+    }),
+  );
+
+  it.effect("pauses an instance after three non-transient failures within 60 s", () =>
+    Effect.gen(function* () {
+      const swarms = yield* SwarmService.SwarmService;
+      yield* atHour(9);
+      const { threadId, anchor } = yield* seedArchitect("a8-down-any");
+      const result = yield* createSwarm(threadId, {
+        members: members(3, { interactionMode: "plan" }),
+      });
+      yield* endRun({ threadId, runId: anchor.id });
+      const [m0, m1] = yield* rows(result.swarmId);
+      yield* failRow(m0!, providerFailure("validation_error"));
+      yield* failRow(m1!, providerFailure("validation_error"));
+      yield* swarms.tick;
+      assert.isUndefined(yield* pauseOf(String(modelSelection.instanceId)), "two are not enough");
+      const m2 = (yield* rows(result.swarmId))[2]!;
+      assert.equal(m2.status, "launching");
+      yield* TestClock.adjust(Duration.seconds(20));
+      yield* failRow(m2, providerFailure("validation_error"));
+      yield* swarms.tick;
+      assert.equal(
+        (yield* pauseOf(String(modelSelection.instanceId)))?.pauseClass,
+        "instance_down",
+      );
       yield* resetHealth;
       yield* retire(result.swarmId);
     }),
