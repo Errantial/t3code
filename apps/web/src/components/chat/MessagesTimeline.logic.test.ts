@@ -4294,3 +4294,115 @@ describe("shouldCollapseUserMessage", () => {
     expect(shouldCollapseUserMessage(`${citation} ${"More text. ".repeat(60)}`)).toBe(true);
   });
 });
+
+describe("a late swarm member's card (SW-A0 Q5, SW-A10)", () => {
+  const threadId = ThreadId.make("architect");
+  const run1 = RunId.make("anchor-run");
+  const run2 = RunId.make("later-run");
+  const at = (second: number) =>
+    DateTime.makeUnsafe(
+      `2026-10-09T10:${String(Math.floor(second / 60)).padStart(2, "0")}:${String(second % 60).padStart(2, "0")}Z`,
+    );
+  const base = (id: string, runId: RunId, ordinal: number, second: number) => ({
+    id: TurnItemId.make(id),
+    threadId,
+    runId,
+    nodeId: null,
+    providerThreadId: null,
+    providerTurnId: null,
+    nativeItemRef: null,
+    parentItemId: null,
+    ordinal,
+    status: "completed" as const,
+    title: null,
+    startedAt: at(second),
+    completedAt: at(second),
+    updatedAt: at(second),
+  });
+  const user = (id: string, runId: RunId, ordinal: number, second: number) => ({
+    ...base(id, runId, ordinal, second),
+    type: "user_message" as const,
+    messageId: MessageId.make(id),
+    createdBy: "user" as const,
+    creationSource: "web" as const,
+    inputIntent: "turn_start" as const,
+    text: id,
+    attachments: [],
+  });
+  const assistant = (id: string, runId: RunId, ordinal: number, second: number) => ({
+    ...base(id, runId, ordinal, second),
+    type: "assistant_message" as const,
+    messageId: MessageId.make(id),
+    text: id,
+    streaming: false,
+  });
+  const reasoning = (id: string, runId: RunId, ordinal: number, second: number) => ({
+    ...base(id, runId, ordinal, second),
+    type: "reasoning" as const,
+    text: "Thinking",
+    streaming: false,
+  });
+  // Admitted late against the anchor run, so the card keeps the anchor's run id but is drawn
+  // after the later turn, by ordinal.
+  const lateCard = (status: "completed" | "running"): OrchestrationV2TurnItem => ({
+    ...base("late-member", run1, 3_000_001, 600),
+    status,
+    completedAt: status === "running" ? null : at(605),
+    type: "subagent",
+    subagentId: NodeId.make("late-member"),
+    origin: "app_owned",
+    driver: ProviderDriverKind.make("codex"),
+    providerInstanceId: ProviderInstanceId.make("codex"),
+    childThreadId: ThreadId.make("late-member-thread"),
+    prompt: "A late swarm member",
+    result: status === "running" ? null : "done",
+  });
+
+  it.each(["completed", "running"] as const)(
+    "stays at the bottom as its own row (%s) and does not stretch the anchor's Worked for",
+    (status) => {
+      const items: OrchestrationV2TurnItem[] = [
+        user("prompt-1", run1, 1_000_001, 0),
+        reasoning("reasoning-1", run1, 1_000_002, 1),
+        assistant("answer-1", run1, 1_000_003, 10),
+        user("prompt-2", run2, 2_000_001, 300),
+        reasoning("reasoning-2", run2, 2_000_002, 301),
+        assistant("answer-2", run2, 2_000_003, 310),
+        lateCard(status),
+      ];
+      const rows = deriveMessagesTimelineRows({
+        timelineEntries: deriveTimelineEntriesFromVisibleTurnItems({
+          visibleTurnItems: items.map((item) => ({
+            position: item.ordinal,
+            visibility: "local",
+            sourceThreadId: threadId,
+            sourceItemId: item.id,
+            item,
+          })),
+          optimisticMessages: [],
+        }),
+        latestRun: {
+          runId: run2,
+          status: "completed",
+          startedAt: DateTime.formatIso(at(300)),
+          completedAt: DateTime.formatIso(at(310)),
+        },
+        isWorking: false,
+        turnDiffSummaries: [],
+        supportsConversationRollback: false,
+      });
+      expect(rows.map((row) => row.id)).toEqual([
+        "prompt-1",
+        `turn-fold:${run1}`,
+        "answer-1",
+        "prompt-2",
+        `turn-fold:${run2}`,
+        "answer-2",
+        "late-member",
+      ]);
+      expect(rows.find((row) => row.id === `turn-fold:${run1}`)).toMatchObject({
+        label: "Worked for 10s",
+      });
+    },
+  );
+});
