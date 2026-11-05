@@ -253,7 +253,10 @@ interface VerifyResult {
   readonly memberKey: string;
   readonly boundRunId: string;
   readonly verifyAttempts: number;
-  readonly outcome: SwarmVerifier.SwarmVerifyOutcome;
+  /** A finished command, or a check skipped because a mode no longer allows it. */
+  readonly outcome:
+    | SwarmVerifier.SwarmVerifyOutcome
+    | { readonly skipped: "runtime_mode" | "plan_mode" };
 }
 const TERMINAL_TASK_STATUSES: ReadonlySet<string> = new Set([
   "completed",
@@ -630,6 +633,17 @@ const make = Effect.gen(function* () {
    */
   const verifyPermitted = (mode: RuntimeMode) => mode === "full-access";
 
+  /** Why the architect's or the member's current modes forbid a check now, if they do. */
+  const verifyModeBlock = (
+    architect: Pick<OrchestrationV2ThreadProjection, "thread">,
+    child: Pick<OrchestrationV2ThreadProjection, "thread">,
+  ): "runtime_mode" | "plan_mode" | undefined =>
+    child.thread.interactionMode === "plan"
+      ? "plan_mode"
+      : !verifyPermitted(architect.thread.runtimeMode) || !verifyPermitted(child.thread.runtimeMode)
+        ? "runtime_mode"
+        : undefined;
+
   const verifyRetryId = (member: SwarmStore.SwarmMemberRecord, retry: number) =>
     `swarm-verify:${member.swarmId}:${member.memberKey}:${retry}`;
 
@@ -818,6 +832,16 @@ const make = Effect.gen(function* () {
       });
       return;
     }
+    if ("skipped" in input.outcome) {
+      return yield* skipVerify({
+        swarm: swarm.value,
+        member,
+        child,
+        run,
+        reason: input.outcome.skipped,
+        settings,
+      });
+    }
     const spec = parseSpec(member.specJson);
     const verify = {
       passed: input.outcome.passed,
@@ -925,26 +949,32 @@ const make = Effect.gen(function* () {
       memberKey: member.memberKey,
       check: member.verifyAttempts + 1,
     });
+    const childThreadId = member.childThreadId!;
     // The outcome is recorded before the checkout is free for the next check; the next pass
-    // applies it.
+    // applies it. Modes are checked again inside the lock, right before the spawn: a member may
+    // have waited for the checkout, or be re-run after a restart.
     yield* FiberMap.run(
       verifyFibers,
       ref,
       lock
         .withPermits(1)(
-          verifier
-            .run({
+          Effect.gen(function* () {
+            const architect = yield* loadRuns(input.swarm.parentThreadId).pipe(Effect.option);
+            const child = yield* loadRuns(childThreadId).pipe(Effect.option);
+            // Unreadable now: no outcome, so the next pass starts the check again.
+            if (Option.isNone(architect) || Option.isNone(child)) return;
+            const blocked = verifyModeBlock(architect.value, child.value);
+            if (blocked !== undefined) {
+              verifyOutcomes.set(ref, { ...ids, outcome: { skipped: blocked } });
+              return;
+            }
+            const outcome = yield* verifier.run({
               argv: spec.verifyArgv ?? [],
               cwd: cwd.value,
               timeoutMs: spec.verifyTimeoutMs ?? VERIFY_DEFAULT_TIMEOUT_MS,
-            })
-            .pipe(
-              Effect.tap((outcome) =>
-                Effect.sync(() => {
-                  verifyOutcomes.set(ref, { ...ids, outcome });
-                }),
-              ),
-            ),
+            });
+            verifyOutcomes.set(ref, { ...ids, outcome });
+          }),
         )
         .pipe(Effect.ensuring(Effect.sync(() => verifyMembers.delete(ref))), Effect.andThen(wake)),
       { onlyIfMissing: true },
@@ -1044,13 +1074,11 @@ const make = Effect.gen(function* () {
     if (run.status === "completed" && spec.verifyArgv !== undefined) {
       // The member's run is done; verify waits for any other run on its thread to end.
       if (threadBusy) return;
-      // Modes can change after create, so they are checked again before every verify.
-      const architect = yield* loadRuns(swarm.parentThreadId);
-      if (
-        !verifyPermitted(architect.thread.runtimeMode) ||
-        !verifyPermitted(child.thread.runtimeMode)
-      ) {
-        return yield* skipVerify({ swarm, member, child, run, reason: "runtime_mode", settings });
+      // Modes can change after create, so they are checked here and again right before the
+      // command starts.
+      const blocked = verifyModeBlock(yield* loadRuns(swarm.parentThreadId), child);
+      if (blocked !== undefined) {
+        return yield* skipVerify({ swarm, member, child, run, reason: blocked, settings });
       }
       yield* store.updateMember({
         swarmId: swarm.swarmId,

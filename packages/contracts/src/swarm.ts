@@ -312,9 +312,9 @@ export const SwarmEnvelope = Schema.Struct({
       outputTail: Schema.String.check(Schema.isMaxLength(4_096)),
     }),
   ),
-  // A member with verify that ended claimed_done unchecked: its modes no longer allowed a
-  // server-run command, or its checkout could not be resolved.
-  verifySkipped: Schema.optional(Schema.Literals(["runtime_mode", "no_checkout"])),
+  // A member with verify that ended claimed_done unchecked: a thread left full-access, the
+  // member was switched to plan mode, or its checkout could not be resolved.
+  verifySkipped: Schema.optional(Schema.Literals(["runtime_mode", "plan_mode", "no_checkout"])),
   artifacts: Schema.Struct({
     branch: Schema.optional(Schema.String),
     commit: Schema.optional(Schema.String),
