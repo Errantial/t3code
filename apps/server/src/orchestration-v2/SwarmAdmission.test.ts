@@ -1,3 +1,4 @@
+// @effect-diagnostics nodeBuiltinImport:off -- the SW-A11 load benchmark reads event-loop delay and writes its results file.
 import * as SourceControlProviderRegistry from "../sourceControl/SourceControlProviderRegistry.ts";
 import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -28,6 +29,8 @@ import {
   TurnItemId,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
+import * as NodeFS from "node:fs";
+import * as NodePerfHooks from "node:perf_hooks";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
@@ -52,7 +55,12 @@ import * as ServerSettings from "../serverSettings.ts";
 import * as SwarmService from "../swarm/SwarmService.ts";
 import * as SwarmStore from "../swarm/SwarmStore.ts";
 import * as SwarmVerifier from "../swarm/SwarmVerifier.ts";
-import { makeSwarmNoticesContributor } from "../swarm/swarmTurnContext.ts";
+import {
+  makeSwarmMemberContributor,
+  makeSwarmNoticesContributor,
+  makeSwarmSharedContributor,
+} from "../swarm/swarmTurnContext.ts";
+import { delegatedCompletionWakeEntryBytes } from "./delegatedCompletionWake.ts";
 import * as VcsDriverRegistry from "../vcs/VcsDriverRegistry.ts";
 import * as VcsProcess from "../vcs/VcsProcess.ts";
 import * as WorkspacePaths from "../workspace/WorkspacePaths.ts";
@@ -5695,5 +5703,231 @@ it.layer(layerSwarm)("panel and sidebar (SW-A10)", (it) => {
       assert.equal(Option.getOrThrow(yield* store.getSwarm(result.swarmId)).status, "cancelled");
       yield* retire(result.swarmId);
     }),
+  );
+});
+
+// SW-A11 Load row and cap sweep (D5), behind T3_SWARM_LOAD: waves of plan members on the
+// in-memory orchestrator, whose fake provider finishes a run when the test ends it. It measures
+// the server's own overhead; provider latency and rate limits are not modeled. Results go to
+// T3_SWARM_LOAD_OUT as JSON lines; nothing asserts on timings.
+
+const LOAD_RESULT_SUMMARY = "Checked the assigned area and found two issues worth fixing. ".repeat(
+  5,
+);
+
+const loadRun = (input: {
+  readonly name: string;
+  readonly members: number;
+  readonly globalCap: number;
+  readonly perInstanceCap: number;
+  readonly withPanel: boolean;
+}) =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const swarms = yield* SwarmService.SwarmService;
+    const settings = yield* ServerSettings.ServerSettingsService;
+    const store = yield* SwarmStore.SwarmStore;
+    yield* settings.updateSettings({
+      swarmMaxConcurrent: input.globalCap,
+      swarmMaxConcurrentPerInstance: input.perInstanceCap,
+      swarmDefaultMaxTotalTurns: 2_400,
+    });
+    const histogram = NodePerfHooks.monitorEventLoopDelay({ resolution: 10 });
+    histogram.enable();
+    const cpuBefore = process.cpuUsage();
+    let rssPeak = process.memoryUsage().rss;
+    const { threadId, anchor } = yield* seedArchitect(input.name);
+    const createInput = {
+      wakePolicy: "batch" as const,
+      sharedContext: "Common checklist for every area. ".repeat(60),
+      map: {
+        task: "Audit {{key}} against the shared checklist and report findings.",
+        title: "Audit {{key}}",
+        interactionMode: "plan" as const,
+        rows: Array.from({ length: input.members }, (_, index) => ({ key: `area-${index}` })),
+      },
+    };
+    // oxlint-disable-next-line t3code/no-wall-clock-in-tests -- measurement only, behind T3_SWARM_LOAD; nothing asserts on it
+    const startedAt = performance.now();
+    const created = yield* createSwarm(threadId, createInput);
+    // oxlint-disable-next-line t3code/no-wall-clock-in-tests -- measurement only, behind T3_SWARM_LOAD; nothing asserts on it
+    const launchMs = performance.now() - startedAt;
+    yield* endRun({ threadId, runId: anchor.id });
+    let peak = 0;
+    const tickMs: Array<number> = [];
+    const listMs: Array<number> = [];
+    const summariesMs: Array<number> = [];
+    let admitted = 0;
+    for (let round = 0; round < 400; round += 1) {
+      const list = yield* rows(created.swarmId);
+      const running = list.filter((row) => row.status === "launching" || row.status === "running");
+      peak = Math.max(peak, running.length);
+      if (list.every((row) => row.status !== "queued" && running.length === 0)) break;
+      for (const row of running) {
+        yield* finishRow(threadId, row, resultText({ summary: LOAD_RESULT_SUMMARY }));
+      }
+      const queuedBefore = list.filter((row) => row.status === "queued").length;
+      // oxlint-disable-next-line t3code/no-wall-clock-in-tests -- measurement only, behind T3_SWARM_LOAD; nothing asserts on it
+      const tickStart = performance.now();
+      yield* swarms.tick;
+      // oxlint-disable-next-line t3code/no-wall-clock-in-tests -- measurement only, behind T3_SWARM_LOAD; nothing asserts on it
+      tickMs.push(performance.now() - tickStart);
+      const queuedAfter = (yield* rows(created.swarmId)).filter(
+        (row) => row.status === "queued",
+      ).length;
+      admitted += Math.max(0, queuedBefore - queuedAfter);
+      if (input.withPanel) {
+        // oxlint-disable-next-line t3code/no-wall-clock-in-tests -- measurement only, behind T3_SWARM_LOAD; nothing asserts on it
+        const listStart = performance.now();
+        yield* swarms.listForThread(threadId);
+        // oxlint-disable-next-line t3code/no-wall-clock-in-tests -- measurement only, behind T3_SWARM_LOAD; nothing asserts on it
+        listMs.push(performance.now() - listStart);
+        // oxlint-disable-next-line t3code/no-wall-clock-in-tests -- measurement only, behind T3_SWARM_LOAD; nothing asserts on it
+        const summariesStart = performance.now();
+        yield* swarms.summaries;
+        // oxlint-disable-next-line t3code/no-wall-clock-in-tests -- measurement only, behind T3_SWARM_LOAD; nothing asserts on it
+        summariesMs.push(performance.now() - summariesStart);
+      }
+      yield* drainWakes(threadId, anchor.id);
+      rssPeak = Math.max(rssPeak, process.memoryUsage().rss);
+    }
+    for (let round = 0; round < 4; round += 1) {
+      yield* swarms.tick;
+      yield* drainWakes(threadId, anchor.id);
+    }
+    // oxlint-disable-next-line t3code/no-wall-clock-in-tests -- measurement only, behind T3_SWARM_LOAD; nothing asserts on it
+    const wallMs = performance.now() - startedAt;
+    const cpu = process.cpuUsage(cpuBefore);
+    histogram.disable();
+    const final = yield* rows(created.swarmId);
+    const parent = yield* orchestrator.getThreadProjection(threadId);
+    // Architect context: the wake messages this swarm produced, against what v1 wakes (the full
+    // result per member) would have carried.
+    const wakeBytes = parent.messages
+      .filter((message) => message.delegatedCompletion !== undefined)
+      .reduce((total, message) => total + Buffer.byteLength(message.text), 0);
+    const tasks = parent.subagents.filter((task) => final.some((row) => row.taskId === task.id));
+    const v1WakeBytes = tasks.reduce((total, task) => {
+      const { completionDetail: _detail, ...plain } = task;
+      return total + delegatedCompletionWakeEntryBytes(task.id, plain);
+    }, 0);
+    // The architect's call: the map, against v1 create_swarm with every task written out.
+    const createBytes = Buffer.byteLength(JSON.stringify(createInput));
+    const v1CreateBytes = Buffer.byteLength(
+      JSON.stringify({
+        title: "Swarm",
+        members: createInput.map.rows.map((row) => ({
+          title: `Audit ${row.key}`,
+          task: `Audit ${row.key} against the shared checklist and report findings.\n\n${createInput.sharedContext}`,
+        })),
+      }),
+    );
+    // A member's prompt: its task plus the swarm_member and swarm_shared turn-context entries.
+    const member = final[0]!;
+    const child = yield* orchestrator.getThreadProjection(member.childThreadId!);
+    const taskBytes = Buffer.byteLength(
+      child.messages.find((message) => message.role === "user")?.text ?? "",
+    );
+    const memberEntry = yield* makeSwarmMemberContributor(store).build({
+      threadId: member.childThreadId!,
+    });
+    const sharedEntry = yield* makeSwarmSharedContributor(store).build({
+      threadId: member.childThreadId!,
+    });
+    const memberPromptBytes =
+      taskBytes +
+      Buffer.byteLength(memberEntry?.text ?? "") +
+      Buffer.byteLength(sharedEntry?.text ?? "");
+    const sorted = (values: ReadonlyArray<number>) => [...values].toSorted((a, b) => a - b);
+    const percentile = (values: ReadonlyArray<number>, p: number) =>
+      values.length === 0
+        ? null
+        : sorted(values)[Math.min(values.length - 1, Math.floor(values.length * p))]!;
+    const round1 = (value: number | null) => (value === null ? null : Math.round(value * 10) / 10);
+    const result = {
+      name: input.name,
+      members: input.members,
+      globalCap: input.globalCap,
+      perInstanceCap: input.perInstanceCap,
+      launchMs: round1(launchMs),
+      wallMs: round1(wallMs),
+      peakConcurrency: peak,
+      ticks: tickMs.length,
+      tickMsP50: round1(percentile(tickMs, 0.5)),
+      tickMsP95: round1(percentile(tickMs, 0.95)),
+      dispatchMsPerAdmission: round1(
+        admitted === 0 ? null : tickMs.reduce((total, value) => total + value, 0) / admitted,
+      ),
+      cpuMs: Math.round((cpu.user + cpu.system) / 1000),
+      rssPeakMb: Math.round(rssPeak / 1_048_576),
+      eventLoopLagMsP50: round1(histogram.percentile(50) / 1e6),
+      eventLoopLagMsP99: round1(histogram.percentile(99) / 1e6),
+      eventLoopLagMsMax: round1(histogram.max / 1e6),
+      failed: final.filter((row) => row.status === "failed").length,
+      final: final.filter((row) => row.status === "claimed_done").length,
+      wakeMessages: parent.messages.filter((message) => message.delegatedCompletion !== undefined)
+        .length,
+      architectWakeBytes: wakeBytes,
+      architectWakeBytesPerMember: Math.round(wakeBytes / input.members),
+      v1WakeBytesPerMember: Math.round(v1WakeBytes / input.members),
+      createCallBytes: createBytes,
+      v1CreateCallBytes: v1CreateBytes,
+      memberPromptBytes,
+      ...(input.withPanel
+        ? {
+            listForThreadMsP50: round1(percentile(listMs, 0.5)),
+            listForThreadMsMax: round1(percentile(listMs, 1)),
+            summariesMsP50: round1(percentile(summariesMs, 0.5)),
+          }
+        : {}),
+    };
+    yield* Effect.sync(() =>
+      NodeFS.appendFileSync(process.env.T3_SWARM_LOAD_OUT!, `${JSON.stringify(result)}\n`),
+    );
+    yield* retire(created.swarmId);
+  });
+
+it.layer(layerSwarm)("load and cap sweep (SW-A11)", (it) => {
+  it.effect.skipIf(process.env.T3_SWARM_LOAD !== "1")(
+    "measures waves of 12, 24, and 36, a cap sweep at 36, and 48 with the panel open",
+    () =>
+      Effect.gen(function* () {
+        for (const members of [12, 24, 36]) {
+          yield* loadRun({
+            name: `wave-${members}`,
+            members,
+            globalCap: 8,
+            perInstanceCap: 4,
+            withPanel: false,
+          });
+        }
+        for (const globalCap of [8, 12, 16, 24]) {
+          yield* loadRun({
+            name: `sweep-global-${globalCap}`,
+            members: 36,
+            globalCap,
+            perInstanceCap: globalCap,
+            withPanel: false,
+          });
+        }
+        for (const perInstanceCap of [4, 6, 8]) {
+          yield* loadRun({
+            name: `sweep-instance-${perInstanceCap}`,
+            members: 36,
+            globalCap: 24,
+            perInstanceCap,
+            withPanel: false,
+          });
+        }
+        for (const members of [36, 48]) {
+          yield* loadRun({
+            name: `panel-${members}`,
+            members,
+            globalCap: 8,
+            perInstanceCap: 4,
+            withPanel: true,
+          });
+        }
+      }),
   );
 });
