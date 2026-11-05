@@ -5517,3 +5517,86 @@ it.layer(layerSwarm)("instance counters and automatic retry rules (SW-A8)", (it)
     }),
   );
 });
+
+// SW-A10: the panel and sidebar reads, and the panel's actions.
+
+it.layer(layerSwarm)("panel and sidebar (SW-A10)", (it) => {
+  it.effect("lists a thread's swarms with member, instance, and notice state", () =>
+    Effect.gen(function* () {
+      const swarms = yield* SwarmService.SwarmService;
+      const { threadId, anchor } = yield* seedArchitect("a10-list");
+      const result = yield* createSwarm(threadId, {
+        maxTotalTurns: 100,
+        members: members(3, { interactionMode: "plan" }),
+      });
+      yield* endRun({ threadId, runId: anchor.id });
+      yield* finishRow(threadId, (yield* rows(result.swarmId))[0]!, resultText({ summary: "s0" }));
+      yield* swarms.tick;
+      const { swarms: views } = yield* swarms.listForThread(threadId);
+      assert.equal(views.length, 1);
+      const view = views[0]!;
+      assert.equal(view.maxTotalTurns, 100);
+      assert.isAtLeast(view.turnsUsed, 2);
+      assert.deepEqual(
+        view.members.map((member) => [member.key, member.status]),
+        [
+          ["m0", "claimed_done"],
+          ["m1", "launching"],
+          ["m2", "launching"],
+        ],
+      );
+      assert.equal(view.members[0]!.summary, "s0");
+      assert.isFalse(view.members[0]!.autoRetried);
+      assert.deepEqual(
+        view.instances.map((instance) => [instance.id, instance.active, instance.cap]),
+        [[modelSelection.instanceId, 2, 4]],
+      );
+      // Another thread sees none of it.
+      const { threadId: other } = yield* seedArchitect("a10-list-other");
+      assert.deepEqual((yield* swarms.listForThread(other)).swarms, []);
+      // The chip's counts.
+      const summary = (yield* swarms.summaries).summaries.find((row) => row.threadId === threadId);
+      assert.deepEqual(summary, { threadId, running: 2, queued: 0, failed: 0 });
+      yield* retire(result.swarmId);
+    }),
+  );
+
+  it.effect("acts only on its own thread's swarm: stop, stop all, and retry", () =>
+    Effect.gen(function* () {
+      const swarms = yield* SwarmService.SwarmService;
+      const { threadId, anchor } = yield* seedArchitect("a10-act");
+      const { threadId: other } = yield* seedArchitect("a10-act-other");
+      const result = yield* createSwarm(threadId, {
+        members: members(3, { interactionMode: "plan" }),
+      });
+      yield* endRun({ threadId, runId: anchor.id });
+      const refused = yield* swarms
+        .act({ threadId: other, swarmId: result.swarmId, action: "stop_all" })
+        .pipe(Effect.flip);
+      assert.equal(refused.code, "capability_denied");
+      const stopped = yield* swarms.act({
+        threadId,
+        swarmId: result.swarmId,
+        action: "stop",
+        keys: ["m1"],
+      });
+      assert.deepEqual(stopped.done, ["m1"]);
+      assert.equal((yield* rows(result.swarmId))[1]!.status, "cancelled");
+      yield* finishRow(threadId, (yield* rows(result.swarmId))[0]!, "m0 failed", "failed");
+      yield* swarms.tick;
+      const retried = yield* swarms.act({
+        threadId,
+        swarmId: result.swarmId,
+        action: "retry",
+        keys: ["m0"],
+      });
+      assert.deepEqual(retried.done, ["m0"]);
+      assert.equal((yield* rows(result.swarmId))[0]!.attempt, 2);
+      const all = yield* swarms.act({ threadId, swarmId: result.swarmId, action: "stop_all" });
+      assert.includeMembers([...all.done], ["m0", "m2"]);
+      const store = yield* SwarmStore.SwarmStore;
+      assert.equal(Option.getOrThrow(yield* store.getSwarm(result.swarmId)).status, "cancelled");
+      yield* retire(result.swarmId);
+    }),
+  );
+});

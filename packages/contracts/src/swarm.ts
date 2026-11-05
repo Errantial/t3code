@@ -457,3 +457,101 @@ export const SwarmFollowupResult = Schema.Struct({
   status: SwarmMemberStatus,
 });
 export type SwarmFollowupResult = typeof SwarmFollowupResult.Type;
+
+// Swarm v2 panel and sidebar RPCs (SW-A10). Read by the architect thread's panel and the
+// sidebar chip; every field is server state, and summaries are the members' own envelopes.
+
+export class SwarmRpcError extends Schema.TaggedError<SwarmRpcError>()("SwarmRpcError", {
+  reason: Schema.Literals(["disabled", "not_found", "invalid_request", "unavailable"]),
+  message: Schema.String,
+}) {}
+
+export const SwarmMemberView = Schema.Struct({
+  key: SwarmMemberKey,
+  title: Schema.String,
+  status: SwarmMemberStatus,
+  queueReason: Schema.NullOr(Schema.String),
+  providerInstanceId: Schema.NullOr(ProviderInstanceId),
+  model: Schema.String,
+  effort: Schema.optional(Schema.String),
+  runtimeMode: RuntimeMode,
+  interactionMode: ProviderInteractionMode,
+  childThreadId: Schema.NullOr(ThreadId),
+  attempt: NonNegativeInt,
+  followups: NonNegativeInt,
+  autoRetried: Schema.Boolean,
+  failureClass: Schema.NullOr(SwarmFailureClass),
+  waitingForApproval: Schema.Boolean,
+  stopGivenUp: Schema.Boolean,
+  hasVerify: Schema.Boolean,
+  verify: Schema.optional(
+    Schema.Struct({
+      passed: Schema.Boolean,
+      attempts: NonNegativeInt,
+      timedOut: Schema.Boolean,
+      notStarted: Schema.optional(Schema.Boolean),
+    }),
+  ),
+  verifySkipped: Schema.optional(Schema.String),
+  summary: Schema.optional(Schema.String),
+  startedAt: Schema.NullOr(Schema.String),
+  endedAt: Schema.NullOr(Schema.String),
+  turnsUsed: NonNegativeInt,
+});
+export type SwarmMemberView = typeof SwarmMemberView.Type;
+
+export const SwarmThreadView = Schema.Struct({
+  swarmId: SwarmId,
+  title: Schema.String,
+  status: SwarmStatus,
+  wakePolicy: SwarmWakePolicy,
+  budgetExhausted: Schema.Boolean,
+  turnsUsed: NonNegativeInt,
+  maxTotalTurns: Schema.NullOr(Schema.Int),
+  createdAt: Schema.String,
+  members: Schema.Array(SwarmMemberView),
+  instances: Schema.Array(SwarmInstanceState),
+  /** The swarm's notices for the architect, newest last. */
+  notices: Schema.Array(
+    Schema.Struct({
+      kind: Schema.String,
+      text: Schema.String,
+      createdAt: Schema.String,
+      delivered: Schema.Boolean,
+    }),
+  ),
+});
+export type SwarmThreadView = typeof SwarmThreadView.Type;
+
+export const SwarmListForThreadInput = Schema.Struct({ threadId: ThreadId });
+export type SwarmListForThreadInput = typeof SwarmListForThreadInput.Type;
+
+export const SwarmListForThreadResult = Schema.Struct({
+  swarms: Schema.Array(SwarmThreadView),
+});
+export type SwarmListForThreadResult = typeof SwarmListForThreadResult.Type;
+
+export const SwarmActInput = Schema.Struct({
+  threadId: ThreadId, // the swarm's architect thread; a swarm of another thread is refused
+  swarmId: SwarmId,
+  action: Schema.Literals(["stop", "retry", "stop_all"]),
+  keys: Schema.optional(SwarmMemberKeys),
+});
+export type SwarmActInput = typeof SwarmActInput.Type;
+
+export const SwarmActResult = Schema.Struct({
+  done: Schema.Array(SwarmMemberKey),
+  notDone: Schema.Array(Schema.Struct({ key: SwarmMemberKey, message: Schema.String })),
+});
+export type SwarmActResult = typeof SwarmActResult.Type;
+
+export const SwarmSummary = Schema.Struct({
+  threadId: ThreadId,
+  running: NonNegativeInt,
+  queued: NonNegativeInt,
+  failed: NonNegativeInt,
+});
+export type SwarmSummary = typeof SwarmSummary.Type;
+
+export const SwarmSummariesResult = Schema.Struct({ summaries: Schema.Array(SwarmSummary) });
+export type SwarmSummariesResult = typeof SwarmSummariesResult.Type;

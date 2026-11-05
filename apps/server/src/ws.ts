@@ -181,6 +181,8 @@ import * as ProviderAuthService from "./provider/ProviderAuthService.ts";
 import { makeProviderInstallation } from "./provider/providerInstallation.ts";
 import * as ServerSelfUpdate from "./cloud/selfUpdate.ts";
 import * as FleetUpdates from "./fleetUpdate/FleetUpdates.ts";
+import * as SwarmService from "./swarm/SwarmService.ts";
+import { makeSwarmRpc } from "./swarm/swarmRpc.ts";
 import * as ServerLifecycleEvents from "./serverLifecycleEvents.ts";
 import * as ServerRuntimeStartup from "./serverRuntimeStartup.ts";
 import * as ServerSettings from "./serverSettings.ts";
@@ -1347,6 +1349,10 @@ export const layerWsRpc = (
       const storageCleanup = yield* StorageCleanup.StorageCleanup;
       const databaseStorage = yield* DatabaseStorage.DatabaseStorage;
       const serverSettings = yield* ServerSettings.ServerSettingsService;
+      // Swarm v2 panel and chip RPCs: refused while the Labs setting is off; a swarm is reached
+      // only through its own architect thread (SwarmService.act checks it).
+      const swarmService = yield* Effect.serviceOption(SwarmService.SwarmService);
+      const swarmRpc = makeSwarmRpc(serverSettings, swarmService);
       const peerLinks = yield* PeerLinks.PeerLinks;
       const peerLinkRequests = yield* PeerLinkRequests.PeerLinkRequests;
       const startup = yield* ServerRuntimeStartup.ServerRuntimeStartup;
@@ -2492,6 +2498,10 @@ export const layerWsRpc = (
           FleetUpdates.makeService().pipe(Effect.flatMap((fleet) => fleet.status(input))),
         [WS_METHODS.fleetUpdate]: (input) =>
           FleetUpdates.makeService().pipe(Effect.flatMap((fleet) => fleet.update(input))),
+        [WS_METHODS.swarmListForThread]: (input) =>
+          swarmRpc((swarms) => swarms.listForThread(input.threadId)),
+        [WS_METHODS.swarmAct]: (input) => swarmRpc((swarms) => swarms.act(input)),
+        [WS_METHODS.swarmSummaries]: () => swarmRpc((swarms) => swarms.summaries),
         [WS_METHODS.serverUpsertKeybinding]:
           /* Request instrumentation already owns the span; keep this helper in that context. */
           Effect.fnUntraced(function* (rule) {

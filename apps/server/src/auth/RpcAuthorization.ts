@@ -82,6 +82,10 @@ export const RPC_REQUIRED_SCOPES = {
   [WS_METHODS.serverCommitDesktopUpdate]: AuthEnvironmentMaintainScope,
   [WS_METHODS.fleetStatus]: AuthOrchestrationReadScope,
   [WS_METHODS.fleetUpdate]: AuthEnvironmentMaintainScope,
+  // Swarm v2 panel and chip: reading a thread's swarms, and stopping or retrying its members.
+  [WS_METHODS.swarmListForThread]: AuthOrchestrationReadScope,
+  [WS_METHODS.swarmAct]: AuthOrchestrationOperateScope,
+  [WS_METHODS.swarmSummaries]: AuthOrchestrationReadScope,
   [WS_METHODS.serverUpsertKeybinding]: AuthSettingsWriteScope,
   [WS_METHODS.serverRemoveKeybinding]: AuthSettingsWriteScope,
   [WS_METHODS.serverGetStorageCleanupReport]: AuthOrchestrationReadScope,
