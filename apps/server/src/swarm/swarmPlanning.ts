@@ -30,6 +30,8 @@ export interface SwarmMemberSpec {
   readonly role?: string;
   readonly doneCriteria?: string;
   readonly verifyArgv?: ReadonlyArray<string>;
+  /** swarm_add_members: the request key of the call that added this member, for replays. */
+  readonly addRequestKey?: string;
   readonly isolation: "shared" | "worktree";
   readonly ownsPaths?: ReadonlyArray<string>;
   readonly allowNestedSwarm?: boolean;

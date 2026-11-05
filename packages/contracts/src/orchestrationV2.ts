@@ -3330,6 +3330,8 @@ export const OrchestrationV2Command = Schema.Union([
     taskId: NodeId,
     completionWake: OrchestrationV2DelegatedCompletionWake,
     completionDetail: Schema.optional(OrchestrationV2DelegatedCompletionDetail),
+    /** Server-only: the swarm scheduler releasing a held member. Client commands lose it. */
+    swarmRelease: Schema.optional(Schema.Literal(true)),
   }),
   Schema.Struct({
     type: Schema.Literal("delegated_task.completion-delivery.acknowledge"),

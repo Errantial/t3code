@@ -83,15 +83,19 @@ export class ThreadManagementClientCommandError extends Schema.TaggedError<Threa
 export const withCreationProvenance = (
   command: OrchestrationV2Command,
   provenance: ThreadManagementProvenance,
-): Effect.Effect<OrchestrationV2Command, ThreadManagementClientCommandError> =>
-  command.type === "delegated_task.request" && command.completionWake === "held"
-    ? Effect.fail(
-        new ThreadManagementClientCommandError({
-          commandType: command.type,
-          field: 'completionWake "held"',
-        }),
-      )
-    : Effect.succeed(stampCreationProvenance(command, provenance));
+): Effect.Effect<OrchestrationV2Command, ThreadManagementClientCommandError> => {
+  const reserved =
+    command.type === "delegated_task.request" && command.completionWake === "held"
+      ? 'completionWake "held"'
+      : command.type === "delegated_task.wake-policy" && command.completionDetail !== undefined
+        ? "completionDetail"
+        : undefined;
+  return reserved === undefined
+    ? Effect.succeed(stampCreationProvenance(command, provenance))
+    : Effect.fail(
+        new ThreadManagementClientCommandError({ commandType: command.type, field: reserved }),
+      );
+};
 
 function stampCreationProvenance(
   command: OrchestrationV2Command,
@@ -107,6 +111,11 @@ function stampCreationProvenance(
       // Only the server's swarm scheduler admits against an ended anchor run.
       const { swarmAdmission: _swarmAdmission, ...rest } = command;
       return { ...rest, ...provenance };
+    }
+    case "delegated_task.wake-policy": {
+      // Only the swarm scheduler releases a held member.
+      const { swarmRelease: _swarmRelease, ...rest } = command;
+      return rest;
     }
     case "message.dispatch":
     case "thread.fork":

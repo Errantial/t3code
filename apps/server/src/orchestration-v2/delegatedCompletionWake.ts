@@ -14,7 +14,8 @@ const wakeLabel = (taskId: string, task: WakeTask | undefined): string => {
       ? null
       : task.completionDetail === undefined
         ? task.title
-        : task.title.slice(0, RELEASED_TITLE_MAX_CHARACTERS);
+        : // By code points, so a cut never splits a surrogate pair.
+          Array.from(task.title).slice(0, RELEASED_TITLE_MAX_CHARACTERS).join("");
   return `Delegated task ${taskId}${title === null ? "" : ` (${title})`}${task === undefined ? " reached a terminal state" : ` [${task.status}]`}`;
 };
 

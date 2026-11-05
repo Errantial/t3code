@@ -3,6 +3,7 @@ import * as NodeCrypto from "node:crypto";
 
 import {
   CommandId,
+  MessageId,
   OrchestratorMcpFailure,
   type OrchestrationV2Command,
   type OrchestrationV2Run,
@@ -128,6 +129,12 @@ export class SwarmService extends Context.Service<
       readonly input: SwarmAddMembersInput;
       readonly resolver: SwarmTargetResolver;
     }) => Effect.Effect<SwarmCreateResult, OrchestratorMcpFailure>;
+    /** SW-A7 hands a released member's follow-up result to the note outbox. */
+    readonly queueFollowupResult: (input: {
+      readonly swarmId: SwarmId;
+      readonly memberKey: string;
+      readonly followup: number;
+    }) => Effect.Effect<void, OrchestratorMcpFailure>;
     /** One scheduler pass: reconcile launched members, then admit what the caps allow. */
     readonly tick: Effect.Effect<void>;
     /** Asks the scheduler for a pass soon. */
@@ -221,10 +228,56 @@ const decodeWakeBatch = (json: string | null) =>
 const encodeWakeBatch = Schema.encodeSync(WakeBatchJson);
 const decodeEnvelope = (json: string) => decodeSpecJson(json) as SwarmEnvelope;
 
+type SwarmNoteKind =
+  | "cancelled"
+  | "detached"
+  | "budget"
+  | "instance_paused"
+  | "approvals"
+  | "delivery_stalled";
+
+const NOTE_WINDOW_MS = 30_000;
+const FOLLOWUP_COALESCE_MS = 5_000;
+const DELIVERY_STALL_MS = 10 * 60_000;
+const MAX_RELEASE_ATTEMPTS = 5;
+const TERMINAL_TASK_STATUSES: ReadonlySet<string> = new Set([
+  "completed",
+  "failed",
+  "cancelled",
+  "interrupted",
+]);
+
+interface FollowupEntry {
+  readonly key: string;
+  readonly followup: number;
+}
+const FollowupEntriesJson = Schema.fromJsonString(
+  Schema.Array(Schema.Struct({ key: Schema.String, followup: Schema.Number })),
+);
+const decodeFollowupEntriesJson = Schema.decodeOption(FollowupEntriesJson);
+const decodeFollowupEntries = (json: string): ReadonlyArray<FollowupEntry> =>
+  Option.getOrElse(decodeFollowupEntriesJson(json), () => []);
+const encodeFollowupEntries = Schema.encodeSync(FollowupEntriesJson);
+
+/** Rebuilt from the members' stored envelopes, so an outbox row holds no text of its own. */
+const followupNoteBody = (
+  swarmId: SwarmId,
+  members: ReadonlyArray<SwarmStore.SwarmMemberRecord>,
+  entries: ReadonlyArray<FollowupEntry>,
+): string =>
+  [
+    `Follow-up results from swarm ${swarmId}:`,
+    ...entries.flatMap((entry) => {
+      const member = members.find((row) => row.memberKey === entry.key);
+      return member?.envelopeJson == null
+        ? []
+        : [swarmDigest({ key: entry.key, envelope: decodeEnvelope(member.envelopeJson) })];
+    }),
+  ].join("\n\n");
+
 /** The same for member fields, checked after a `map` expands. */
 const unsupportedMemberFields = (members: ReadonlyArray<SwarmMemberInput>): string | undefined => {
   for (const member of members) {
-    if (member.doneCriteria !== undefined) return "`doneCriteria`";
     if (member.maxTurns !== undefined) return "`maxTurns`";
     if (member.maxWallClockMs !== undefined) return "`maxWallClockMs`";
   }
@@ -246,6 +299,12 @@ const make = Effect.gen(function* () {
   const gitDriver = yield* Effect.serviceOption(GitVcsDriver.GitVcsDriver);
   // Admission passes run one at a time, so a create and a tick never admit the same row twice.
   const passLock = yield* Semaphore.make(1);
+  // Architect notes (SW-A5): routine notes at most once per swarm every 30 s; notes already
+  // sent this process are skipped (a replay after a restart hits the command receipt instead).
+  const lastNoteAt = new Map<string, number>();
+  const sentNotes = new Set<string>();
+  const stalledSince = new Map<string, number>();
+  const releaseAttempts = new Map<string, number>();
   const wakes = yield* Queue.sliding<void>(1);
 
   const nowIso = DateTime.now.pipe(Effect.map(DateTime.formatIso));
@@ -545,6 +604,32 @@ const make = Effect.gen(function* () {
     const run = child.runs.find((candidate) => candidate.id === member.childRunId);
     if (run === undefined) return;
     const updatedAt = yield* nowIso;
+    // A detached member runs unmanaged; it only gets its envelope, for swarm_collect.
+    if (member.status === "detached") {
+      const status: FinalMemberStatus | undefined =
+        run.status === "completed"
+          ? "claimed_done"
+          : run.status === "failed"
+            ? "failed"
+            : run.status === "cancelled" || run.status === "interrupted"
+              ? "cancelled"
+              : undefined;
+      if (status === undefined) return;
+      const envelope = yield* buildEnvelope({
+        swarm,
+        member,
+        child,
+        run,
+        status,
+        testPathGlobs: settings.swarmTestPathGlobs,
+      });
+      yield* store.updateMember({
+        swarmId: swarm.swarmId,
+        memberKey: member.memberKey,
+        patch: { envelopeJson: encodeSpecJson(envelope), endedAt: updatedAt, updatedAt },
+      });
+      return;
+    }
     if (run.status === "running" && member.status === "launching") {
       yield* store.updateMember({
         swarmId: swarm.swarmId,
@@ -646,20 +731,36 @@ const make = Effect.gen(function* () {
       (deliveryRun === undefined || deliveryRun.status === "queued") &&
       delivery.taskIds.some((taskId) => releasedTaskIds.has(taskId))
     ) {
+      // A delivery that never got a run (no provider thread to wake) stalls; say so once.
+      if (deliveryRun === undefined) {
+        const since = stalledSince.get(delivery.messageId) ?? Date.parse(now);
+        stalledSince.set(delivery.messageId, since);
+        if (Date.parse(now) - since >= DELIVERY_STALL_MS) {
+          yield* notifyArchitect(swarm, {
+            kind: "delivery_stalled",
+            key: String(delivery.messageId),
+            summary: "Swarm results are waiting to be delivered",
+            text: `Swarm ${swarm.swarmId}: a completion wake has had no run for 10 minutes. Released member results are in swarm_collect.`,
+            routine: false,
+          });
+        }
+      }
       return;
     }
     const tasks = new Map(parent.subagents.map((task) => [String(task.id), task]));
-    const committed = [
-      ...(delivery?.taskIds ?? []),
-      ...(deliveryRun !== undefined && deliveryRun.status !== "queued"
-        ? parent.subagents
+    // What the next wake already carries: the delivery's tasks while its run is missing or
+    // queued (a release joins them); once that run runs, the pending tasks the collector will
+    // gather into the following wake.
+    const committedTaskIds =
+      deliveryRun === undefined || deliveryRun.status === "queued"
+        ? (delivery?.taskIds ?? [])
+        : parent.subagents
             .filter(
               (task) =>
                 task.runId === swarm.anchorRunId && task.completionDelivery?.state === "pending",
             )
-            .map((task) => task.id)
-        : []),
-    ].reduce((bytes, taskId) => {
+            .map((task) => task.id);
+    const committed = committedTaskIds.reduce((bytes, taskId) => {
       const task = tasks.get(String(taskId));
       return task === undefined ? bytes : bytes + delegatedCompletionWakeEntryBytes(taskId, task);
     }, 0);
@@ -696,15 +797,28 @@ const make = Effect.gen(function* () {
           taskId: member.taskId!,
           completionWake: "always",
           completionDetail: digest,
+          swarmRelease: true,
         })
         .pipe(Effect.result);
       if (Result.isFailure(released)) {
+        const errorTag = storageOrDispatchTag(released.failure);
+        // A refusal is final (the task is no longer held, or this id was rejected before and
+        // replays as rejected); other errors retry, a few times.
+        const refused =
+          errorTag === "OrchestratorDispatchError" ||
+          errorTag === "OrchestratorCommandPreviouslyRejectedError";
+        const ref = memberRef(member);
+        const attempts = (releaseAttempts.get(ref) ?? 0) + 1;
+        releaseAttempts.set(ref, attempts);
+        const gaveUp = refused || attempts >= MAX_RELEASE_ATTEMPTS;
         yield* Effect.logWarning("swarm.release-failed", {
           swarmId: swarm.swarmId,
           memberKey: member.memberKey,
-          errorTag: storageOrDispatchTag(released.failure),
+          errorTag,
+          outcome: refused ? "refused" : gaveUp ? "retries_exhausted" : "will_retry",
         });
-        continue;
+        if (!gaveUp) continue;
+        releaseAttempts.delete(ref);
       }
       yield* store.updateMember({
         swarmId: swarm.swarmId,
@@ -724,12 +838,298 @@ const make = Effect.gen(function* () {
    * Cancelling the queued wake disposes the cohort and detaches it: launched members keep
    * running unmanaged. Archive or delete cancels (§4.6).
    */
+  /**
+   * A server-created message to the architect (§SW-A5): not a member completion, so it does not
+   * go through the cohort. Command ids derive from state, so a crash before the state change
+   * replays the same note instead of sending a second one. Never carries task text.
+   */
+  const notifyArchitect = Effect.fn("SwarmService.notifyArchitect")(function* (
+    swarm: SwarmStore.SwarmRecord,
+    note: {
+      readonly kind: SwarmNoteKind;
+      readonly key: string;
+      readonly summary: string;
+      readonly text: string;
+      readonly outcome?: "updated" | "cancelled";
+      /** Routine notes wait out the 30 s window; closing notes never do. */
+      readonly routine: boolean;
+    },
+  ) {
+    const id = `swarm-note:${swarm.swarmId}:${note.kind}:${note.key}`;
+    if (sentNotes.has(id)) return true;
+    const nowMillis = DateTime.toEpochMillis(yield* DateTime.now);
+    if (note.routine && nowMillis - (lastNoteAt.get(swarm.swarmId) ?? -Infinity) < NOTE_WINDOW_MS) {
+      return false;
+    }
+    const sent = yield* threads
+      .dispatch({
+        type: "message.dispatch",
+        commandId: CommandId.make(id),
+        threadId: swarm.parentThreadId,
+        messageId: MessageId.make(`message:${id}`),
+        text: note.text,
+        notification: {
+          source: { kind: "system" },
+          outcome: note.outcome ?? "updated",
+          summary: note.summary,
+        },
+        attachments: [],
+        dispatchMode: { type: "queue_after_active" },
+        createdBy: "agent",
+        creationSource: "server",
+      })
+      .pipe(Effect.result);
+    if (Result.isFailure(sent)) {
+      yield* Effect.logWarning("swarm.note-failed", {
+        swarmId: swarm.swarmId,
+        kind: note.kind,
+        errorTag: storageOrDispatchTag(sent.failure),
+      });
+      return false;
+    }
+    sentNotes.add(id);
+    lastNoteAt.set(swarm.swarmId, nowMillis);
+    yield* Effect.logInfo("swarm.note", { swarmId: swarm.swarmId, kind: note.kind });
+    return true;
+  });
+
+  /** Pauses, approvals waiting (D6), and an exhausted budget, for an open swarm. */
+  const routineNotes = Effect.fn("SwarmService.routineNotes")(function* (
+    swarm: SwarmStore.SwarmRecord,
+    members: ReadonlyArray<SwarmStore.SwarmMemberRecord>,
+  ) {
+    const now = yield* nowIso;
+    if (swarm.budgetExhausted) {
+      yield* notifyArchitect(swarm, {
+        kind: "budget",
+        key: "1",
+        summary: "Swarm stopped admitting members",
+        text: `Swarm ${swarm.swarmId} used its turn budget: no new members start and no member is retried. Running members finish; read results with swarm_collect.`,
+        routine: true,
+      });
+    }
+    const queuedInstances = new Set(
+      members.flatMap((member) => {
+        if (member.status !== "queued") return [];
+        const spec = parseSpec(member.specJson);
+        return spec.anyOf === undefined
+          ? [String(spec.modelSelection.instanceId)]
+          : spec.anyOf.map((option) => String(option.modelSelection.instanceId));
+      }),
+    );
+    for (const pause of yield* store.listInstancePauses) {
+      if (pause.until <= now || !queuedInstances.has(pause.providerInstanceId)) continue;
+      yield* notifyArchitect(swarm, {
+        kind: "instance_paused",
+        key: `${pause.providerInstanceId}:${pause.until}`,
+        summary: "Swarm admissions paused on a provider instance",
+        text: `Swarm ${swarm.swarmId}: admissions on provider instance ${pause.providerInstanceId} are paused until ${pause.until} (${pause.pauseClass}). Queued members there wait; members on other instances continue.`,
+        routine: true,
+      });
+    }
+    // D6: approvals go to the user; the architect only hears how many are waiting.
+    const waiting: Array<string> = [];
+    for (const member of members) {
+      if (member.childThreadId === null || isFinalMemberStatus(member.status)) continue;
+      const child = yield* threads
+        .getThreadRecords(member.childThreadId, ["runtimeRequests"])
+        .pipe(Effect.option);
+      if (Option.isNone(child)) continue;
+      const pending = child.value.runtimeRequests.find(
+        (request) => request.status === "pending" && request.kind !== "user_input",
+      );
+      if (pending !== undefined) waiting.push(String(pending.id));
+    }
+    if (waiting.length > 0) {
+      yield* notifyArchitect(swarm, {
+        kind: "approvals",
+        key: waiting.toSorted().join(","),
+        summary: "Swarm members are waiting on approval",
+        text: `Swarm ${swarm.swarmId}: ${waiting.length} member${waiting.length === 1 ? " is" : "s are"} waiting on the user's approval in ${waiting.length === 1 ? "its thread" : "their threads"}. You cannot approve them; the user does.`,
+        routine: true,
+      });
+    }
+  });
+
+  /**
+   * Follow-up results for already released members (SW-A7) go through the outbox: a row per
+   * note, coalesced over 5 s and bounded by the wake budget, re-sent unchanged after a restart.
+   */
+  const queueFollowupResult = Effect.fn("SwarmService.queueFollowupResult")(function* (input: {
+    readonly swarmId: SwarmId;
+    readonly memberKey: string;
+    readonly followup: number;
+  }) {
+    const now = yield* nowIso;
+    const members = yield* store.listMembers(input.swarmId);
+    const digestBytes = (entries: ReadonlyArray<FollowupEntry>) =>
+      utf8.encode(followupNoteBody(input.swarmId, members, entries)).length;
+    const open = (yield* store.listUnsentNotes).findLast(
+      (note) =>
+        note.swarmId === input.swarmId &&
+        Date.parse(now) - Date.parse(note.createdAt) < FOLLOWUP_COALESCE_MS,
+    );
+    const entry = { key: input.memberKey, followup: input.followup };
+    if (open !== undefined) {
+      const entries = [...decodeFollowupEntries(open.membersJson), entry];
+      if (digestBytes(entries) <= DELEGATED_RESULT_INLINE_BYTES) {
+        yield* store.updateNoteMembers({
+          swarmId: input.swarmId,
+          seq: open.seq,
+          membersJson: encodeFollowupEntries(entries),
+        });
+        return;
+      }
+    }
+    yield* store.enqueueNote({
+      swarmId: input.swarmId,
+      seq: yield* store.nextNoteSeq(input.swarmId),
+      kind: "followup_result",
+      membersJson: encodeFollowupEntries([entry]),
+      createdAt: now,
+    });
+  });
+
+  /** Sends outbox notes past their 5 s window; the same seq always rebuilds the same body. */
+  const sendFollowupNotes = Effect.fn("SwarmService.sendFollowupNotes")(function* () {
+    const now = Date.parse(yield* nowIso);
+    for (const note of yield* store.listUnsentNotes) {
+      if (now - Date.parse(note.createdAt) < FOLLOWUP_COALESCE_MS) continue;
+      const swarm = yield* store.getSwarm(note.swarmId);
+      if (Option.isNone(swarm)) continue;
+      const entries = decodeFollowupEntries(note.membersJson);
+      const members = yield* store.listMembers(note.swarmId);
+      const id = `swarm-note:${note.swarmId}:followup_result:${note.seq}`;
+      const sent = yield* threads
+        .dispatch({
+          type: "message.dispatch",
+          commandId: CommandId.make(id),
+          threadId: swarm.value.parentThreadId,
+          messageId: MessageId.make(`message:${id}`),
+          text: followupNoteBody(note.swarmId, members, entries),
+          notification: {
+            source: { kind: "system" },
+            outcome: "completed",
+            summary: "Swarm follow-up results",
+          },
+          attachments: [],
+          dispatchMode: { type: "queue_after_active" },
+          createdBy: "agent",
+          creationSource: "server",
+        })
+        .pipe(Effect.result);
+      if (Result.isFailure(sent)) {
+        yield* Effect.logWarning("swarm.note-failed", {
+          swarmId: note.swarmId,
+          kind: "followup_result",
+          errorTag: storageOrDispatchTag(sent.failure),
+        });
+        continue;
+      }
+      yield* store.markNoteSent({
+        swarmId: note.swarmId,
+        seq: note.seq,
+        memberKeys: entries.map((entry) => entry.key),
+      });
+      yield* Effect.logInfo("swarm.note", { swarmId: note.swarmId, kind: "followup_result" });
+    }
+  });
+
+  /**
+   * An earlier attempt's held task (SW-A7 retries) is disposed with settled_only, which never
+   * plans a wake, but only once it is terminal: earlier, it could still plan when it ends.
+   */
+  const disposeSuperseded = Effect.fn("SwarmService.disposeSuperseded")(function* (
+    swarm: SwarmStore.SwarmRecord,
+    members: ReadonlyArray<SwarmStore.SwarmMemberRecord>,
+  ) {
+    const superseded = members.filter((member) => member.supersededTaskId !== null);
+    if (superseded.length === 0) return;
+    const parent = yield* threads
+      .getThreadRecords(swarm.parentThreadId, ["subagents"])
+      .pipe(Effect.mapError(() => failure("orchestration_error", "Unable to read the architect.")));
+    for (const member of superseded) {
+      const task = parent.subagents.find((row) => row.id === member.supersededTaskId);
+      if (task !== undefined && !TERMINAL_TASK_STATUSES.has(task.status)) continue;
+      if (task !== undefined && task.completionWake === "held") {
+        yield* threads.dispatch({
+          type: "delegated_task.wake-policy",
+          commandId: CommandId.make(`swarm-dispose:${swarm.swarmId}:${task.id}`),
+          parentThreadId: swarm.parentThreadId,
+          taskId: task.id,
+          completionWake: "settled_only",
+          swarmRelease: true,
+        });
+      }
+      yield* store.updateMember({
+        swarmId: swarm.swarmId,
+        memberKey: member.memberKey,
+        patch: { supersededTaskId: null, updatedAt: yield* nowIso },
+      });
+    }
+  });
+
+  /**
+   * §4.3: a swarm is completed when every row is final and released (a row that never
+   * launched counts as released once final), no superseded task waits, and no follow-up note
+   * is unsent. swarm_add_members and swarm_followup reopen it.
+   */
+  const completeIfDone = Effect.fn("SwarmService.completeIfDone")(function* (
+    swarm: SwarmStore.SwarmRecord,
+  ) {
+    const members = yield* store.listMembers(swarm.swarmId);
+    const done =
+      members.length > 0 &&
+      members.every(
+        (member) =>
+          isFinalMemberStatus(member.status) &&
+          (member.released || member.status === "detached") &&
+          member.supersededTaskId === null &&
+          (member.followups === 0 || member.followupNotified),
+      ) &&
+      !(yield* store.listUnsentNotes).some((note) => note.swarmId === swarm.swarmId);
+    if (!done) return;
+    yield* store.updateSwarm(swarm.swarmId, { status: "completed", updatedAt: yield* nowIso });
+    yield* Effect.logInfo("swarm.completed", { swarmId: swarm.swarmId, members: members.length });
+  });
+
   const closeSwarm = Effect.fn("SwarmService.closeSwarm")(function* (
     swarm: SwarmStore.SwarmRecord,
     members: ReadonlyArray<SwarmStore.SwarmMemberRecord>,
     outcome: "stopped" | "detached" | "closed_thread",
   ) {
     const now = yield* nowIso;
+    const queued = members.filter(
+      (member) =>
+        member.status === "queued" ||
+        (member.status === "launching" && member.childThreadId === null),
+    ).length;
+    const running = members.filter(
+      (member) => member.childThreadId !== null && !isFinalMemberStatus(member.status),
+    ).length;
+    const undelivered = members.filter(
+      (member) => isFinalMemberStatus(member.status) && !member.released && member.taskId !== null,
+    ).length;
+    // Sent before the state changes: a crash in between replays this note, never loses it.
+    if (outcome === "stopped") {
+      yield* notifyArchitect(swarm, {
+        kind: "cancelled",
+        key: "1",
+        summary: "Swarm cancelled by Stop",
+        text: `Swarm ${swarm.swarmId} was cancelled by Stop: ${queued} queued member${queued === 1 ? "" : "s"} will not start, and running members were stopped. Results so far: swarm_collect.`,
+        outcome: "cancelled",
+        routine: false,
+      });
+    } else if (outcome === "detached") {
+      yield* notifyArchitect(swarm, {
+        kind: "detached",
+        key: "1",
+        summary: "Swarm detached",
+        text: `Swarm ${swarm.swarmId} was detached because its wake was cancelled: ${queued} queued member${queued === 1 ? "" : "s"} will not start, ${running} running member${running === 1 ? "" : "s"} continue unmanaged, and ${undelivered} result${undelivered === 1 ? " was" : "s were"} not delivered. Read them with swarm_collect.`,
+        outcome: "cancelled",
+        routine: false,
+      });
+    }
     let cancelled = 0;
     let detached = 0;
     for (const member of members) {
@@ -787,7 +1187,11 @@ const make = Effect.gen(function* () {
     passLock.withPermits(1)(
       Effect.gen(function* () {
         // Cancelled swarms still hold slots until their launched members end.
-        const swarms = yield* store.listSwarms({ statuses: ["active", "cancelled"] });
+        yield* sendFollowupNotes().pipe(logged("swarm.followup-note-error", {}));
+        // Cancelled and detached swarms are followed until their launched members end:
+        // cancelled ones still hold slots and release while their anchor is open, detached
+        // ones only collect envelopes.
+        const swarms = yield* store.listSwarms({ statuses: ["active", "cancelled", "detached"] });
         const membersBySwarm = new Map<string, ReadonlyArray<SwarmStore.SwarmMemberRecord>>();
         const architects = new Map<
           string,
@@ -797,17 +1201,22 @@ const make = Effect.gen(function* () {
         const watched = new Set<string>();
         for (const swarm of swarms) {
           let members = yield* store.listMembers(swarm.swarmId);
-          if (
-            swarm.status === "cancelled" &&
-            members.every((row) => isFinalMemberStatus(row.status))
-          ) {
-            continue;
-          }
+          const followed = (member: SwarmStore.SwarmMemberRecord) =>
+            !isFinalMemberStatus(member.status) ||
+            (member.status === "detached" && member.envelopeJson === null) ||
+            (swarm.status === "cancelled" &&
+              !member.released &&
+              member.taskId !== null &&
+              member.status !== "detached") ||
+            member.supersededTaskId !== null;
+          if (swarm.status !== "active" && !members.some(followed)) continue;
           // A launched member whose run ended is final before the swarm closes around it.
           for (const member of members) {
             if (
               member.childThreadId !== null &&
-              (member.status === "launching" || member.status === "running")
+              (member.status === "launching" ||
+                member.status === "running" ||
+                (member.status === "detached" && member.envelopeJson === null))
             ) {
               yield* reconcileMember(swarm, member, settings).pipe(
                 logged("swarm.reconcile-error", {
@@ -818,14 +1227,18 @@ const make = Effect.gen(function* () {
             }
           }
           members = yield* store.listMembers(swarm.swarmId);
+          if (swarm.status === "detached") continue;
           const architect = yield* loadRuns(swarm.parentThreadId).pipe(Effect.option);
           architects.set(swarm.swarmId, architect);
-          const state = swarm.status === "active" ? anchorStateOf(swarm, architect) : "unknown";
-          if (state === "stopped" || state === "detached" || state === "closed_thread") {
+          const state = anchorStateOf(swarm, architect);
+          if (
+            swarm.status === "active" &&
+            (state === "stopped" || state === "detached" || state === "closed_thread")
+          ) {
             yield* closeSwarm(swarm, members, state).pipe(
               logged("swarm.close-error", { swarmId: swarm.swarmId }),
             );
-          } else if (state === "open") {
+          } else if (swarm.status === "active" && state === "open") {
             for (const member of members) {
               if (
                 member.status === "launching" &&
@@ -842,11 +1255,24 @@ const make = Effect.gen(function* () {
             }
           }
           members = yield* store.listMembers(swarm.swarmId);
-          if (swarm.status === "active" && state === "open") {
+          // A swarm cancelled by swarm_cancel keeps releasing while its cohort is open; one
+          // cancelled by Stop has a stopped cohort and releases nothing (D12).
+          if (state === "open") {
             yield* releasePass(swarm, members).pipe(
               logged("swarm.release-error", { swarmId: swarm.swarmId }),
             );
+            yield* disposeSuperseded(swarm, yield* store.listMembers(swarm.swarmId)).pipe(
+              logged("swarm.dispose-error", { swarmId: swarm.swarmId }),
+            );
             members = yield* store.listMembers(swarm.swarmId);
+            if (swarm.status === "active") {
+              yield* routineNotes(swarm, members).pipe(
+                logged("swarm.note-error", { swarmId: swarm.swarmId }),
+              );
+              yield* completeIfDone(swarm).pipe(
+                logged("swarm.complete-error", { swarmId: swarm.swarmId }),
+              );
+            }
           }
           membersBySwarm.set(swarm.swarmId, members);
           admits.set(swarm.swarmId, swarm.status === "active" && state === "open");
@@ -1229,6 +1655,7 @@ const make = Effect.gen(function* () {
           ...(member.role === undefined ? {} : { role: member.role }),
         }),
         ...(member.role === undefined ? {} : { role: member.role }),
+        ...(member.doneCriteria === undefined ? {} : { doneCriteria: member.doneCriteria }),
         isolation: member.isolation ?? "shared",
         ...(member.ownsPaths === undefined ? {} : { ownsPaths: member.ownsPaths }),
         ...(member.allowNestedSwarm === undefined
@@ -1478,96 +1905,109 @@ const make = Effect.gen(function* () {
         );
       }
       const members = yield* rosterOf(input);
-      const existing = yield* store.listMembers(swarm.swarmId);
-      // A retried call adds nothing twice: every key it names already exists from the first.
-      if (
-        input.clientRequestId !== undefined &&
-        members.every((member) => existing.some((row) => row.memberKey === member.key))
-      ) {
-        return yield* swarmResult(scope, swarm, []);
-      }
+      const requestKey =
+        input.clientRequestId === undefined
+          ? undefined
+          : `${scope.requestNamespace}:swarm_add_members:${input.clientRequestId}`;
       const settings = yield* readSettings;
-      const architect = yield* loadRuns(caller.threadId);
-      // §4.3: adding reopens a completed swarm only while its anchor still admits members.
-      const anchor = architect.runs.find((run) => run.id === swarm.anchorRunId);
-      if (anchor?.delegatedCompletion?.disposition !== "open") {
-        return yield* failure(
-          "invalid_request",
-          `The anchor turn of swarm ${input.swarmId} no longer admits members.`,
-        );
-      }
-      const { specs, warnings } = yield* prepareRoster({
-        caller,
-        architect,
-        members,
-        existingKeys: new Set(existing.map((row) => row.memberKey)),
-        existingWriters: existing
-          .filter((row) => !isFinalMemberStatus(row.status))
-          .map((row) => {
-            const spec = parseSpec(row.specJson);
-            return {
-              key: row.memberKey,
-              isolation: spec.isolation,
-              writer: row.writer,
-              ownsPaths: spec.ownsPaths,
-            };
-          }),
-        verify: undefined,
-        allowSharedWriters: swarm.allowSharedWriters,
-        settings,
-        resolver,
-      });
-      const now = yield* nowIso;
-      let baseCommit = swarm.baseCommit;
-      const extra: Array<SwarmWarning> = [];
-      if (specs.some((spec) => spec.isolation === "worktree")) {
-        if (baseCommit === null) {
-          baseCommit = yield* resolver.resolveWorktreeBase(architect);
-        } else {
-          // Added members start from the swarm's base, which may be behind the architect now.
-          const behind = yield* resolver
-            .countCommitsSince(architect, baseCommit)
-            .pipe(Effect.orElseSucceed(() => 0));
-          if (behind > 0) {
-            extra.push({
-              kind: "base_behind_head",
-              message: `Added worktree members start from the swarm's base commit, ${behind} commit${behind === 1 ? "" : "s"} behind your checkout.`,
+      // Under the pass lock, so two concurrent calls cannot both pass the 48-member check.
+      const added = yield* passLock.withPermits(1)(
+        Effect.gen(function* () {
+          const existing = yield* store.listMembers(swarm.swarmId);
+          // A retried call returns what the first one added; its key is stored on those members.
+          if (
+            requestKey !== undefined &&
+            existing.some((row) => parseSpec(row.specJson).addRequestKey === requestKey)
+          ) {
+            return { replayed: true as const, warnings: [] as ReadonlyArray<SwarmWarning> };
+          }
+          const architect = yield* loadRuns(caller.threadId);
+          // §4.3: adding reopens a completed swarm only while its anchor still admits members.
+          const anchor = architect.runs.find((run) => run.id === swarm.anchorRunId);
+          if (anchor?.delegatedCompletion?.disposition !== "open") {
+            return yield* failure(
+              "invalid_request",
+              `The anchor turn of swarm ${input.swarmId} no longer admits members.`,
+            );
+          }
+          const { specs, warnings } = yield* prepareRoster({
+            caller,
+            architect,
+            members,
+            existingKeys: new Set(existing.map((row) => row.memberKey)),
+            existingWriters: existing
+              .filter((row) => !isFinalMemberStatus(row.status))
+              .map((row) => {
+                const spec = parseSpec(row.specJson);
+                return {
+                  key: row.memberKey,
+                  isolation: spec.isolation,
+                  writer: row.writer,
+                  ownsPaths: spec.ownsPaths,
+                };
+              }),
+            verify: undefined,
+            allowSharedWriters: swarm.allowSharedWriters,
+            settings,
+            resolver,
+          });
+          const now = yield* nowIso;
+          let baseCommit = swarm.baseCommit;
+          const extra: Array<SwarmWarning> = [];
+          if (specs.some((spec) => spec.isolation === "worktree")) {
+            if (baseCommit === null) {
+              baseCommit = yield* resolver.resolveWorktreeBase(architect);
+            } else {
+              // Added members start from the swarm's base, which may be behind the architect now.
+              const behind = yield* resolver
+                .countCommitsSince(architect, baseCommit)
+                .pipe(Effect.orElseSucceed(() => 0));
+              if (behind > 0) {
+                extra.push({
+                  kind: "base_behind_head",
+                  message: `Added worktree members start from the swarm's base commit, ${behind} commit${behind === 1 ? "" : "s"} behind your checkout.`,
+                });
+              }
+            }
+          }
+          yield* store.addMembers({
+            swarmId: swarm.swarmId,
+            members: memberRows(
+              requestKey === undefined
+                ? specs
+                : specs.map((spec) => ({ ...spec, addRequestKey: requestKey })),
+              existing.reduce((next, row) => Math.max(next, row.ordinal + 1), 0),
+              now,
+            ),
+            updatedAt: now,
+          });
+          if (swarm.status === "completed" || baseCommit !== swarm.baseCommit) {
+            yield* store.updateSwarm(swarm.swarmId, {
+              status: "active",
+              ...(baseCommit === swarm.baseCommit ? {} : { baseCommit }),
+              updatedAt: now,
             });
           }
-        }
-      }
-      yield* store.addMembers({
-        swarmId: swarm.swarmId,
-        members: memberRows(
-          specs,
-          existing.reduce((next, row) => Math.max(next, row.ordinal + 1), 0),
-          now,
-        ),
-        updatedAt: now,
-      });
-      if (swarm.status === "completed" || baseCommit !== swarm.baseCommit) {
-        yield* store.updateSwarm(swarm.swarmId, {
-          status: "active",
-          ...(baseCommit === swarm.baseCommit ? {} : { baseCommit }),
-          updatedAt: now,
-        });
-      }
-      yield* Effect.logInfo("swarm.members-added", {
-        swarmId: swarm.swarmId,
-        members: specs.length,
-      });
+          yield* Effect.logInfo("swarm.members-added", {
+            swarmId: swarm.swarmId,
+            members: specs.length,
+          });
+          return { replayed: false as const, warnings: [...warnings, ...extra] };
+        }),
+      );
+      if (added.replayed) return yield* swarmResult(scope, swarm, []);
       // Added members always go through the swarm-admission path against the anchor.
       yield* admitNow(swarm.swarmId, settings);
       const updated = yield* store.getSwarm(swarm.swarmId);
       return yield* swarmResult(
         scope,
         Option.getOrElse(updated, () => swarm),
-        [...warnings, ...extra],
+        added.warnings,
       );
     },
   );
 
-  return SwarmService.of({ create, addMembers, tick, wake, start });
+  return SwarmService.of({ create, addMembers, queueFollowupResult, tick, wake, start });
 });
 
 export const layer = Layer.effect(SwarmService, make);
