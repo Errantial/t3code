@@ -76,7 +76,13 @@ describe("swarm contracts", () => {
       [SwarmEnvelopeField, ["summary", "decisions", "assumptions", "verify", "artifacts", "data"]],
       [
         SwarmWarningKind,
-        ["owns_paths_overlap", "serial_instance", "base_behind_head", "no_retry_room"],
+        [
+          "owns_paths_overlap",
+          "serial_instance",
+          "base_behind_head",
+          "no_retry_room",
+          "limit_lowered",
+        ],
       ],
       [OrchestrationV2DelegatedCompletionWake, ["always", "settled_only", "held"]],
     ];

@@ -365,6 +365,7 @@ export const SwarmWarningKind = Schema.Literals([
   "serial_instance",
   "base_behind_head",
   "no_retry_room",
+  "limit_lowered", // a member's maxTurns or maxWallClockMs was above the server setting
 ]);
 export type SwarmWarningKind = typeof SwarmWarningKind.Type;
 
