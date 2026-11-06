@@ -146,6 +146,7 @@ export const swarmDigest = (input: {
               timedOut: envelope.verify.timedOut,
             },
           }),
+      ...(envelope.verifySkipped === undefined ? {} : { verifySkipped: envelope.verifySkipped }),
       changedPaths: envelope.artifacts.changedPaths.length,
       changedPathsTruncated: envelope.artifacts.changedPathsTruncated,
       testFilesChanged: envelope.testFilesChanged,

@@ -71,3 +71,22 @@ started, a member stays on its account.
 
 You are responsible for following each provider's terms when you spread work across accounts you
 hold with it.
+
+### Checking a member's work
+
+A member can carry a `verify` command, such as `["pnpm", "test"]`. When the member finishes, the
+server runs that command in the member's checkout. The command runs directly, with no shell; on
+Windows, run `.cmd` scripts through `["cmd", "/c", …]`.
+
+- If the command passes, the member is reported as verified.
+- If it fails, the member gets the command, its exit code, and the end of the output, and tries
+  again. A member gets 2 retries unless its `verify` sets `maxRetries` (0-3). After the last
+  failed check, the member is reported as failed.
+- The command stops after `timeoutMs` (10 minutes by default). It also stops if someone sends the
+  member a message while the check runs; the check then runs again once that turn ends.
+- Members that share one checkout are checked one at a time.
+
+Because the server runs the command without asking, `verify` needs the **Auto** or **Full access**
+runtime mode for both the agent that starts the swarm and the member. A swarm that asks for it in
+another mode is refused. If either thread's mode is lowered before the check runs, the check is
+skipped, and the member is reported as done but unchecked.

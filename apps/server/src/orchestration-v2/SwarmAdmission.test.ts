@@ -28,6 +28,7 @@ import {
   TurnItemId,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
+import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
@@ -49,6 +50,7 @@ import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as SwarmService from "../swarm/SwarmService.ts";
 import * as SwarmStore from "../swarm/SwarmStore.ts";
+import * as SwarmVerifier from "../swarm/SwarmVerifier.ts";
 import * as VcsDriverRegistry from "../vcs/VcsDriverRegistry.ts";
 import * as VcsProcess from "../vcs/VcsProcess.ts";
 import * as WorkspacePaths from "../workspace/WorkspacePaths.ts";
@@ -1408,6 +1410,50 @@ it.layer(layerTest)("swarm release and the shared wake budget (SW-A0 Q7)", (it) 
 // SW-A3: swarm_create, admission, and the scheduler on the real orchestrator. The scheduler is
 // driven by `tick`, and child completion by terminal run events.
 
+/** The fake verify runner (SW-A6): scripted outcomes; a `hold` waits until the test settles it. */
+const verifyCalls: Array<{ readonly argv: ReadonlyArray<string>; readonly cwd: string }> = [];
+const verifyScript: Array<
+  | SwarmVerifier.SwarmVerifyOutcome
+  | { readonly hold: Deferred.Deferred<SwarmVerifier.SwarmVerifyOutcome> }
+> = [];
+let verifyKills = 0;
+/** Each call completes the oldest waiter: a milestone for a check that starts later. */
+const verifyCallWaiters: Array<Deferred.Deferred<void>> = [];
+const verifyPass: SwarmVerifier.SwarmVerifyOutcome = {
+  passed: true,
+  exitCode: 0,
+  timedOut: false,
+  outputTail: "all tests passed",
+};
+const verifyFail: SwarmVerifier.SwarmVerifyOutcome = {
+  passed: false,
+  exitCode: 1,
+  timedOut: false,
+  outputTail: "FAIL src/a.test.ts",
+};
+const layerFakeVerifier = Layer.succeed(
+  SwarmVerifier.SwarmVerifier,
+  SwarmVerifier.SwarmVerifier.of({
+    checkoutOf: (thread) => Effect.succeed(thread.worktreePath ?? `checkout:${thread.projectId}`),
+    run: (input) =>
+      Effect.suspend(() => {
+        verifyCalls.push({ argv: input.argv, cwd: input.cwd });
+        const waiter = verifyCallWaiters.shift();
+        if (waiter !== undefined) Deferred.doneUnsafe(waiter, Effect.void);
+        const next = verifyScript.shift() ?? verifyPass;
+        return "hold" in next
+          ? Deferred.await(next.hold).pipe(
+              Effect.onInterrupt(() =>
+                Effect.sync(() => {
+                  verifyKills += 1;
+                }),
+              ),
+            )
+          : Effect.succeed(next);
+      }),
+  }),
+);
+
 const prepareRuns: Array<string> = [];
 /** What placement reads as provider health; tests change it. */
 let providerHealth: ReadonlyArray<ServerProvider> = [];
@@ -1426,6 +1472,7 @@ const layerSwarm = SwarmService.layer.pipe(
       getProviders: Effect.sync(() => providerHealth),
     } as unknown as ProviderRegistry.ProviderRegistry["Service"]),
   ),
+  Layer.provide(layerFakeVerifier),
   Layer.provideMerge(ServerSettings.layerTest({ swarmV2Enabled: true, swarmMaxConcurrent: 2 })),
   Layer.provideMerge(layerTest),
 );
@@ -1715,11 +1762,12 @@ it.layer(layerSwarm)("swarm_create, admission, and the scheduler (SW-A3)", (it) 
         ),
         "invalid_request",
       );
-      // Verify passes the create-time mode check, then waits for its runner (SW-A6).
-      assert.equal(
-        code(yield* createError(threadId, { members: members(1, { verify: { argv: ["x"] } }) })),
-        "capability_denied",
-      );
+      // Verify needs auto or full-access for the member too (SW-A6 create-time check).
+      const approval = yield* createError(threadId, {
+        members: members(1, { runtimeMode: "approval-required", verify: { argv: ["x"] } }),
+      });
+      assert.equal(approval.code, "invalid_request");
+      assert.include(approval.message, "Member 'm0' has verify");
       const shared = yield* createError(threadId, { members: members(2) });
       assert.equal(shared.code, "invalid_request");
       assert.include(shared.message, `isolation: "worktree"`);
@@ -3129,3 +3177,258 @@ it.layer(Layer.merge(layerTest, DelegatedTaskQuestionReactor.layer.pipe(Layer.pr
     );
   },
 );
+
+// SW-A6: verify on the real orchestrator, with a fake runner. A pass starts a check on its own
+// fiber; a scripted outcome is recorded at once, and the next pass applies it.
+
+const verifyMembers = (count: number, verify: SwarmMemberInput["verify"]) =>
+  members(count, { verify });
+
+/** The run a verify retry message started on the member's thread. */
+const retryRunOf = (swarmId: SwarmId, row: SwarmStore.SwarmMemberRecord, retry: number) =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const child = yield* orchestrator.getThreadProjection(row.childThreadId!);
+    const messageId = `message:swarm-verify:${swarmId}:${row.memberKey}:${retry}`;
+    const message = child.messages.find((candidate) => candidate.id === messageId);
+    const run = child.runs.find((candidate) => candidate.userMessageId === messageId);
+    return { message: message!, run: run! };
+  });
+
+/** Runs `passes` scheduler passes and returns the member's row. */
+const afterPasses = (swarmId: SwarmId, key: string, passes: number) =>
+  Effect.gen(function* () {
+    const swarms = yield* SwarmService.SwarmService;
+    for (let pass = 0; pass < passes; pass += 1) yield* swarms.tick;
+    return (yield* rows(swarmId)).find((row) => row.memberKey === key)!;
+  });
+
+const resetVerify = () => {
+  verifyCalls.length = 0;
+  verifyScript.length = 0;
+  verifyCallWaiters.length = 0;
+  verifyKills = 0;
+};
+
+it.layer(layerSwarm)("verify (SW-A6)", (it) => {
+  it.effect("verifies a member in its checkout, then releases it once with the check", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const swarms = yield* SwarmService.SwarmService;
+      resetVerify();
+      const { threadId, anchor } = yield* seedArchitect("a6-pass");
+      const result = yield* createSwarm(threadId, {
+        members: verifyMembers(1, { argv: ["pnpm", "test"] }),
+      });
+      yield* endRun({ threadId, runId: anchor.id });
+      yield* finishRow(threadId, (yield* rows(result.swarmId))[0]!, "m0 done");
+      const verifying = yield* afterPasses(result.swarmId, "m0", 1);
+      assert.equal(verifying.status, "verifying");
+      assert.deepEqual(verifyCalls, [{ argv: ["pnpm", "test"], cwd: "checkout:project:a6-pass" }]);
+      const verified = yield* afterPasses(result.swarmId, "m0", 1);
+      assert.equal(verified.status, "verified");
+      assert.include(verified.envelopeJson ?? "", `"passed":true`);
+      assert.include(verified.envelopeJson ?? "", `"attempts":1`);
+      yield* swarms.tick;
+      yield* drainWakes(threadId, anchor.id);
+      const task = (yield* orchestrator.getThreadProjection(threadId)).subagents.find(
+        (candidate) => candidate.id === verified.taskId,
+      );
+      assert.equal(task?.completionWake, "always");
+      assert.include(task?.completionDetail ?? "", `"verify":{"passed":true`);
+      assert.isTrue((yield* rows(result.swarmId))[0]!.released);
+      yield* retire(result.swarmId);
+    }),
+  );
+
+  it.effect("sends a failed check back to the member and verifies its bound retry run", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const swarms = yield* SwarmService.SwarmService;
+      resetVerify();
+      verifyScript.push(verifyFail, verifyPass);
+      const { threadId, anchor } = yield* seedArchitect("a6-retry");
+      const result = yield* createSwarm(threadId, {
+        members: verifyMembers(1, { argv: ["pnpm", "test"] }),
+      });
+      yield* endRun({ threadId, runId: anchor.id });
+      const launched = (yield* rows(result.swarmId))[0]!;
+      yield* finishRow(threadId, launched, "m0 done");
+      const running = yield* afterPasses(result.swarmId, "m0", 2);
+      assert.equal(running.status, "running");
+      assert.equal(running.verifyAttempts, 1);
+      assert.isFalse(running.released);
+      const retry = yield* retryRunOf(result.swarmId, running, 1);
+      assert.include(retry.message.text, `Command: ["pnpm","test"]`);
+      assert.include(retry.message.text, "Exit code: 1");
+      assert.include(retry.message.text, "FAIL src/a.test.ts");
+      assert.isDefined(retry.run, "the retry message starts a run on the member's thread");
+      assert.equal((yield* afterPasses(result.swarmId, "m0", 1)).boundRunId, retry.run.id);
+      // The finalized delegated task is not reopened, and nothing is released yet.
+      const task = (yield* orchestrator.getThreadProjection(threadId)).subagents.find(
+        (candidate) => candidate.id === launched.taskId,
+      );
+      assert.equal(task?.completionWake, "held");
+      yield* endRun({ threadId: running.childThreadId!, runId: retry.run.id, text: "fixed it" });
+      const verified = yield* afterPasses(result.swarmId, "m0", 2);
+      assert.equal(verified.status, "verified");
+      assert.equal(verifyCalls.length, 2);
+      assert.include(verified.envelopeJson ?? "", `"attempts":2`);
+      assert.include(verified.envelopeJson ?? "", "fixed it");
+      yield* swarms.tick;
+      yield* drainWakes(threadId, anchor.id);
+      assert.isTrue((yield* rows(result.swarmId))[0]!.released);
+      yield* retire(result.swarmId);
+    }),
+  );
+
+  it.effect("fails a member with class verify after three failed checks", () =>
+    Effect.gen(function* () {
+      resetVerify();
+      verifyScript.push(verifyFail, verifyFail, verifyFail);
+      const { threadId, anchor } = yield* seedArchitect("a6-fail3");
+      const result = yield* createSwarm(threadId, {
+        members: verifyMembers(1, { argv: ["pnpm", "test"] }),
+      });
+      yield* endRun({ threadId, runId: anchor.id });
+      yield* finishRow(threadId, (yield* rows(result.swarmId))[0]!, "m0 done");
+      for (const retry of [1, 2]) {
+        const running = yield* afterPasses(result.swarmId, "m0", 2);
+        assert.equal(running.status, "running");
+        assert.equal(running.verifyAttempts, retry);
+        const { run } = yield* retryRunOf(result.swarmId, running, retry);
+        yield* endRun({ threadId: running.childThreadId!, runId: run.id, text: `try ${retry}` });
+      }
+      const failed = yield* afterPasses(result.swarmId, "m0", 2);
+      assert.equal(failed.status, "failed");
+      assert.equal(failed.failureClass, "verify");
+      assert.include(failed.envelopeJson ?? "", `"class":"verify"`);
+      assert.include(failed.envelopeJson ?? "", `"attempts":3`);
+      assert.equal(verifyCalls.length, 3);
+      yield* retire(result.swarmId);
+    }),
+  );
+
+  it.effect("fails a timed-out check with no retries left", () =>
+    Effect.gen(function* () {
+      resetVerify();
+      verifyScript.push({ passed: false, exitCode: null, timedOut: true, outputTail: "" });
+      const { threadId, anchor } = yield* seedArchitect("a6-timeout");
+      const result = yield* createSwarm(threadId, {
+        members: verifyMembers(1, { argv: ["pnpm", "test"], timeoutMs: 5_000, maxRetries: 0 }),
+      });
+      yield* endRun({ threadId, runId: anchor.id });
+      yield* finishRow(threadId, (yield* rows(result.swarmId))[0]!, "m0 done");
+      const failed = yield* afterPasses(result.swarmId, "m0", 2);
+      assert.equal(failed.status, "failed");
+      assert.include(failed.envelopeJson ?? "", `"timedOut":true`);
+      assert.equal(failed.verifyAttempts, 0, "no retry message was sent");
+      yield* retire(result.swarmId);
+    }),
+  );
+
+  it.effect("ends claimed_done unchecked when the member's mode no longer allows verify", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      resetVerify();
+      const { threadId, anchor } = yield* seedArchitect("a6-downgrade");
+      const result = yield* createSwarm(threadId, {
+        members: verifyMembers(1, { argv: ["pnpm", "test"] }),
+      });
+      yield* endRun({ threadId, runId: anchor.id });
+      const row = (yield* rows(result.swarmId))[0]!;
+      yield* orchestrator.dispatch({
+        type: "thread.runtime-mode.set",
+        commandId: CommandId.make("command:a6-downgrade"),
+        threadId: row.childThreadId!,
+        runtimeMode: "approval-required",
+      });
+      yield* finishRow(threadId, row, "m0 done");
+      const done = yield* afterPasses(result.swarmId, "m0", 1);
+      assert.equal(done.status, "claimed_done");
+      assert.include(done.envelopeJson ?? "", `"verifySkipped":"runtime_mode"`);
+      assert.equal(verifyCalls.length, 0);
+      yield* retire(result.swarmId);
+    }),
+  );
+
+  it.effect("verifies shared-checkout members one at a time", () =>
+    Effect.gen(function* () {
+      resetVerify();
+      const first = yield* Deferred.make<SwarmVerifier.SwarmVerifyOutcome>();
+      const second = yield* Deferred.make<SwarmVerifier.SwarmVerifyOutcome>();
+      verifyScript.push({ hold: first }, { hold: second });
+      const { threadId, anchor } = yield* seedArchitect("a6-shared");
+      const result = yield* createSwarm(threadId, {
+        allowSharedWriters: true,
+        members: verifyMembers(2, { argv: ["pnpm", "test"] }).map((member) => ({
+          ...member,
+          ownsPaths: [`src/${member.key}`],
+        })),
+      });
+      yield* endRun({ threadId, runId: anchor.id });
+      for (const row of yield* rows(result.swarmId)) {
+        yield* finishRow(threadId, row, `${row.memberKey} done`);
+      }
+      yield* afterPasses(result.swarmId, "m0", 1);
+      assert.deepEqual(
+        (yield* rows(result.swarmId)).map((row) => row.status),
+        ["verifying", "verifying"],
+      );
+      assert.equal(verifyCalls.length, 1, "the second waits for the checkout");
+      const secondStarted = yield* Deferred.make<void>();
+      verifyCallWaiters.push(secondStarted);
+      yield* Deferred.succeed(first, verifyPass);
+      // The first outcome is recorded before the checkout is free, so the second starting
+      // means the first is ready to apply.
+      yield* Deferred.await(secondStarted);
+      yield* afterPasses(result.swarmId, "m0", 1);
+      assert.deepEqual(
+        (yield* rows(result.swarmId)).map((row) => row.status),
+        ["verified", "verifying"],
+      );
+      assert.equal(verifyCalls.length, 2);
+      assert.equal(verifyCalls[0]!.cwd, verifyCalls[1]!.cwd);
+      // A member that moved on (here: cancelled) has its running check killed.
+      yield* retire(result.swarmId);
+      yield* afterPasses(result.swarmId, "m1", 1);
+      assert.equal(verifyKills, 1);
+    }),
+  );
+
+  it.effect("aborts a check when a run starts, and ignores runs after release", () =>
+    Effect.gen(function* () {
+      const swarms = yield* SwarmService.SwarmService;
+      resetVerify();
+      const held = yield* Deferred.make<SwarmVerifier.SwarmVerifyOutcome>();
+      verifyScript.push({ hold: held });
+      const { threadId, anchor } = yield* seedArchitect("a6-race");
+      const result = yield* createSwarm(threadId, {
+        members: verifyMembers(1, { argv: ["pnpm", "test"] }),
+      });
+      yield* endRun({ threadId, runId: anchor.id });
+      const row = (yield* rows(result.swarmId))[0]!;
+      yield* finishRow(threadId, row, "m0 done");
+      assert.equal((yield* afterPasses(result.swarmId, "m0", 1)).status, "verifying");
+      // The user writes to the member while its check runs: the check is killed and discarded.
+      const chat = yield* startRun({ threadId: row.childThreadId!, ordinal: 2 });
+      const back = yield* afterPasses(result.swarmId, "m0", 1);
+      assert.equal(back.status, "running");
+      assert.equal(verifyKills, 1);
+      assert.equal(back.boundRunId, row.childRunId, "the user's run is not bound");
+      yield* endRun({ threadId: row.childThreadId!, runId: chat.id, text: "chatted" });
+      assert.equal((yield* afterPasses(result.swarmId, "m0", 2)).status, "verified");
+      assert.equal(verifyCalls.length, 2);
+      yield* swarms.tick;
+      yield* drainWakes(threadId, anchor.id);
+      assert.isTrue((yield* rows(result.swarmId))[0]!.released);
+      // After release a run on the member thread never verifies or releases again.
+      const later = yield* startRun({ threadId: row.childThreadId!, ordinal: 3 });
+      yield* endRun({ threadId: row.childThreadId!, runId: later.id, text: "later" });
+      const after = yield* afterPasses(result.swarmId, "m0", 2);
+      assert.equal(after.status, "verified");
+      assert.equal(verifyCalls.length, 2);
+      yield* retire(result.swarmId);
+    }),
+  );
+});

@@ -32,6 +32,7 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Fiber from "effect/Fiber";
+import * as FiberMap from "effect/FiberMap";
 import * as Queue from "effect/Queue";
 import * as Result from "effect/Result";
 import * as Scope from "effect/Scope";
@@ -58,6 +59,7 @@ import {
 import { subagentResultForRun } from "@t3tools/provider-core/server/subagentProjection";
 import * as ServerSettings from "../serverSettings.ts";
 import * as SwarmStore from "./SwarmStore.ts";
+import * as SwarmVerifier from "./SwarmVerifier.ts";
 import { expandSwarmMap } from "./swarmMap.ts";
 import {
   capChangedPaths,
@@ -240,6 +242,19 @@ const NOTE_WINDOW_MS = 30_000;
 const FOLLOWUP_COALESCE_MS = 5_000;
 const DELIVERY_STALL_MS = 10 * 60_000;
 const MAX_RELEASE_ATTEMPTS = 5;
+const VERIFY_DEFAULT_TIMEOUT_MS = 600_000;
+const VERIFY_DEFAULT_MAX_RETRIES = 2;
+/** The retry message carries the last 2 KB of the verify output. */
+const VERIFY_RETRY_OUTPUT_CHARACTERS = 2_048;
+
+/** A finished check, with the attempt it belongs to. */
+interface VerifyResult {
+  readonly swarmId: SwarmId;
+  readonly memberKey: string;
+  readonly boundRunId: string;
+  readonly verifyAttempts: number;
+  readonly outcome: SwarmVerifier.SwarmVerifyOutcome;
+}
 const TERMINAL_TASK_STATUSES: ReadonlySet<string> = new Set([
   "completed",
   "failed",
@@ -297,6 +312,17 @@ const make = Effect.gen(function* () {
   const providerRegistry = yield* ProviderRegistry.ProviderRegistry;
   // Envelope artifacts read the member's worktree; without git they stay empty.
   const gitDriver = yield* Effect.serviceOption(GitVcsDriver.GitVcsDriver);
+  const verifier = yield* SwarmVerifier.SwarmVerifier;
+  // Running verify commands by member (SW-A6); removing one kills its process tree.
+  const verifyFibers = yield* FiberMap.make<string>();
+  const verifyMembers = new Map<
+    string,
+    { readonly swarmId: SwarmId; readonly memberKey: string }
+  >();
+  // Finished checks waiting for the next pass, which applies them under the pass lock.
+  const verifyOutcomes = new Map<string, VerifyResult>();
+  // Shared-checkout members verify one at a time per checkout.
+  const checkoutLocks = new Map<string, Semaphore.Semaphore>();
   // Admission passes run one at a time, so a create and a tick never admit the same row twice.
   const passLock = yield* Semaphore.make(1);
   // Architect notes (SW-A5): routine notes at most once per swarm every 30 s; notes already
@@ -550,8 +576,11 @@ const make = Effect.gen(function* () {
     readonly member: SwarmStore.SwarmMemberRecord;
     readonly child: Pick<OrchestrationV2ThreadProjection, "thread" | "messages" | "turnItems">;
     readonly run: OrchestrationV2Run;
-    readonly status: FinalMemberStatus;
+    readonly status: FinalMemberStatus | "running";
     readonly testPathGlobs: ReadonlyArray<string>;
+    readonly verify?: SwarmEnvelope["verify"];
+    readonly verifySkipped?: SwarmEnvelope["verifySkipped"];
+    readonly failure?: SwarmEnvelope["failure"];
   }) {
     const { swarm, member, child, run, status } = input;
     const spec = parseSpec(member.specJson);
@@ -583,27 +612,376 @@ const make = Effect.gen(function* () {
       testFilesChanged: paths.changedPaths.some((path) =>
         matchesAnyGlob(path, input.testPathGlobs),
       ),
-      ...(status === "failed"
-        ? { failure: { class: "unknown" as const, message: "The member's run failed." } }
-        : {}),
+      ...(input.verify === undefined ? {} : { verify: input.verify }),
+      ...(input.verifySkipped === undefined ? {} : { verifySkipped: input.verifySkipped }),
+      ...(input.failure !== undefined
+        ? { failure: input.failure }
+        : status === "failed"
+          ? { failure: { class: "unknown" as const, message: "The member's run failed." } }
+          : {}),
     };
     return envelope;
   });
 
+  /** Only `auto` and `full-access` run commands without approval, so only they allow verify. */
+  const verifyPermitted = (mode: RuntimeMode) => mode === "auto" || mode === "full-access";
+
+  const verifyRetryId = (member: SwarmStore.SwarmMemberRecord, retry: number) =>
+    `swarm-verify:${member.swarmId}:${member.memberKey}:${retry}`;
+
   /**
-   * The member terminal path (SW-A5; SW-A6 adds verify, SW-A8 real failure classes): when the
-   * bound run ends, the member becomes final with its envelope, ready for release.
+   * The run the member's current attempt is bound to (rev 2.1): the admission run, then the run
+   * each verify retry message started, followed through usage-limit continuations. Any other
+   * run on the member thread is the user's or a restart's and never ends the attempt.
+   */
+  const boundRunOf = (
+    member: SwarmStore.SwarmMemberRecord,
+    runs: ReadonlyArray<OrchestrationV2Run>,
+  ): OrchestrationV2Run | undefined => {
+    let boundId =
+      member.boundRunId ??
+      (member.verifyAttempts === 0
+        ? member.childRunId
+        : (runs.find(
+            (run) =>
+              run.userMessageId === `message:${verifyRetryId(member, member.verifyAttempts)}`,
+          )?.id ?? null));
+    if (boundId === null) return undefined;
+    for (;;) {
+      const continuation = runs.find((run) =>
+        run.userMessageId.startsWith(`limit-resume:${run.threadId}:${boundId}:`),
+      );
+      if (continuation === undefined) break;
+      boundId = continuation.id;
+    }
+    return runs.find((run) => run.id === boundId);
+  };
+
+  /** The message that sends a failed verify back to the member, rebuilt from its envelope. */
+  const verifyRetryText = (spec: SwarmMemberSpec, verify: NonNullable<SwarmEnvelope["verify"]>) => {
+    const output = verify.outputTail.slice(-VERIFY_RETRY_OUTPUT_CHARACTERS);
+    return [
+      `The swarm's verify command failed (check ${verify.attempts} of ${(spec.verifyMaxRetries ?? VERIFY_DEFAULT_MAX_RETRIES) + 1}).`,
+      `Command: ${encodeSpecJson(spec.verifyArgv ?? [])}`,
+      verify.timedOut ? "It timed out." : `Exit code: ${verify.exitCode ?? "none"}`,
+      "Last output:",
+      "```",
+      output,
+      "```",
+      "Fix the problem, then end your turn with the t3-swarm-result block again.",
+    ].join("\n");
+  };
+
+  /**
+   * Sends a verify retry to the member's thread. Idempotent by command id; never sent once the
+   * swarm row is cancelled or detached (checked here, right before the dispatch).
+   */
+  const sendVerifyRetry = Effect.fn("SwarmService.sendVerifyRetry")(function* (
+    member: SwarmStore.SwarmMemberRecord,
+  ) {
+    if (member.childThreadId === null || member.envelopeJson === null) return;
+    const swarm = yield* store.getSwarm(member.swarmId);
+    if (Option.isNone(swarm) || swarm.value.status !== "active") return;
+    const verify = decodeEnvelope(member.envelopeJson).verify;
+    if (verify === undefined) return;
+    const id = verifyRetryId(member, member.verifyAttempts);
+    const sent = yield* threads
+      .dispatch({
+        type: "message.dispatch",
+        commandId: CommandId.make(id),
+        threadId: member.childThreadId,
+        messageId: MessageId.make(`message:${id}`),
+        text: verifyRetryText(parseSpec(member.specJson), verify),
+        attachments: [],
+        dispatchMode: { type: "queue_after_active" },
+        createdBy: "agent",
+        creationSource: "server",
+      })
+      .pipe(Effect.result);
+    if (Result.isFailure(sent)) {
+      yield* Effect.logWarning("swarm.verify-retry-failed", {
+        swarmId: member.swarmId,
+        memberKey: member.memberKey,
+        retry: member.verifyAttempts,
+        errorTag: storageOrDispatchTag(sent.failure),
+      });
+      return;
+    }
+    yield* Effect.logInfo("swarm.verify-retry", {
+      swarmId: member.swarmId,
+      memberKey: member.memberKey,
+      retry: member.verifyAttempts,
+    });
+  });
+
+  const lockFor = Effect.fn("SwarmService.checkoutLock")(function* (cwd: string) {
+    const known = checkoutLocks.get(cwd);
+    if (known !== undefined) return known;
+    const lock = yield* Semaphore.make(1);
+    checkoutLocks.set(cwd, lock);
+    return lock;
+  });
+
+  /** Stops a member's verify command, if one runs; its result is discarded. */
+  const abortVerify = (member: SwarmStore.SwarmMemberRecord) => {
+    const ref = memberRef(member);
+    verifyMembers.delete(ref);
+    verifyOutcomes.delete(ref);
+    return FiberMap.remove(verifyFibers, ref);
+  };
+
+  /** Verify commands whose member moved on (cancelled, detached, or gone) are killed. */
+  const dropStaleVerifies = Effect.gen(function* () {
+    for (const [ref, ids] of verifyMembers) {
+      const row = (yield* store.listMembers(ids.swarmId)).find(
+        (member) => member.memberKey === ids.memberKey,
+      );
+      if (row === undefined || row.status !== "verifying") {
+        verifyMembers.delete(ref);
+        yield* FiberMap.remove(verifyFibers, ref);
+      }
+    }
+  });
+
+  /** Ends a verifying member without a check: its modes or checkout no longer allow one. */
+  const skipVerify = Effect.fn("SwarmService.skipVerify")(function* (input: {
+    readonly swarm: SwarmStore.SwarmRecord;
+    readonly member: SwarmStore.SwarmMemberRecord;
+    readonly child: Pick<OrchestrationV2ThreadProjection, "thread" | "messages" | "turnItems">;
+    readonly run: OrchestrationV2Run;
+    readonly reason: NonNullable<SwarmEnvelope["verifySkipped"]>;
+    readonly settings: ServerSettingsValue;
+  }) {
+    const updatedAt = yield* nowIso;
+    const envelope = yield* buildEnvelope({
+      swarm: input.swarm,
+      member: input.member,
+      child: input.child,
+      run: input.run,
+      status: "claimed_done",
+      testPathGlobs: input.settings.swarmTestPathGlobs,
+      verifySkipped: input.reason,
+    });
+    yield* store.updateMember({
+      swarmId: input.swarm.swarmId,
+      memberKey: input.member.memberKey,
+      patch: {
+        status: "claimed_done",
+        envelopeJson: encodeSpecJson(envelope),
+        endedAt: updatedAt,
+        updatedAt,
+      },
+    });
+    yield* Effect.logInfo("swarm.verify-skipped", {
+      swarmId: input.swarm.swarmId,
+      memberKey: input.member.memberKey,
+      reason: input.reason,
+    });
+  });
+
+  /**
+   * Applies a finished verify command (SW-A6), under the pass lock. A result whose member moved
+   * on, or whose thread started another run meanwhile, is discarded.
+   */
+  const applyVerifyOutcome = Effect.fn("SwarmService.applyVerifyOutcome")(function* (
+    input: VerifyResult,
+  ) {
+    const settings = yield* readSettings;
+    if (!settings.swarmV2Enabled) return;
+    const swarm = yield* store.getSwarm(input.swarmId);
+    if (Option.isNone(swarm)) return;
+    const member = (yield* store.listMembers(input.swarmId)).find(
+      (row) => row.memberKey === input.memberKey,
+    );
+    if (
+      member === undefined ||
+      member.status !== "verifying" ||
+      member.childThreadId === null ||
+      member.verifyAttempts !== input.verifyAttempts
+    ) {
+      return;
+    }
+    const child = yield* childRecords(member.childThreadId);
+    const run = boundRunOf(member, child.runs);
+    if (run === undefined || run.id !== input.boundRunId) return;
+    const updatedAt = yield* nowIso;
+    if (child.runs.some(ThreadManagementService.isActiveRun)) {
+      // Verify races (rev 2.1): a run started meanwhile; the member goes back to running.
+      yield* store.updateMember({
+        swarmId: input.swarmId,
+        memberKey: input.memberKey,
+        patch: { status: "running", updatedAt },
+      });
+      return;
+    }
+    const spec = parseSpec(member.specJson);
+    const verify = {
+      passed: input.outcome.passed,
+      exitCode: input.outcome.exitCode,
+      timedOut: input.outcome.timedOut,
+      attempts: member.verifyAttempts + 1,
+      outputTail: input.outcome.outputTail,
+    };
+    const maxRetries = spec.verifyMaxRetries ?? VERIFY_DEFAULT_MAX_RETRIES;
+    const retry = !verify.passed && member.verifyAttempts < maxRetries;
+    // A retry is not sent once the swarm row is cancelled or detached; the check fails instead.
+    const retrying = retry && swarm.value.status === "active";
+    const status = verify.passed ? "verified" : retrying ? "running" : "failed";
+    const envelope = yield* buildEnvelope({
+      swarm: swarm.value,
+      member,
+      child,
+      run,
+      status,
+      testPathGlobs: settings.swarmTestPathGlobs,
+      verify,
+      ...(status === "failed"
+        ? {
+            failure: {
+              class: "verify" as const,
+              message: `The verify command failed after ${verify.attempts} ${verify.attempts === 1 ? "check" : "checks"}.`,
+            },
+          }
+        : {}),
+    });
+    yield* Effect.logInfo("swarm.verify", {
+      swarmId: input.swarmId,
+      memberKey: input.memberKey,
+      check: verify.attempts,
+      passed: verify.passed,
+      timedOut: verify.timedOut,
+      exitCode: verify.exitCode,
+      next: status,
+    });
+    if (retrying) {
+      // Stored before the dispatch, so a crash re-sends the same message (same command id).
+      yield* store.updateMember({
+        swarmId: input.swarmId,
+        memberKey: input.memberKey,
+        patch: {
+          status: "running",
+          verifyAttempts: member.verifyAttempts + 1,
+          boundRunId: null,
+          envelopeJson: encodeSpecJson(envelope),
+          updatedAt,
+        },
+      });
+      const updated = (yield* store.listMembers(input.swarmId)).find(
+        (row) => row.memberKey === input.memberKey,
+      );
+      if (updated !== undefined) yield* sendVerifyRetry(updated);
+      return;
+    }
+    yield* store.updateMember({
+      swarmId: input.swarmId,
+      memberKey: input.memberKey,
+      patch: {
+        status,
+        envelopeJson: encodeSpecJson(envelope),
+        ...(status === "failed"
+          ? {
+              failureClass: "verify",
+              lastFailureClass: "verify",
+              lastFailedAt: updatedAt,
+              lastFailedInstanceId: member.providerInstanceId,
+            }
+          : {}),
+        endedAt: updatedAt,
+        updatedAt,
+      },
+    });
+  });
+
+  /** Starts the member's verify command unless one already runs for it. */
+  const ensureVerify = Effect.fn("SwarmService.ensureVerify")(function* (input: {
+    readonly swarm: SwarmStore.SwarmRecord;
+    readonly member: SwarmStore.SwarmMemberRecord;
+    readonly child: Pick<OrchestrationV2ThreadProjection, "thread" | "messages" | "turnItems">;
+    readonly run: OrchestrationV2Run;
+    readonly settings: ServerSettingsValue;
+  }) {
+    const { member } = input;
+    const ref = memberRef(member);
+    if (verifyOutcomes.has(ref) || (yield* FiberMap.has(verifyFibers, ref))) return;
+    const cwd = yield* verifier.checkoutOf(input.child.thread).pipe(Effect.option);
+    if (Option.isNone(cwd)) {
+      return yield* skipVerify({ ...input, reason: "no_checkout" });
+    }
+    const spec = parseSpec(member.specJson);
+    const lock = yield* lockFor(cwd.value);
+    const ids = {
+      swarmId: member.swarmId,
+      memberKey: member.memberKey,
+      boundRunId: input.run.id,
+      verifyAttempts: member.verifyAttempts,
+    };
+    verifyMembers.set(ref, { swarmId: member.swarmId, memberKey: member.memberKey });
+    yield* Effect.logInfo("swarm.verify-started", {
+      swarmId: member.swarmId,
+      memberKey: member.memberKey,
+      check: member.verifyAttempts + 1,
+    });
+    // The outcome is recorded before the checkout is free for the next check; the next pass
+    // applies it.
+    yield* FiberMap.run(
+      verifyFibers,
+      ref,
+      lock
+        .withPermits(1)(
+          verifier
+            .run({
+              argv: spec.verifyArgv ?? [],
+              cwd: cwd.value,
+              timeoutMs: spec.verifyTimeoutMs ?? VERIFY_DEFAULT_TIMEOUT_MS,
+            })
+            .pipe(
+              Effect.tap((outcome) =>
+                Effect.sync(() => {
+                  verifyOutcomes.set(ref, { ...ids, outcome });
+                }),
+              ),
+            ),
+        )
+        .pipe(Effect.ensuring(Effect.sync(() => verifyMembers.delete(ref))), Effect.andThen(wake)),
+      { onlyIfMissing: true },
+    );
+  });
+
+  /**
+   * The member terminal path (SW-A5 envelopes, SW-A6 verify; SW-A8 real failure classes): when
+   * the bound run ends, the member becomes final with its envelope, or verifies first.
    */
   const reconcileMember = Effect.fn("SwarmService.reconcileMember")(function* (
     swarm: SwarmStore.SwarmRecord,
     member: SwarmStore.SwarmMemberRecord,
     settings: ServerSettingsValue,
   ) {
-    if (member.childThreadId === null || member.childRunId === null) return;
+    if (member.childThreadId === null) return;
     const child = yield* childRecords(member.childThreadId);
-    const run = child.runs.find((candidate) => candidate.id === member.childRunId);
-    if (run === undefined) return;
     const updatedAt = yield* nowIso;
+    // Before release every run on the member thread counts toward its turns (rev 2.1).
+    if (!member.released && child.runs.length !== member.turnsUsed) {
+      yield* store.updateMember({
+        swarmId: swarm.swarmId,
+        memberKey: member.memberKey,
+        patch: { turnsUsed: child.runs.length, updatedAt },
+      });
+    }
+    const run = boundRunOf(member, child.runs);
+    if (run === undefined) {
+      // A verify retry whose message has not started a run yet: send it (again; idempotent).
+      if (member.verifyAttempts > 0 && member.boundRunId === null && member.status === "running") {
+        yield* sendVerifyRetry(member);
+      }
+      return;
+    }
+    if (run.id !== member.boundRunId) {
+      yield* store.updateMember({
+        swarmId: swarm.swarmId,
+        memberKey: member.memberKey,
+        patch: { boundRunId: run.id, updatedAt },
+      });
+    }
     // A detached member runs unmanaged; it only gets its envelope, for swarm_collect.
     if (member.status === "detached") {
       const status: FinalMemberStatus | undefined =
@@ -630,13 +1008,58 @@ const make = Effect.gen(function* () {
       });
       return;
     }
-    if (run.status === "running" && member.status === "launching") {
+    const threadBusy = child.runs.some(ThreadManagementService.isActiveRun);
+    if (member.status === "verifying") {
+      if (threadBusy) {
+        // Verify races (rev 2.1): never verify while a run is active on the member thread.
+        yield* abortVerify(member);
+        yield* store.updateMember({
+          swarmId: swarm.swarmId,
+          memberKey: member.memberKey,
+          patch: { status: "running", updatedAt },
+        });
+        yield* Effect.logInfo("swarm.verify-aborted", {
+          swarmId: swarm.swarmId,
+          memberKey: member.memberKey,
+        });
+        return;
+      }
+      return yield* ensureVerify({ swarm, member, child, run, settings });
+    }
+    if (ThreadManagementService.isActiveRun(run)) {
+      if (run.status === "running" && member.status === "launching") {
+        yield* store.updateMember({
+          swarmId: swarm.swarmId,
+          memberKey: member.memberKey,
+          patch: { status: "running", startedAt: updatedAt, updatedAt },
+        });
+      }
+      return;
+    }
+    const spec = parseSpec(member.specJson);
+    if (run.status === "completed" && spec.verifyArgv !== undefined) {
+      // The member's run is done; verify waits for any other run on its thread to end.
+      if (threadBusy) return;
+      // Modes can change after create, so they are checked again before every verify.
+      const architect = yield* loadRuns(swarm.parentThreadId);
+      if (
+        !verifyPermitted(architect.thread.runtimeMode) ||
+        !verifyPermitted(child.thread.runtimeMode)
+      ) {
+        return yield* skipVerify({ swarm, member, child, run, reason: "runtime_mode", settings });
+      }
       yield* store.updateMember({
         swarmId: swarm.swarmId,
         memberKey: member.memberKey,
-        patch: { status: "running", startedAt: updatedAt, updatedAt },
+        patch: { status: "verifying", updatedAt },
       });
-      return;
+      return yield* ensureVerify({
+        swarm,
+        member: { ...member, status: "verifying", boundRunId: run.id },
+        child,
+        run,
+        settings,
+      });
     }
     const ended: FinalMemberStatus | undefined =
       run.status === "completed"
@@ -1188,6 +1611,16 @@ const make = Effect.gen(function* () {
       Effect.gen(function* () {
         // Cancelled swarms still hold slots until their launched members end.
         yield* sendFollowupNotes().pipe(logged("swarm.followup-note-error", {}));
+        yield* dropStaleVerifies.pipe(logged("swarm.verify-sweep-error", {}));
+        for (const [ref, result] of verifyOutcomes) {
+          verifyOutcomes.delete(ref);
+          yield* applyVerifyOutcome(result).pipe(
+            logged("swarm.verify-apply-error", {
+              swarmId: result.swarmId,
+              memberKey: result.memberKey,
+            }),
+          );
+        }
         // Cancelled and detached swarms are followed until their launched members end:
         // cancelled ones still hold slots and release while their anchor is open, detached
         // ones only collect envelopes.
@@ -1216,6 +1649,7 @@ const make = Effect.gen(function* () {
               member.childThreadId !== null &&
               (member.status === "launching" ||
                 member.status === "running" ||
+                member.status === "verifying" ||
                 (member.status === "detached" && member.envelopeJson === null))
             ) {
               yield* reconcileMember(swarm, member, settings).pipe(
@@ -1645,7 +2079,6 @@ const make = Effect.gen(function* () {
             `Member '${member.key}' has verify, which needs runtime mode auto or full-access for both this thread and the member.`,
           );
         }
-        return yield* notYet("`verify`");
       }
       specs.push({
         key: member.key,
@@ -1656,6 +2089,13 @@ const make = Effect.gen(function* () {
         }),
         ...(member.role === undefined ? {} : { role: member.role }),
         ...(member.doneCriteria === undefined ? {} : { doneCriteria: member.doneCriteria }),
+        ...(verify === undefined
+          ? {}
+          : {
+              verifyArgv: verify.argv,
+              ...(verify.timeoutMs === undefined ? {} : { verifyTimeoutMs: verify.timeoutMs }),
+              ...(verify.maxRetries === undefined ? {} : { verifyMaxRetries: verify.maxRetries }),
+            }),
         isolation: member.isolation ?? "shared",
         ...(member.ownsPaths === undefined ? {} : { ownsPaths: member.ownsPaths }),
         ...(member.allowNestedSwarm === undefined
