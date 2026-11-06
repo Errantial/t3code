@@ -3,6 +3,7 @@ import * as Effect from "effect/Effect";
 import * as SqlClient from "effect/sql/SqlClient";
 import { reconcileV2PreviewMigration } from "./reconcileV2PreviewMigration.ts";
 import { reconcileChatGptBrowserForkMigration } from "./reconcileChatGptBrowserForkMigration.ts";
+import { reconcilePeerExecReceiptsMigration } from "./reconcilePeerExecReceiptsMigration.ts";
 
 import Migration0001 from "./Migrations/001_OrchestrationEvents.ts";
 import Migration0002 from "./Migrations/002_OrchestrationCommandReceipts.ts";
@@ -227,12 +228,17 @@ export const runMigrations = Effect.fn("runMigrations")(function* ({
     toMigrationInclusive === undefined || toMigrationInclusive >= FIRST_V2_MIGRATION_ID;
   const forkMigrations = includesV2 ? yield* reconcileChatGptBrowserForkMigration() : [];
   const previewMigrations = includesV2 ? yield* reconcileV2PreviewMigration() : [];
+  const peerExecMigrations =
+    toMigrationInclusive === undefined || toMigrationInclusive >= 74
+      ? yield* reconcilePeerExecReceiptsMigration(migrationManifest)
+      : [];
   if (includesV2) {
     yield* assertV2MigrationsCanRun(toMigrationInclusive);
   }
   const executedMigrations = [
     ...forkMigrations,
     ...previewMigrations,
+    ...peerExecMigrations,
     ...(yield* run({ loader: makeMigrationLoader(toMigrationInclusive) })),
   ];
   const migrations = executedMigrations.map(([id, name]) => `${id}_${name}`);
