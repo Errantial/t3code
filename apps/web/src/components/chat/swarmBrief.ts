@@ -97,7 +97,7 @@ function buildSwarmBriefPromptV2(input: SwarmBriefInput): string {
     brief,
     '"""',
     "",
-    "First, decide whether the work can run in parallel. Keep sequential work in one agent or a short chain; a swarm only helps when members can work independently.",
+    "First, decide whether the work can run in parallel. Keep sequential work in one agent or a short chain; a swarm only helps when members can work independently. For two or three small tasks one agent is usually faster and uses fewer turns; a swarm pays off when the tasks are many, slow, or need their own checkouts.",
     "",
     "Rules:",
     `- ${budget}`,

@@ -38,6 +38,7 @@ describe("buildSwarmBriefPrompt", () => {
       architectFullAccess: true,
     });
     expect(prompt).toContain("decide whether the work can run in parallel");
+    expect(prompt).toContain("For two or three small tasks one agent is usually faster");
     expect(prompt).toContain("ONE `swarm_create` call");
     expect(prompt).not.toContain("create_swarm");
     for (const word of [

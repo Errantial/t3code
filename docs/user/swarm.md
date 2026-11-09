@@ -170,6 +170,11 @@ inserts asks the agent to check first whether the work can run in parallel at al
 at three to five members (at most 12 per call) and launches them with `swarm_create`. The brief
 suggests a `verify` command only when the thread is in **Full access**.
 
+A swarm is not always faster. In a live comparison of three small coding tasks with tests, one
+agent passed all three in fewer turns and less time than a verified swarm of three, which also
+passed all three. The brief says so: use a swarm when the tasks are many, slow, or need their own
+checkouts.
+
 ### When results arrive
 
 Each member's result wakes the agent as a short digest, following the swarm's wake policy. The
