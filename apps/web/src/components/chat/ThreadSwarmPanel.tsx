@@ -75,7 +75,7 @@ export function ThreadSwarmPanel(props: {
   const enabled = useAtomValue(swarmV2EnabledAtom(props.environmentId));
   // While the architect runs it may start a swarm: poll faster, and reload when the run ends.
   const architectRunning =
-    useQuietThreadShell({ environmentId: props.environmentId, threadId: props.threadId })
+    useQuietThreadShell({ environmentId: props.environmentId, threadId: props.threadId })?.runtime
       ?.activeRunId != null;
   // The sidebar's poll sees a swarm that starts while this panel is open; reload then.
   const hasActiveSwarm =

@@ -22,7 +22,7 @@ vi.mock(import("@effect/atom-react"), async (importOriginal) => ({
 }));
 vi.mock(import("../../state/entities"), async (importOriginal) => ({
   ...(await importOriginal()),
-  useQuietThreadShell: (() => ({ activeRunId: state.activeRunId })) as never,
+  useQuietThreadShell: (() => ({ runtime: { activeRunId: state.activeRunId } })) as never,
 }));
 vi.mock(import("@tanstack/react-router"), async (importOriginal) => ({
   ...(await importOriginal()),
