@@ -10,6 +10,7 @@ import {
   WS_METHODS,
   WsServerRefreshProvidersRpc,
   WsSubscribeServerConfigRpc,
+  WsSwarmListForThreadRpc,
   type OrchestrationV2StoredEvent,
   type OrchestrationV2ThreadShell,
   type OrchestrationProjectShell,
@@ -20,7 +21,9 @@ import {
 import * as Deferred from "effect/Deferred";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as PubSub from "effect/PubSub";
 import * as Queue from "effect/Queue";
 import * as Stream from "effect/Stream";
@@ -108,6 +111,7 @@ import * as ServerSecretStore from "./auth/ServerSecretStore.ts";
 import * as ServerConfigModule from "./config.ts";
 import * as Keybindings from "./keybindings.ts";
 import * as ServerSettings from "./serverSettings.ts";
+import * as SwarmService from "./swarm/SwarmService.ts";
 
 import * as EventStore from "./orchestration-v2/EventStore.ts";
 import * as ProjectionMaintenance from "./orchestration-v2/ProjectionMaintenance.ts";
@@ -648,6 +652,7 @@ it.effect(
             },
             {},
             yield* ServerBrowser.ServerBrowser,
+            Option.none(),
           ).pipe(Layer.provide(configRpcServices)),
         ),
       );
@@ -816,6 +821,7 @@ it.effect("on-demand clients get provider config without workspace snapshots", (
           },
           {},
           yield* ServerBrowser.ServerBrowser,
+          Option.none(),
         ).pipe(Layer.provide(configRpcServices)),
       ),
     );
@@ -872,6 +878,116 @@ it.effect("on-demand clients get provider config without workspace snapshots", (
     ),
     Effect.scoped,
   ),
+);
+
+// The route layer resolves the swarm service when it is built and passes it in: a WebSocket
+// request handler sees only the services it requires, so looking it up there found none.
+it.effect.each([true, false])(
+  "answers swarm.listForThread with the swarm service it was given (%s)",
+  (given) =>
+    Effect.gen(function* () {
+      const settings = yield* ServerSettings.ServerSettingsService;
+      yield* settings.updateSettings({ swarmV2Enabled: true });
+      const responses = yield* Queue.unbounded<unknown>();
+      const listed: Array<string> = [];
+      const swarms = {
+        listForThread: (threadId: ThreadId) =>
+          Effect.sync(() => {
+            listed.push(threadId);
+            return { swarms: [] };
+          }),
+      } as unknown as SwarmService.SwarmService["Service"];
+      const rpcServices = Layer.mergeAll(
+        layerUnusedConfigRpcServices,
+        Layer.mock(ExternalLauncher.ExternalLauncher)({
+          resolveAvailableEditors: () => Effect.succeed([]),
+          // @effect-diagnostics-next-line effectSucceedWithVoid:off - This optional result requires undefined, not the wider void type.
+          resolveFileManagerRevealKind: () => Effect.succeed(undefined),
+        }),
+        Layer.mock(ProviderRegistry.ProviderRegistry)({
+          getProviders: Effect.succeed([]),
+          streamChanges: Stream.empty,
+        }),
+        Layer.mock(UsageLimitSources.UsageLimitSources)({
+          current: Effect.succeed([]),
+          streamChanges: Stream.make([]),
+        }),
+        Layer.mock(RemoteOpenTargets.RemoteOpenTargets)({
+          resolveTargets: () => Effect.succeed([]),
+        }),
+        Layer.mock(DirectEndpoints.DirectEndpoints)({ resolve: () => Effect.succeed([]) }),
+        Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({
+          scratchRoot: Effect.succeedNone,
+          namedProjectsRoot: process.cwd(),
+        }),
+        Layer.mock(ScratchThreadPromotion.ScratchThreadPromotion)({}),
+        Layer.mock(ServerEnvironment.ServerEnvironment)({
+          getDescriptor: Effect.succeed({
+            environmentId: EnvironmentId.make("swarm-rpc-test"),
+            label: "Swarm RPC test",
+            platform: { os: "linux", arch: "x64" },
+            serverVersion: "0.0.0",
+            capabilities: { repositoryIdentity: false },
+          }),
+        }),
+        Layer.mock(EnvironmentAuth.EnvironmentAuth)({
+          getDescriptor: () =>
+            Effect.succeed({
+              policy: "loopback-browser",
+              bootstrapMethods: [],
+              sessionMethods: ["browser-session-cookie"],
+              sessionCookieName: "swarm-rpc-test-session",
+            }),
+        }),
+      );
+      const server = yield* RpcServer.makeNoSerialization(RpcGroup.make(WsSwarmListForThreadRpc), {
+        ...WS_RPC_SERVER_OPTIONS,
+        onFromServer: (response) =>
+          response._tag === "Exit" ? Queue.offer(responses, response.exit) : Effect.void,
+      }).pipe(
+        Effect.provide(
+          layerWsRpc(
+            {
+              sessionId: AuthSessionId.make("swarm-rpc-test"),
+              subject: "swarm-rpc-test",
+              method: "browser-session-cookie",
+              scopes: [],
+            },
+            {},
+            yield* ServerBrowser.ServerBrowser,
+            given ? Option.some(swarms) : Option.none(),
+          ).pipe(Layer.provide(rpcServices)),
+        ),
+      );
+      yield* server.write(0, {
+        _tag: "Request",
+        id: RpcMessage.RequestId("list"),
+        tag: WS_METHODS.swarmListForThread,
+        payload: { threadId: ThreadId.make("thread:architect") },
+        headers: Headers.empty,
+      });
+      const exit = (yield* Queue.take(responses)) as Exit.Exit<
+        unknown,
+        { readonly reason: string }
+      >;
+      if (given) {
+        assert.deepEqual(exit, Exit.succeed({ swarms: [] }));
+        assert.deepEqual(listed, ["thread:architect"]);
+      } else {
+        assert.isTrue(Exit.isFailure(exit));
+        assert.include(String(exit), "Swarms are not available on this server.");
+      }
+    }).pipe(
+      Effect.provide(
+        Layer.mergeAll(
+          Layer.fresh(layerConfigSources),
+          Layer.mock(PreviewAutomationBroker.PreviewAutomationBroker)({}),
+          Layer.mock(ServerBrowser.ServerBrowser)({}),
+          FetchHttpClient.layer,
+        ),
+      ),
+      Effect.scoped,
+    ),
 );
 
 // Compaction keeps the oldest and newest event per message, so a cursor older

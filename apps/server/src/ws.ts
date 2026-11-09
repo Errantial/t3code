@@ -1236,6 +1236,8 @@ export const layerWsRpc = (
   currentSession: EnvironmentAuth.AuthenticatedSession,
   clientAnalyticsProps: Readonly<Record<string, unknown>>,
   serverBrowser: ServerBrowser.ServerBrowser["Service"],
+  // Resolved when the route layer is built: a request handler sees only the services it requires.
+  swarmService: Option.Option<SwarmService.SwarmService["Service"]>,
 ) =>
   Layer.effectContext(
     Effect.gen(function* () {
@@ -1351,7 +1353,6 @@ export const layerWsRpc = (
       const serverSettings = yield* ServerSettings.ServerSettingsService;
       // Swarm v2 panel and chip RPCs: refused while the Labs setting is off; a swarm is reached
       // only through its own architect thread (SwarmService.act checks it).
-      const swarmService = yield* Effect.serviceOption(SwarmService.SwarmService);
       const swarmRpc = makeSwarmRpc(serverSettings, swarmService);
       const peerLinks = yield* PeerLinks.PeerLinks;
       const peerLinkRequests = yield* PeerLinkRequests.PeerLinkRequests;
@@ -3293,6 +3294,7 @@ export const layer = Layer.unwrap(
     const peerLinks = yield* PeerLinks.PeerLinks;
     const peerLinkRequests = yield* PeerLinkRequests.PeerLinkRequests;
     const sql = yield* SqlClient.SqlClient;
+    const swarmService = yield* Effect.serviceOption(SwarmService.SwarmService);
     return HttpRouter.add(
       "GET",
       "/ws",
@@ -3354,7 +3356,7 @@ export const layer = Layer.unwrap(
           return httpEffect;
         }).pipe(
           Effect.provide(
-            layerWsRpc(session, clientAnalyticsProps, serverBrowser).pipe(
+            layerWsRpc(session, clientAnalyticsProps, serverBrowser, swarmService).pipe(
               Layer.provideMerge(RpcSerialization.layerJson),
               // Handler-context reporters see only request defects, not server-wide defects.
               Layer.provide(DefectReporter.layer),

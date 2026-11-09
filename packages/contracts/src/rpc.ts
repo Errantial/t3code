@@ -791,7 +791,7 @@ const WsFleetUpdateRpc = Rpc.make(WS_METHODS.fleetUpdate, {
 });
 
 // Swarm v2 (SW-A10): the architect thread's panel, and the sidebar chip.
-const WsSwarmListForThreadRpc = Rpc.make(WS_METHODS.swarmListForThread, {
+export const WsSwarmListForThreadRpc = Rpc.make(WS_METHODS.swarmListForThread, {
   payload: SwarmListForThreadInput,
   success: SwarmListForThreadResult,
   error: Schema.Union([SwarmRpcError, EnvironmentAuthorizationError]),
