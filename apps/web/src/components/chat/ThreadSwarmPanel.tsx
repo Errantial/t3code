@@ -275,40 +275,45 @@ function SwarmSection(props: {
             By instance
           </label>
         </div>
-        {groups.map((group) => (
-          <div key={group.instanceId} className="flex flex-col gap-1">
-            {groupByInstance ? (
-              <div className="font-medium text-muted-foreground">{group.instanceId}</div>
-            ) : null}
-            <ul className="flex flex-col gap-1">
-              {group.members.map((member) => (
-                <SwarmMemberRow
-                  key={member.key}
-                  member={member}
-                  nowMs={props.nowMs}
-                  canOperate={props.canOperate && view.status !== "detached"}
-                  onOpen={props.onOpenThread}
-                  onStop={() =>
-                    void props.onAct({
-                      threadId: props.threadId,
-                      swarmId: view.swarmId,
-                      action: "stop",
-                      keys: [member.key],
-                    })
-                  }
-                  onRetry={() =>
-                    void props.onAct({
-                      threadId: props.threadId,
-                      swarmId: view.swarmId,
-                      action: "retry",
-                      keys: [member.key],
-                    })
-                  }
-                />
-              ))}
-            </ul>
-          </div>
-        ))}
+        <div
+          className="flex max-h-[min(50vh,28rem)] flex-col gap-2 overflow-y-auto"
+          data-swarm-roster
+        >
+          {groups.map((group) => (
+            <div key={group.instanceId} className="flex flex-col gap-1">
+              {groupByInstance ? (
+                <div className="font-medium text-muted-foreground">{group.instanceId}</div>
+              ) : null}
+              <ul className="flex flex-col gap-1">
+                {group.members.map((member) => (
+                  <SwarmMemberRow
+                    key={member.key}
+                    member={member}
+                    nowMs={props.nowMs}
+                    canOperate={props.canOperate && view.status !== "detached"}
+                    onOpen={props.onOpenThread}
+                    onStop={() =>
+                      void props.onAct({
+                        threadId: props.threadId,
+                        swarmId: view.swarmId,
+                        action: "stop",
+                        keys: [member.key],
+                      })
+                    }
+                    onRetry={() =>
+                      void props.onAct({
+                        threadId: props.threadId,
+                        swarmId: view.swarmId,
+                        action: "retry",
+                        keys: [member.key],
+                      })
+                    }
+                  />
+                ))}
+              </ul>
+            </div>
+          ))}
+        </div>
       </div>
     </ThreadDetailsSection>
   );

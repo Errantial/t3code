@@ -158,3 +158,56 @@ it("returns to full density when hidden items make the content fit", async () =>
   await screen.rerender(<Card threadRef={threadB} inline fixture={fixture} rows={2} />);
   await expect.element(card).toHaveAttribute("data-density", "full");
 });
+
+// SW-A11 F-D2: a 24-member roster made the card compact, and compact hides the Swarm panel.
+it("keeps full density, and the swarm panel, with a 24-member roster at 1280×800", async () => {
+  await page.viewport(1280, 800);
+  using fixture = setup();
+  const panel = (withMarker: boolean) => (
+    <ChatCanvasContext
+      value={{
+        container,
+        lane: { padding: 48, minChatWidth: 640 },
+        layout: resolveChatCanvasLayout({ container, preview: null }),
+        previewKey: null,
+        registerTimeline: () => {},
+        measureDetailsCard: () => {},
+        detailsCardTopInset: 0,
+        preferredDetailsCard: placement,
+        detailsCardPlacement: placement,
+      }}
+    >
+      <ThreadDetailsCard
+        threadRef={threadB}
+        anchor={fixture.anchor}
+        handle={fixture.handle}
+        contentKey={String(withMarker)}
+      >
+        {(density) =>
+          density === "full" ? (
+            <section {...(withMarker ? { "data-thread-swarm-panel": "" } : {})}>
+              <h3>Swarm: Restart 24</h3>
+              <div>
+                {Array.from({ length: 24 }, (_, index) => (
+                  <p key={index} style={{ height: 40, flexShrink: 0 }}>
+                    member {index}
+                  </p>
+                ))}
+              </div>
+            </section>
+          ) : (
+            <p style={{ height: 50 }}>compact</p>
+          )
+        }
+      </ThreadDetailsCard>
+    </ChatCanvasContext>
+  );
+  await using screen = await render(panel(false));
+  const card = page.getByRole("region", { name: "Thread details" });
+  // Counted toward density, the roster forces compact and the panel is gone.
+  await expect.element(card).toHaveAttribute("data-density", "compact");
+
+  await screen.rerender(panel(true));
+  await expect.element(card).toHaveAttribute("data-density", "full");
+  await expect.element(page.getByText("Swarm: Restart 24")).toBeVisible();
+});
