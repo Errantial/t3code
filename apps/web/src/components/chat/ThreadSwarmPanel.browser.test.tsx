@@ -1,7 +1,9 @@
 import { EnvironmentId, SwarmId, ThreadId, type SwarmThreadView } from "@t3tools/contracts";
+import * as Cause from "effect/Cause";
 import { expect, it, vi } from "vite-plus/test";
 
 const state = vi.hoisted(() => ({
+  activeRunId: null as string | null,
   summary: undefined as object | undefined,
   swarms: [] as ReadonlyArray<unknown>,
   list: vi.fn(),
@@ -17,6 +19,10 @@ vi.mock(import("../../state/swarmSummaries"), async (importOriginal) => ({
 vi.mock(import("@effect/atom-react"), async (importOriginal) => ({
   ...(await importOriginal()),
   useAtomValue: ((atom: unknown) => (atom === "summary" ? state.summary : true)) as never,
+}));
+vi.mock(import("../../state/entities"), async (importOriginal) => ({
+  ...(await importOriginal()),
+  useQuietThreadShell: (() => ({ activeRunId: state.activeRunId })) as never,
 }));
 vi.mock(import("@tanstack/react-router"), async (importOriginal) => ({
   ...(await importOriginal()),
@@ -94,7 +100,7 @@ it("tries again after a failed first load", async () => {
   state.list.mockReset().mockImplementation(async () => {
     calls += 1;
     return calls === 1
-      ? { _tag: "Failure", cause: new Error("not connected") }
+      ? { _tag: "Failure", cause: Cause.fail(new Error("not connected")) }
       : { _tag: "Success", value: { swarms: state.swarms } };
   });
   await using stack = new AsyncDisposableStack();
@@ -110,4 +116,51 @@ it("tries again after a failed first load", async () => {
   });
   expect(state.list).toHaveBeenCalledTimes(2);
   expect(screen.container.textContent).toContain("Late swarm");
+});
+
+// The live-run follow-up: a swarm the architect's own run creates shows within one 10 s poll,
+// without waiting for the sidebar's 60 s poll.
+it("polls every 10 s while the architect has a live run", async () => {
+  using _timers = fakeTimers();
+  state.activeRunId = "run:architect";
+  state.summary = undefined;
+  state.swarms = [];
+  state.list.mockReset().mockImplementation(async () => ({
+    _tag: "Success",
+    value: { swarms: state.swarms },
+  }));
+  await using stack = new AsyncDisposableStack();
+  const screen = stack.use(await renderUi(null));
+  await act(
+    async () =>
+      await screen.rerender(<ThreadSwarmPanel environmentId={environmentId} threadId={threadId} />),
+  );
+  expect(state.list).toHaveBeenCalledTimes(1);
+  state.swarms = [view];
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(10_000);
+  });
+  expect(state.list).toHaveBeenCalledTimes(2);
+  expect(screen.container.textContent).toContain("Late swarm");
+  state.activeRunId = null;
+});
+
+it("does not retry a permanent refusal", async () => {
+  using _timers = fakeTimers();
+  state.activeRunId = null;
+  state.summary = undefined;
+  state.list.mockReset().mockImplementation(async () => ({
+    _tag: "Failure",
+    cause: Cause.fail({ _tag: "SwarmRpcError", reason: "disabled", message: "off" }),
+  }));
+  await using stack = new AsyncDisposableStack();
+  const screen = stack.use(await renderUi(null));
+  await act(
+    async () =>
+      await screen.rerender(<ThreadSwarmPanel environmentId={environmentId} threadId={threadId} />),
+  );
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(120_000);
+  });
+  expect(state.list).toHaveBeenCalledTimes(1);
 });

@@ -10,6 +10,7 @@ import {
   swarmMemberFlags,
   swarmMemberStatusLabel,
   swarmPanelRetryDelay,
+  swarmPanelShouldRetry,
   swarmPanelShouldPoll,
   swarmQueueReasonLabel,
   swarmStopAllMessage,
@@ -192,5 +193,15 @@ describe("swarm panel logic", () => {
     expect([1, 2, 3, 4, 5, 6, 9].map(swarmPanelRetryDelay)).toEqual([
       3_000, 6_000, 12_000, 24_000, 48_000, 60_000, 60_000,
     ]);
+  });
+
+  it("retries transport and not-connected failures, not permanent refusals", () => {
+    expect(swarmPanelShouldRetry(new Error("not connected"))).toBe(true);
+    expect(swarmPanelShouldRetry({ _tag: "EnvironmentRpcUnavailableError" })).toBe(true);
+    expect(swarmPanelShouldRetry({ _tag: "SwarmRpcError", reason: "invalid_request" })).toBe(true);
+    for (const reason of ["disabled", "unavailable", "not_found"]) {
+      expect(swarmPanelShouldRetry({ _tag: "SwarmRpcError", reason })).toBe(false);
+    }
+    expect(swarmPanelShouldRetry({ _tag: "EnvironmentAuthorizationError" })).toBe(false);
   });
 });

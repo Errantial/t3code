@@ -299,6 +299,28 @@ export function swarmStopAllMessage(counts: SwarmSummaryCounts): string {
   return `Stop this swarm? ${running} running member${running === 1 ? "" : "s"} will be stopped and ${counts.queued} queued member${counts.queued === 1 ? "" : "s"} will not start.`;
 }
 
+const PERMANENT_SWARM_RPC_REASONS: ReadonlySet<string> = new Set([
+  "disabled",
+  "unavailable",
+  "not_found",
+]);
+
+/**
+ * Whether a failed load is worth asking again: a transport failure or an environment that has
+ * not connected yet is; Swarm v2 off, no swarm service, another thread's swarm, or a refused
+ * authorization is not.
+ */
+export function swarmPanelShouldRetry(failure: unknown): boolean {
+  if (typeof failure !== "object" || failure === null || !("_tag" in failure)) return true;
+  const tag = (failure as { readonly _tag: unknown })._tag;
+  if (tag === "EnvironmentAuthorizationError") return false;
+  if (tag === "SwarmRpcError") {
+    const reason = (failure as { readonly reason?: unknown }).reason;
+    return !(typeof reason === "string" && PERMANENT_SWARM_RPC_REASONS.has(reason));
+  }
+  return true;
+}
+
 /** How long the panel waits before asking again after a failed load: 3 s doubling to 60 s. */
 export function swarmPanelRetryDelay(failures: number): number {
   return Math.min(60_000, 3_000 * 2 ** Math.max(0, failures - 1));

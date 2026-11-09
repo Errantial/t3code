@@ -13,6 +13,7 @@ import { squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime"
 import { useEffect, useState } from "react";
 
 import { cn } from "../../lib/utils";
+import { useQuietThreadShell } from "../../state/entities";
 import { readEnvironmentScope } from "../../state/session";
 import { swarmActCommand, swarmListForThreadCommand } from "../../state/swarm";
 import { swarmSummaryAtom, swarmSummaryKey } from "../../state/swarmSummaries";
@@ -33,6 +34,7 @@ import {
   swarmMemberFlags,
   swarmMemberStatusLabel,
   swarmPanelRetryDelay,
+  swarmPanelShouldRetry,
   swarmPanelShouldPoll,
   swarmQueueReasonLabel,
   type SwarmStatusFilter,
@@ -43,6 +45,8 @@ import {
 } from "./threadSwarmPanel.logic";
 
 const POLL_MS = 3_000;
+/** How often the panel looks for a new swarm while its architect thread has a live run. */
+const ARCHITECT_RUN_POLL_MS = 10_000;
 
 const STATUS_FILTERS: ReadonlyArray<{ readonly id: SwarmStatusFilter; readonly label: string }> = [
   { id: "all", label: "All" },
@@ -69,6 +73,10 @@ export function ThreadSwarmPanel(props: {
   readonly threadId: ThreadId;
 }) {
   const enabled = useAtomValue(swarmV2EnabledAtom(props.environmentId));
+  // While the architect runs it may start a swarm: poll faster, and reload when the run ends.
+  const architectRunning =
+    useQuietThreadShell({ environmentId: props.environmentId, threadId: props.threadId })
+      ?.activeRunId != null;
   // The sidebar's poll sees a swarm that starts while this panel is open; reload then.
   const hasActiveSwarm =
     useAtomValue(swarmSummaryAtom(swarmSummaryKey(props.environmentId, props.threadId))) !==
@@ -96,7 +104,9 @@ export function ThreadSwarmPanel(props: {
       });
       if (cancelled) return;
       if (result._tag !== "Success") {
-        // A page opened on the thread asks before its environment connects; try again, backing off.
+        // A page opened on the thread asks before its environment connects; try again, backing
+        // off. A permanent refusal (Swarm v2 off, not this thread's swarm) is not retried.
+        if (!swarmPanelShouldRetry(squashAtomCommandFailure(result))) return;
         failures += 1;
         timer = setTimeout(() => void load(), swarmPanelRetryDelay(failures));
         return;
@@ -106,13 +116,21 @@ export function ThreadSwarmPanel(props: {
       setViews(next);
       setNowMs(Date.now());
       if (swarmPanelShouldPoll(next)) timer = setTimeout(() => void load(), POLL_MS);
+      else if (architectRunning) timer = setTimeout(() => void load(), ARCHITECT_RUN_POLL_MS);
     };
     void load();
     return () => {
       cancelled = true;
       if (timer !== undefined) clearTimeout(timer);
     };
-  }, [enabled, props.environmentId, props.threadId, refreshToken, hasActiveSwarm]);
+  }, [
+    enabled,
+    props.environmentId,
+    props.threadId,
+    refreshToken,
+    hasActiveSwarm,
+    architectRunning,
+  ]);
 
   if (!enabled || views.length === 0) return null;
   const canOperate = readEnvironmentScope(props.environmentId, AuthOrchestrationOperateScope);
