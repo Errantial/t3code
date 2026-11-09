@@ -15,6 +15,7 @@ import { useEffect, useState } from "react";
 import { cn } from "../../lib/utils";
 import { readEnvironmentScope } from "../../state/session";
 import { swarmActCommand, swarmListForThreadCommand } from "../../state/swarm";
+import { swarmSummaryAtom, swarmSummaryKey } from "../../state/swarmSummaries";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { buildThreadRouteParams } from "../../threadRoutes";
 import { Button } from "../ui/button";
@@ -67,6 +68,10 @@ export function ThreadSwarmPanel(props: {
   readonly threadId: ThreadId;
 }) {
   const enabled = useAtomValue(swarmV2EnabledAtom(props.environmentId));
+  // The sidebar's poll sees a swarm that starts while this panel is open; reload then.
+  const hasActiveSwarm =
+    useAtomValue(swarmSummaryAtom(swarmSummaryKey(props.environmentId, props.threadId))) !==
+    undefined;
   const listCommand = useAtomCommand(swarmListForThreadCommand, { reportFailure: false });
   const actCommand = useAtomCommand(swarmActCommand, { reportFailure: false });
   const navigate = useNavigate();
@@ -98,7 +103,7 @@ export function ThreadSwarmPanel(props: {
       cancelled = true;
       if (timer !== undefined) clearTimeout(timer);
     };
-  }, [enabled, props.environmentId, props.threadId, refreshToken]);
+  }, [enabled, props.environmentId, props.threadId, refreshToken, hasActiveSwarm]);
 
   if (!enabled || views.length === 0) return null;
   const canOperate = readEnvironmentScope(props.environmentId, AuthOrchestrationOperateScope);
