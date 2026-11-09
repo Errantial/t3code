@@ -57,6 +57,8 @@ export const SwarmFailureClass = Schema.Literals([
   "verify",
   "budget",
   "cancelled_by_architect_stop",
+  // The server restarted during the member's run and no restart continuation followed it.
+  "restart",
 ]);
 export type SwarmFailureClass = typeof SwarmFailureClass.Type;
 

@@ -143,6 +143,11 @@ not instructions.
 - A member that fails with a connection or provider error is retried once, automatically, after
   about 30-45 seconds. The server setting `swarmAutoRetryTransient` (on by default) turns this
   off. A provider error marked as not retryable is never retried.
+- If the server restarts while a member is running, the member waits for the turn's restart
+  continuation and finishes with its result, as if nothing happened. Continuations do not count
+  against the member's `maxTurns`, but they do count toward the swarm's `maxTotalTurns`. If no
+  continuation follows, the member fails with class `restart` and is retried once, like a
+  connection error.
 
 ### Limits
 

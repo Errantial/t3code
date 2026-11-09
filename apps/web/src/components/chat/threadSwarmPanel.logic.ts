@@ -171,6 +171,7 @@ const FAILURE_LABELS: Readonly<Record<string, string>> = {
   verify: "failed its check",
   budget: "stopped by its budget",
   cancelled_by_architect_stop: "stopped by your Stop",
+  restart: "cut by a server restart",
 };
 
 export function swarmMemberStatusLabel(member: SwarmMemberView): string {

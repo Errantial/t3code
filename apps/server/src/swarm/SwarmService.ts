@@ -67,7 +67,7 @@ import {
   resolveRuntimeMode,
   taskPrompt,
 } from "../mcp/delegatedTaskModes.ts";
-import type * as Orchestrator from "../orchestration-v2/Orchestrator.ts";
+import * as Orchestrator from "../orchestration-v2/Orchestrator.ts";
 import * as ThreadLaunchService from "../orchestration-v2/ThreadLaunchService.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
 import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
@@ -331,6 +331,17 @@ const TRANSIENT_FAILURE_CLASSES: ReadonlyArray<SwarmFailureClass> = [
   "transport_error",
   "provider_error",
 ];
+/** Retried once automatically: the transient classes, and a run a restart cut with no continuation. */
+const AUTO_RETRY_CLASSES: ReadonlyArray<SwarmFailureClass> = [
+  ...TRANSIENT_FAILURE_CLASSES,
+  "restart",
+];
+/** Runs that continue an earlier run's turn: a restart continuation or a usage-limit resume. */
+const isContinuationRun = (run: OrchestrationV2Run) =>
+  run.restartContinuationOfRunId !== undefined || run.userMessageId.startsWith("limit-resume:");
+/** A member's own turns, for its `maxTurns`; continuations still count toward `maxTotalTurns`. */
+const memberTurns = (runs: ReadonlyArray<OrchestrationV2Run>) =>
+  runs.filter((run) => !isContinuationRun(run)).length;
 /**
  * Classes that count toward an instance being down: three within 60 s pause it (two for the
  * transient ones). Not verify, budget, or a Stop, which say nothing of the instance; a usage
@@ -423,6 +434,9 @@ const utf8 = new TextEncoder();
 const make = Effect.gen(function* () {
   const store = yield* SwarmStore.SwarmStore;
   const threads = yield* ThreadManagementService.ThreadManagementService;
+  const orchestrator = yield* Orchestrator.OrchestratorV2;
+  // A run that started before this process and ended after it began was cut by the restart.
+  const startedAtMs = DateTime.toEpochMillis(yield* DateTime.now);
   const threadLaunch = yield* ThreadLaunchService.ThreadLaunchService;
   const settingsService = yield* ServerSettings.ServerSettingsService;
   const providerRegistry = yield* ProviderRegistry.ProviderRegistry;
@@ -825,8 +839,8 @@ const make = Effect.gen(function* () {
 
   /**
    * The run the member's current attempt is bound to (rev 2.1): the admission run, then the run
-   * each verify retry or follow-up message started, followed through usage-limit continuations.
-   * Any other run on the member thread is the user's or a restart's and never ends the attempt.
+   * each verify retry or follow-up message started, followed through usage-limit and restart
+   * continuations. Any other run on the member thread is the user's and never ends the attempt.
    */
   const boundRunOf = (
     member: SwarmStore.SwarmMemberRecord,
@@ -840,8 +854,10 @@ const make = Effect.gen(function* () {
         : (runs.find((run) => run.userMessageId === pending)?.id ?? null));
     if (boundId === null) return undefined;
     for (;;) {
-      const continuation = runs.find((run) =>
-        run.userMessageId.startsWith(`limit-resume:${run.threadId}:${boundId}:`),
+      const continuation = runs.find(
+        (run) =>
+          run.userMessageId.startsWith(`limit-resume:${run.threadId}:${boundId}:`) ||
+          run.restartContinuationOfRunId === boundId,
       );
       if (continuation === undefined) break;
       boundId = continuation.id;
@@ -1081,7 +1097,7 @@ const make = Effect.gen(function* () {
     const outOfTurns =
       swarm.value.budgetExhausted ||
       (spec.maxTurns !== undefined &&
-        (yield* childRecords(member.childThreadId)).runs.length >= spec.maxTurns);
+        memberTurns((yield* childRecords(member.childThreadId)).runs) >= spec.maxTurns);
     const retrying = retry && swarm.value.status === "active" && !outOfTurns;
     const status = verify.passed ? "verified" : retrying ? "running" : "failed";
     const envelope = yield* buildEnvelope({
@@ -1381,10 +1397,16 @@ const make = Effect.gen(function* () {
     >;
     readonly run: OrchestrationV2Run;
     readonly settings: ServerSettingsValue;
+    /** Set when the class is the swarm's own reading of the run, not a provider failure. */
+    readonly failureClass?: SwarmFailureClass;
   }) {
     const { swarm, member, child, run, settings } = input;
-    const providerFailure = latestRootProviderFailure(run, child.turnItems);
-    const failureClass: SwarmFailureClass = providerFailure?.class ?? "unknown";
+    const providerFailure =
+      input.failureClass === undefined
+        ? latestRootProviderFailure(run, child.turnItems)
+        : undefined;
+    const failureClass: SwarmFailureClass =
+      input.failureClass ?? providerFailure?.class ?? "unknown";
     const nowDt = yield* DateTime.now;
     const now = DateTime.formatIso(nowDt);
     const instanceId = member.providerInstanceId;
@@ -1428,10 +1450,15 @@ const make = Effect.gen(function* () {
       testPathGlobs: settings.swarmTestPathGlobs,
       failure: {
         class: failureClass,
-        message: (providerFailure?.message ?? "The member's run failed.").slice(0, 1_000),
+        message: (
+          providerFailure?.message ??
+          (failureClass === "restart"
+            ? "The server restarted during the member's run, and no continuation followed it."
+            : "The member's run failed.")
+        ).slice(0, 1_000),
       },
     });
-    const transient = TRANSIENT_FAILURE_CLASSES.includes(failureClass);
+    const transient = AUTO_RETRY_CLASSES.includes(failureClass);
     const retry =
       transient &&
       settings.swarmAutoRetryTransient &&
@@ -1498,6 +1525,13 @@ const make = Effect.gen(function* () {
       );
     }
   });
+
+  /** A run that started before this server process and ended after it began. */
+  const cutByRestart = (run: OrchestrationV2Run) =>
+    run.startedAt !== null &&
+    run.completedAt !== null &&
+    DateTime.toEpochMillis(run.startedAt) < startedAtMs &&
+    DateTime.toEpochMillis(run.completedAt) >= startedAtMs;
 
   /**
    * The member terminal path (SW-A5 envelopes, SW-A6 verify; SW-A8 real failure classes): when
@@ -1653,6 +1687,14 @@ const make = Effect.gen(function* () {
       });
     }
     if (run.status === "failed") return yield* failMember({ swarm, member, child, run, settings });
+    if (run.status === "cancelled" || run.status === "interrupted") {
+      // A restart cut the run: wait for its continuation, which the bound run follows; only when
+      // none is pending or ever started does the member fail as `restart`, retried once.
+      if (yield* orchestrator.restartContinuationPending(run)) return;
+      if (cutByRestart(run)) {
+        return yield* failMember({ swarm, member, child, run, settings, failureClass: "restart" });
+      }
+    }
     const ended: FinalMemberStatus | undefined =
       run.status === "completed"
         ? "claimed_done"
@@ -3143,7 +3185,10 @@ const make = Effect.gen(function* () {
     for (const member of members) {
       if (member.childThreadId === null || isFinalMemberStatus(member.status)) continue;
       const spec = parseSpec(member.specJson);
-      const turns = member.turnsUsed - (spec.priorTurns ?? 0);
+      const turns =
+        spec.maxTurns === undefined
+          ? 0
+          : memberTurns((yield* childRecords(member.childThreadId)).runs);
       const start = spec.followupStartedAt ?? member.startedAt;
       const limit =
         spec.maxTurns !== undefined && turns > spec.maxTurns
@@ -3588,7 +3633,7 @@ const make = Effect.gen(function* () {
             return yield* failure("invalid_request", `Member '${input.key}' never started.`);
           }
           if (spec.maxTurns !== undefined) {
-            const runs = (yield* childRecords(row.childThreadId)).runs.length;
+            const runs = memberTurns((yield* childRecords(row.childThreadId)).runs);
             if (runs >= spec.maxTurns) {
               return yield* failure(
                 "invalid_request",

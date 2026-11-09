@@ -72,6 +72,7 @@ describe("swarm contracts", () => {
           "verify",
           "budget",
           "cancelled_by_architect_stop",
+          "restart",
         ],
       ],
       [SwarmPauseClass, ["usage_limit", "instance_down"]],

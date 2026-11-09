@@ -297,8 +297,10 @@ const startRun = (input: {
 const endRun = (input: {
   readonly threadId: ThreadId;
   readonly runId: RunId;
-  readonly status?: "completed" | "failed" | "interrupted";
+  readonly status?: "completed" | "failed" | "interrupted" | "cancelled";
   readonly text?: string;
+  /** When the run started, for a run cut by a server restart. */
+  readonly startedAt?: DateTime.Utc;
 }) =>
   Effect.gen(function* () {
     const sink = yield* EventSink.EventSinkV2;
@@ -343,7 +345,7 @@ const endRun = (input: {
           payload: {
             ...run,
             status: input.status ?? "completed",
-            startedAt: run.startedAt ?? now,
+            startedAt: input.startedAt ?? run.startedAt ?? now,
             completedAt: now,
           },
         },
@@ -1523,7 +1525,11 @@ const layerSwarmStubs = Layer.mergeAll(
 /** A second SwarmService over the same store: a server restart, with no in-memory state. */
 const restartedSwarms = Effect.gen(function* () {
   const context = yield* Layer.build(
-    SwarmService.layer.pipe(Layer.provide(layerSwarmStubs), Layer.provide(layerFailingStops)),
+    // Fresh: the suite's memo map would otherwise hand back the running service.
+    Layer.fresh(SwarmService.layer).pipe(
+      Layer.provide(layerSwarmStubs),
+      Layer.provide(layerFailingStops),
+    ),
   );
   return Context.get(context, SwarmService.SwarmService);
 });
@@ -5863,6 +5869,142 @@ it.layer(layerSwarm)("qualification (SW-A11)", (it) => {
         yield* retire(result.swarmId);
       }),
     ),
+  );
+
+  it.effect("restart: a cut member follows its restart continuation to claimed_done", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        const sink = yield* EventSink.EventSinkV2;
+        yield* atHour(23);
+        const { threadId, anchor } = yield* seedArchitect("a11-restart-continuation");
+        const result = yield* createSwarm(threadId, {
+          members: members(1, { interactionMode: "plan", maxTurns: 1 }),
+        });
+        yield* endRun({ threadId, runId: anchor.id });
+        const [m0] = yield* rows(result.swarmId);
+        const startedAt = yield* DateTime.now;
+        // The server is killed mid-run and comes back a minute later.
+        yield* TestClock.adjust(Duration.minutes(1));
+        const restarted = yield* restartedSwarms;
+        const commandId = CommandId.make(`command:restart-prepare:${m0!.childRunId}`);
+        yield* sink.writeWithEffects({
+          commandId,
+          events: [],
+          effects: [
+            {
+              id: `effect:restart-continuation:${m0!.childRunId}`,
+              commandId,
+              threadId: m0!.childThreadId!,
+              request: { type: "provider-runtime.continue", sourceRunId: m0!.childRunId! },
+            },
+          ],
+        });
+        yield* endRun({
+          threadId: m0!.childThreadId!,
+          runId: m0!.childRunId!,
+          status: "cancelled",
+          startedAt,
+        });
+        yield* restarted.tick;
+        const waiting = (yield* rows(result.swarmId))[0]!;
+        assert.isFalse(
+          ["cancelled", "failed", "claimed_done"].includes(waiting.status),
+          "it waits for the pending continuation",
+        );
+
+        // The continuation runs on the member's thread and completes the turn.
+        const child = yield* orchestrator.getThreadProjection(m0!.childThreadId!);
+        yield* orchestrator.dispatch({
+          type: "message.dispatch",
+          commandId: CommandId.make(`command:restart-continuation:${m0!.childRunId}`),
+          threadId: m0!.childThreadId!,
+          messageId: MessageId.make(`message:restart-continuation:${m0!.childRunId}`),
+          text: "Continue.",
+          attachments: [],
+          modelSelection: child.thread.modelSelection,
+          dispatchMode: { type: "start_immediately" },
+          createdBy: "agent",
+          creationSource: "server",
+          restartContinuationOfRunId: m0!.childRunId!,
+        } as OrchestrationV2Command);
+        const continuation = (yield* orchestrator.getThreadProjection(
+          m0!.childThreadId!,
+        )).runs.find((run) => run.restartContinuationOfRunId === m0!.childRunId);
+        assert.isDefined(continuation);
+        yield* restarted.tick;
+        assert.notInclude(
+          ["cancelled", "failed"],
+          (yield* rows(result.swarmId))[0]!.status,
+          "the continuation is its turn, not one past maxTurns",
+        );
+        yield* endRun({
+          threadId: m0!.childThreadId!,
+          runId: continuation!.id,
+          text: resultText({ summary: "finished by the continuation" }),
+        });
+        yield* restarted.tick;
+        const done = (yield* rows(result.swarmId))[0]!;
+        assert.equal(done.status, "claimed_done");
+        assert.equal(done.attempt, 1, "no retry");
+        assert.equal(done.boundRunId, continuation!.id);
+        assert.equal(done.turnsUsed, 2, "both runs count toward the swarm's turns");
+        assert.include(done.envelopeJson ?? "", "finished by the continuation");
+        yield* resetHealth;
+        yield* retire(result.swarmId);
+      }),
+    ),
+  );
+
+  it.effect("restart: a cut member with no continuation fails as restart and retries once", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        yield* atHour(22);
+        const { threadId, anchor } = yield* seedArchitect("a11-restart-no-continuation");
+        const result = yield* createSwarm(threadId, {
+          members: members(1, { interactionMode: "plan" }),
+        });
+        yield* endRun({ threadId, runId: anchor.id });
+        const [m0] = yield* rows(result.swarmId);
+        const startedAt = yield* DateTime.now;
+        yield* TestClock.adjust(Duration.minutes(1));
+        const restarted = yield* restartedSwarms;
+        yield* endRun({
+          threadId: m0!.childThreadId!,
+          runId: m0!.childRunId!,
+          status: "cancelled",
+          startedAt,
+        });
+        yield* restarted.tick;
+        const row = (yield* rows(result.swarmId))[0]!;
+        assert.equal(row.lastFailureClass, "restart");
+        assert.equal(row.status, "queued", "requeued for its one automatic retry");
+        assert.equal(row.attempt, 2);
+        assert.isTrue(row.queueReason?.startsWith("retry_after:"));
+        yield* resetHealth;
+        yield* retire(result.swarmId);
+      }),
+    ),
+  );
+
+  it.effect("a member run the user cancels while the server runs still ends cancelled", () =>
+    Effect.gen(function* () {
+      const swarms = yield* SwarmService.SwarmService;
+      yield* atHour(21);
+      const { threadId, anchor } = yield* seedArchitect("a11-user-cancel");
+      const result = yield* createSwarm(threadId, {
+        members: members(1, { interactionMode: "plan" }),
+      });
+      yield* endRun({ threadId, runId: anchor.id });
+      const [m0] = yield* rows(result.swarmId);
+      yield* TestClock.adjust(Duration.seconds(5));
+      yield* endRun({ threadId: m0!.childThreadId!, runId: m0!.childRunId!, status: "cancelled" });
+      yield* swarms.tick;
+      const row = (yield* rows(result.swarmId))[0]!;
+      assert.equal(row.status, "cancelled");
+      assert.isNull(row.failureClass);
+      yield* retire(result.swarmId);
+    }),
   );
 
   it.effect("restart: a superseded task still pending is disposed once and never wakes", () =>
