@@ -35,7 +35,7 @@ vi.mock(import("../../state/use-atom-command"), async (importOriginal) => {
   };
 });
 
-import { act, render as renderUi } from "../../../test/render";
+import { act, fakeTimers, render as renderUi } from "../../../test/render";
 import { ThreadSwarmPanel } from "./ThreadSwarmPanel";
 
 const environmentId = EnvironmentId.make("local");
@@ -82,4 +82,32 @@ it("loads again when the sidebar's poll finds a swarm for this thread", async ()
   await renderPanel();
   await vi.waitFor(() => expect(screen.container.textContent).toContain("Late swarm"));
   expect(state.list).toHaveBeenCalledTimes(2);
+});
+
+// SW-A11 live run: a page opened on the architect thread asked before its environment connected,
+// got a failure, and never asked again, so a finished swarm's panel never appeared.
+it("tries again after a failed first load", async () => {
+  using _timers = fakeTimers();
+  state.summary = undefined;
+  state.swarms = [{ ...view, status: "completed" }];
+  let calls = 0;
+  state.list.mockReset().mockImplementation(async () => {
+    calls += 1;
+    return calls === 1
+      ? { _tag: "Failure", cause: new Error("not connected") }
+      : { _tag: "Success", value: { swarms: state.swarms } };
+  });
+  await using stack = new AsyncDisposableStack();
+  const screen = stack.use(await renderUi(null));
+  await act(
+    async () =>
+      await screen.rerender(<ThreadSwarmPanel environmentId={environmentId} threadId={threadId} />),
+  );
+  expect(state.list).toHaveBeenCalledTimes(1);
+  expect(screen.container.textContent).not.toContain("Late swarm");
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(3_000);
+  });
+  expect(state.list).toHaveBeenCalledTimes(2);
+  expect(screen.container.textContent).toContain("Late swarm");
 });

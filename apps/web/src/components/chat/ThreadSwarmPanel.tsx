@@ -32,6 +32,7 @@ import {
   swarmInstanceBadge,
   swarmMemberFlags,
   swarmMemberStatusLabel,
+  swarmPanelRetryDelay,
   swarmPanelShouldPoll,
   swarmQueueReasonLabel,
   type SwarmStatusFilter,
@@ -86,6 +87,7 @@ export function ThreadSwarmPanel(props: {
     if (!enabled) return;
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
+    let failures = 0;
     const load = async () => {
       // oxlint-disable-next-line react/exhaustive-effect-dependencies -- the command is stable; the thread and refresh token select what to load.
       const result = await listCommand({
@@ -93,7 +95,14 @@ export function ThreadSwarmPanel(props: {
         threadId: props.threadId,
       });
       if (cancelled) return;
-      const next = result._tag === "Success" ? result.value.swarms : [];
+      if (result._tag !== "Success") {
+        // A page opened on the thread asks before its environment connects; try again, backing off.
+        failures += 1;
+        timer = setTimeout(() => void load(), swarmPanelRetryDelay(failures));
+        return;
+      }
+      failures = 0;
+      const next = result.value.swarms;
       setViews(next);
       setNowMs(Date.now());
       if (swarmPanelShouldPoll(next)) timer = setTimeout(() => void load(), POLL_MS);

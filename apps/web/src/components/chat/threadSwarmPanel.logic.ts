@@ -298,6 +298,11 @@ export function swarmStopAllMessage(counts: SwarmSummaryCounts): string {
   return `Stop this swarm? ${running} running member${running === 1 ? "" : "s"} will be stopped and ${counts.queued} queued member${counts.queued === 1 ? "" : "s"} will not start.`;
 }
 
+/** How long the panel waits before asking again after a failed load: 3 s doubling to 60 s. */
+export function swarmPanelRetryDelay(failures: number): number {
+  return Math.min(60_000, 3_000 * 2 ** Math.max(0, failures - 1));
+}
+
 /** Whether the panel keeps polling: while a swarm is active. */
 export function swarmPanelShouldPoll(views: ReadonlyArray<SwarmThreadView>): boolean {
   return views.some((view) => view.status === "active");

@@ -9,6 +9,7 @@ import {
   swarmInstanceBadge,
   swarmMemberFlags,
   swarmMemberStatusLabel,
+  swarmPanelRetryDelay,
   swarmPanelShouldPoll,
   swarmQueueReasonLabel,
   swarmStopAllMessage,
@@ -185,5 +186,11 @@ describe("swarm panel logic", () => {
     ).toBe("Stop this swarm? 1 running member will be stopped and 1 queued member will not start.");
     expect(swarmPanelShouldPoll([{ status: "completed" } as SwarmThreadView])).toBe(false);
     expect(swarmPanelShouldPoll([{ status: "active" } as SwarmThreadView])).toBe(true);
+  });
+
+  it("backs off a failed load from 3 s to at most 60 s", () => {
+    expect([1, 2, 3, 4, 5, 6, 9].map(swarmPanelRetryDelay)).toEqual([
+      3_000, 6_000, 12_000, 24_000, 48_000, 60_000, 60_000,
+    ]);
   });
 });
