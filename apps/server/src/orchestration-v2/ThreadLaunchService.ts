@@ -201,6 +201,13 @@ function failureDetail(error: unknown): string {
   return `Workspace preparation failed: ${error instanceof Error ? error.message : String(error)}`;
 }
 
+/** A branch rename that failed because the generated name is taken. */
+export const isBranchAlreadyExists = (error: unknown): boolean =>
+  typeof error === "object" &&
+  error !== null &&
+  (error as { readonly _tag?: unknown })._tag === "GitCommandError" &&
+  (error as { readonly reason?: unknown }).reason === "branch_already_exists";
+
 const make = Effect.gen(function* () {
   const projects = yield* ProjectService.ProjectService;
   const setupTracker = yield* WorktreeSetupTracker.WorktreeSetupTracker;
@@ -547,8 +554,9 @@ const make = Effect.gen(function* () {
           ),
           Effect.catchCause((cause) =>
             // Swarm members of one map share a task text, so their branch names often collide;
-            // the member keeps its temporary branch and runs normally.
-            (String(input.commandId).startsWith("swarm-admit:")
+            // the member keeps its temporary branch and runs normally. Other failures still warn.
+            (String(input.commandId).startsWith("swarm-admit:") &&
+              isBranchAlreadyExists(Cause.squash(cause))
               ? Effect.logDebug
               : Effect.logWarning)("Thread worktree branch rename failed", {
               commandId: input.commandId,

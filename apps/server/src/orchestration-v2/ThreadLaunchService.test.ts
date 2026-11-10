@@ -2290,3 +2290,19 @@ it.effect("replays an accepted send after the project disables the instance", ()
     }
   }).pipe(Effect.provide(Layer.mergeAll(harness.layer, layerFiles)));
 });
+
+// F-D5: only a taken branch name is a swarm member's expected rename collision.
+it("recognizes a branch rename that failed because the name is taken", () => {
+  const failure = (reason?: "branch_already_exists" | "not_a_repository") =>
+    new GitCommandError({
+      operation: "GitVcsDriver.renameBranch",
+      command: "git branch -m",
+      cwd: "/repo",
+      detail: "git branch rename failed",
+      ...(reason === undefined ? {} : { reason }),
+    });
+  assert.isTrue(ThreadLaunch.isBranchAlreadyExists(failure("branch_already_exists")));
+  assert.isFalse(ThreadLaunch.isBranchAlreadyExists(failure("not_a_repository")));
+  assert.isFalse(ThreadLaunch.isBranchAlreadyExists(failure()));
+  assert.isFalse(ThreadLaunch.isBranchAlreadyExists(new Error("branch_already_exists")));
+});
