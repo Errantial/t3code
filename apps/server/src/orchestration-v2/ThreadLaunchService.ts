@@ -546,7 +546,11 @@ const make = Effect.gen(function* () {
             }),
           ),
           Effect.catchCause((cause) =>
-            Effect.logWarning("Thread worktree branch rename failed", {
+            // Swarm members of one map share a task text, so their branch names often collide;
+            // the member keeps its temporary branch and runs normally.
+            (String(input.commandId).startsWith("swarm-admit:")
+              ? Effect.logDebug
+              : Effect.logWarning)("Thread worktree branch rename failed", {
               commandId: input.commandId,
               threadId,
               oldBranch,
