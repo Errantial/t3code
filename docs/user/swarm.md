@@ -220,3 +220,7 @@ shows "Swarm · N running · M queued · K failed". Without Swarm v2, neither ap
   the thread. T3 asks before you cancel such a wake.
 - **Other interrupts leave the swarm running.** This covers `/goal`, a skipped compaction, and an
   agent interrupting another thread. Only Stop cancels a swarm.
+
+Detach happens only when you cancel a queued swarm wake. Some providers, such as OpenCode,
+deliver results into the agent's running turn, so no queued wake appears; use Stop or the
+panel's **Stop all** instead.
