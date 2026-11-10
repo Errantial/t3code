@@ -203,5 +203,9 @@ describe("swarm panel logic", () => {
       expect(swarmPanelShouldRetry({ _tag: "SwarmRpcError", reason })).toBe(false);
     }
     expect(swarmPanelShouldRetry({ _tag: "EnvironmentAuthorizationError" })).toBe(false);
+    // A server without the RPC: permanent.
+    expect(swarmPanelShouldRetry(new Error("Unknown request tag: swarm.listForThread"))).toBe(
+      false,
+    );
   });
 });

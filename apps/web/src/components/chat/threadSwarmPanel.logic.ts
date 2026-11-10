@@ -1,3 +1,4 @@
+import { isUnknownMethodFailure } from "../../state/swarmSummaries";
 import type { SwarmMemberView, SwarmThreadView } from "@t3tools/contracts";
 
 // Swarm v2 panel (SW-A10): pure helpers for the roster of up to 48 members. Labels are the
@@ -311,6 +312,8 @@ const PERMANENT_SWARM_RPC_REASONS: ReadonlySet<string> = new Set([
  * authorization is not.
  */
 export function swarmPanelShouldRetry(failure: unknown): boolean {
+  // A server older than the RPC rejects it as an unknown request; it never will answer.
+  if (isUnknownMethodFailure(failure)) return false;
   if (typeof failure !== "object" || failure === null || !("_tag" in failure)) return true;
   const tag = (failure as { readonly _tag: unknown })._tag;
   if (tag === "EnvironmentAuthorizationError") return false;
