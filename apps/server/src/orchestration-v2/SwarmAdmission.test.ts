@@ -5987,6 +5987,75 @@ it.layer(layerSwarm)("qualification (SW-A11)", (it) => {
     ),
   );
 
+  it.effect("restart: a run the user stops just after a restart still ends cancelled", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        yield* atHour(20);
+        const { threadId, anchor } = yield* seedArchitect("a11-restart-user-stop");
+        const result = yield* createSwarm(threadId, {
+          members: members(1, { interactionMode: "plan" }),
+        });
+        yield* endRun({ threadId, runId: anchor.id });
+        const [m0] = yield* rows(result.swarmId);
+        const startedAt = yield* DateTime.now;
+        yield* TestClock.adjust(Duration.minutes(1));
+        const restarted = yield* restartedSwarms;
+        // The user stops the member's thread right after the server comes back.
+        yield* orchestrator.dispatch({
+          type: "thread.stop",
+          commandId: CommandId.make("command:a11-restart-user-stop"),
+          threadId: m0!.childThreadId!,
+        });
+        yield* endRun({
+          threadId: m0!.childThreadId!,
+          runId: m0!.childRunId!,
+          status: "cancelled",
+          startedAt,
+        });
+        yield* restarted.tick;
+        const row = (yield* rows(result.swarmId))[0]!;
+        assert.equal(row.status, "cancelled");
+        assert.isNull(row.failureClass);
+        assert.equal(row.attempt, 1, "not retried");
+        yield* resetHealth;
+        yield* retire(result.swarmId);
+      }),
+    ),
+  );
+
+  it.effect("restart: a cut run that already wrote its result is kept, not redone", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        yield* atHour(19);
+        const { threadId, anchor } = yield* seedArchitect("a11-restart-finished");
+        const result = yield* createSwarm(threadId, {
+          members: members(1, { interactionMode: "plan" }),
+        });
+        yield* endRun({ threadId, runId: anchor.id });
+        const [m0] = yield* rows(result.swarmId);
+        const startedAt = yield* DateTime.now;
+        yield* TestClock.adjust(Duration.minutes(1));
+        const restarted = yield* restartedSwarms;
+        yield* endRun({
+          threadId: m0!.childThreadId!,
+          runId: m0!.childRunId!,
+          status: "cancelled",
+          startedAt,
+          text: resultText({ summary: "written before the restart" }),
+        });
+        yield* restarted.tick;
+        const row = (yield* rows(result.swarmId))[0]!;
+        assert.equal(row.status, "claimed_done");
+        assert.equal(row.attempt, 1);
+        assert.isNull(row.lastFailureClass);
+        assert.include(row.envelopeJson ?? "", "written before the restart");
+        yield* resetHealth;
+        yield* retire(result.swarmId);
+      }),
+    ),
+  );
+
   it.effect("a member run the user cancels while the server runs still ends cancelled", () =>
     Effect.gen(function* () {
       const swarms = yield* SwarmService.SwarmService;

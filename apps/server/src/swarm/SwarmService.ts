@@ -8,6 +8,7 @@ import {
   type OrchestrationV2Command,
   type OrchestratorMcpSwarmCapacity,
   type OrchestrationV2Run,
+  type OrchestrationV2TurnItem,
   type ProviderInteractionMode,
   type RuntimeMode,
   type OrchestrationV2ThreadProjection,
@@ -437,6 +438,8 @@ const make = Effect.gen(function* () {
   const orchestrator = yield* Orchestrator.OrchestratorV2;
   // A run that started before this process and ended after it began was cut by the restart.
   const startedAtMs = DateTime.toEpochMillis(yield* DateTime.now);
+  // A member's own turns (continuations excluded), counted by reconcile for enforceLimits.
+  const memberTurnCounts = new Map<string, number>();
   const threadLaunch = yield* ThreadLaunchService.ThreadLaunchService;
   const settingsService = yield* ServerSettings.ServerSettingsService;
   const providerRegistry = yield* ProviderRegistry.ProviderRegistry;
@@ -719,7 +722,7 @@ const make = Effect.gen(function* () {
   const childRecords = (threadId: ThreadId) =>
     threads
       .getThreadRecords(threadId, ["runs", "messages", "turnItems"], {
-        turnItemTypes: ["assistant_message", "error"],
+        turnItemTypes: ["assistant_message", "error", "run_interrupt_request"],
         messageRoles: ["assistant"],
       })
       .pipe(
@@ -1526,12 +1529,19 @@ const make = Effect.gen(function* () {
     }
   });
 
-  /** A run that started before this server process and ended after it began. */
-  const cutByRestart = (run: OrchestrationV2Run) =>
+  /**
+   * A run that started before this server process, ended after it began, and was not stopped by
+   * a user: a Stop writes a `run_interrupt_request` item, which restart recovery does not.
+   */
+  const cutByRestart = (
+    run: OrchestrationV2Run,
+    turnItems: ReadonlyArray<OrchestrationV2TurnItem>,
+  ) =>
     run.startedAt !== null &&
     run.completedAt !== null &&
     DateTime.toEpochMillis(run.startedAt) < startedAtMs &&
-    DateTime.toEpochMillis(run.completedAt) >= startedAtMs;
+    DateTime.toEpochMillis(run.completedAt) >= startedAtMs &&
+    !turnItems.some((item) => item.type === "run_interrupt_request" && item.runId === run.id);
 
   /**
    * The member terminal path (SW-A5 envelopes, SW-A6 verify; SW-A8 real failure classes): when
@@ -1548,6 +1558,7 @@ const make = Effect.gen(function* () {
     // Every run on the thread of an unfinished member counts (rev 2.1, SW-A9), on top of the
     // turns of its earlier attempts.
     const turnsUsed = (parseSpec(member.specJson).priorTurns ?? 0) + child.runs.length;
+    memberTurnCounts.set(memberRef(member), memberTurns(child.runs));
     if (member.status !== "detached" && turnsUsed !== member.turnsUsed) {
       yield* store.updateMember({
         swarmId: swarm.swarmId,
@@ -1664,7 +1675,28 @@ const make = Effect.gen(function* () {
       return;
     }
     const spec = parseSpec(member.specJson);
-    if (run.status === "completed" && spec.verifyArgv !== undefined) {
+    let finishedBeforeCut = false;
+    if (run.status === "cancelled" || run.status === "interrupted") {
+      // A restart cut the run: wait for its continuation, which the bound run follows. With none
+      // pending or ever started, a run that already wrote its result block counts as done;
+      // otherwise the member fails as `restart`, retried once.
+      if (yield* orchestrator.restartContinuationPending(run)) return;
+      if (cutByRestart(run, child.turnItems)) {
+        if (!parseSwarmResult(subagentResultForRun(child, run).text).structured) {
+          return yield* failMember({
+            swarm,
+            member,
+            child,
+            run,
+            settings,
+            failureClass: "restart",
+          });
+        }
+        finishedBeforeCut = true;
+      }
+    }
+    const completed = run.status === "completed" || finishedBeforeCut;
+    if (completed && spec.verifyArgv !== undefined) {
       // The member's run is done; verify waits for any other run on its thread to end.
       if (threadBusy) return;
       // Modes can change after create, so they are checked here and again right before the
@@ -1687,20 +1719,11 @@ const make = Effect.gen(function* () {
       });
     }
     if (run.status === "failed") return yield* failMember({ swarm, member, child, run, settings });
-    if (run.status === "cancelled" || run.status === "interrupted") {
-      // A restart cut the run: wait for its continuation, which the bound run follows; only when
-      // none is pending or ever started does the member fail as `restart`, retried once.
-      if (yield* orchestrator.restartContinuationPending(run)) return;
-      if (cutByRestart(run)) {
-        return yield* failMember({ swarm, member, child, run, settings, failureClass: "restart" });
-      }
-    }
-    const ended: FinalMemberStatus | undefined =
-      run.status === "completed"
-        ? "claimed_done"
-        : run.status === "cancelled" || run.status === "interrupted"
-          ? "cancelled"
-          : undefined;
+    const ended: FinalMemberStatus | undefined = completed
+      ? "claimed_done"
+      : run.status === "cancelled" || run.status === "interrupted"
+        ? "cancelled"
+        : undefined;
     if (ended === undefined) return;
     const envelope = yield* buildEnvelope({
       swarm,
@@ -3185,10 +3208,12 @@ const make = Effect.gen(function* () {
     for (const member of members) {
       if (member.childThreadId === null || isFinalMemberStatus(member.status)) continue;
       const spec = parseSpec(member.specJson);
+      // Counted by this pass's reconcile; read from the thread only before the first one.
       const turns =
         spec.maxTurns === undefined
           ? 0
-          : memberTurns((yield* childRecords(member.childThreadId)).runs);
+          : (memberTurnCounts.get(memberRef(member)) ??
+            memberTurns((yield* childRecords(member.childThreadId)).runs));
       const start = spec.followupStartedAt ?? member.startedAt;
       const limit =
         spec.maxTurns !== undefined && turns > spec.maxTurns
