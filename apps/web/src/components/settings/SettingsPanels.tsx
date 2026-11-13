@@ -86,6 +86,7 @@ import {
   projectGroupingModeFromToggle,
   readLastEnabledProjectGroupingMode,
   rememberEnabledProjectGroupingMode,
+  restoredUnifiedSettingsPatch,
 } from "./SettingsPanels.logic";
 import {
   SETTINGS_PICKER_TRIGGER_CLASSNAME,
@@ -468,7 +469,7 @@ export function useSettingsRestore(onRestored?: () => void) {
       ? ["Working section"]
       : []),
     ...(settings.sidebarPinnedThreadsOnTop !== DEFAULT_UNIFIED_SETTINGS.sidebarPinnedThreadsOnTop
-      ? ["Pinned threads on top"]
+      ? ["Pin overhaul"]
       : []),
     ...(settings.sidebarAutoSettleAfterDays !== DEFAULT_UNIFIED_SETTINGS.sidebarAutoSettleAfterDays
       ? ["Auto-settle inactive threads"]
@@ -610,75 +611,7 @@ export function useSettingsRestore(onRestored?: () => void) {
       notifyThemeRestoreFailure();
       return;
     }
-    updateSettings({
-      appearanceContrast: DEFAULT_UNIFIED_SETTINGS.appearanceContrast,
-      diffColorScheme: DEFAULT_UNIFIED_SETTINGS.diffColorScheme,
-      chatWidth: DEFAULT_UNIFIED_SETTINGS.chatWidth,
-      effortDisplay: DEFAULT_UNIFIED_SETTINGS.effortDisplay,
-      mathRenderingEnabled: DEFAULT_UNIFIED_SETTINGS.mathRenderingEnabled,
-      timestampFormat: DEFAULT_UNIFIED_SETTINGS.timestampFormat,
-      notificationMode: DEFAULT_UNIFIED_SETTINGS.notificationMode,
-      inAppNotificationsEnabled: DEFAULT_UNIFIED_SETTINGS.inAppNotificationsEnabled,
-      wordWrap: DEFAULT_UNIFIED_SETTINGS.wordWrap,
-      persistComposerContextStrip: DEFAULT_UNIFIED_SETTINGS.persistComposerContextStrip,
-      diffFilesCollapsed: DEFAULT_UNIFIED_SETTINGS.diffFilesCollapsed,
-      diffIgnoreWhitespace: DEFAULT_UNIFIED_SETTINGS.diffIgnoreWhitespace,
-      diffLayout: DEFAULT_UNIFIED_SETTINGS.diffLayout,
-      proactivePanelsEnabled: DEFAULT_UNIFIED_SETTINGS.proactivePanelsEnabled,
-      showSkillsInSlashMenu: DEFAULT_UNIFIED_SETTINGS.showSkillsInSlashMenu,
-      composerRichTextEnabled: DEFAULT_UNIFIED_SETTINGS.composerRichTextEnabled,
-      sendShortcut: DEFAULT_UNIFIED_SETTINGS.sendShortcut,
-      followUpBehavior: DEFAULT_UNIFIED_SETTINGS.followUpBehavior,
-      contextWindowMeterEnabled: DEFAULT_UNIFIED_SETTINGS.contextWindowMeterEnabled,
-      environmentIdentificationMode: DEFAULT_UNIFIED_SETTINGS.environmentIdentificationMode,
-      glassOpacity: DEFAULT_UNIFIED_SETTINGS.glassOpacity,
-      panelAnimationDurationMs: DEFAULT_UNIFIED_SETTINGS.panelAnimationDurationMs,
-      sidebarProjectGroupingMode: DEFAULT_UNIFIED_SETTINGS.sidebarProjectGroupingMode,
-      sidebarProjectSortOrder: DEFAULT_UNIFIED_SETTINGS.sidebarProjectSortOrder,
-      sidebarWorkingShelfEnabled: DEFAULT_UNIFIED_SETTINGS.sidebarWorkingShelfEnabled,
-      sidebarAutoSettleAfterDays: DEFAULT_UNIFIED_SETTINGS.sidebarAutoSettleAfterDays,
-      sidebarAutoSettleKeepPullRequests: DEFAULT_UNIFIED_SETTINGS.sidebarAutoSettleKeepPullRequests,
-      sidebarAutoSettleOnMerge: DEFAULT_UNIFIED_SETTINGS.sidebarAutoSettleOnMerge,
-      autoResumeLimitedThreads: DEFAULT_UNIFIED_SETTINGS.autoResumeLimitedThreads,
-      snoozeLimitedThreads: DEFAULT_UNIFIED_SETTINGS.snoozeLimitedThreads,
-      snoozePresets: DEFAULT_UNIFIED_SETTINGS.snoozePresets,
-      responseStreamingMode: DEFAULT_UNIFIED_SETTINGS.responseStreamingMode,
-      enableProviderUpdateChecks: DEFAULT_UNIFIED_SETTINGS.enableProviderUpdateChecks,
-      continueThreadsAfterServerUpdate: DEFAULT_UNIFIED_SETTINGS.continueThreadsAfterServerUpdate,
-      backgroundActivity: DEFAULT_UNIFIED_SETTINGS.backgroundActivity,
-      backgroundActivityProfile: DEFAULT_UNIFIED_SETTINGS.backgroundActivityProfile,
-      automaticGitFetchInterval: DEFAULT_UNIFIED_SETTINGS.automaticGitFetchInterval,
-      providerHealthRefreshInterval: DEFAULT_UNIFIED_SETTINGS.providerHealthRefreshInterval,
-      defaultThreadEnvMode: DEFAULT_UNIFIED_SETTINGS.defaultThreadEnvMode,
-      newWorktreesStartFromOrigin: DEFAULT_UNIFIED_SETTINGS.newWorktreesStartFromOrigin,
-      addProjectBaseDirectory: DEFAULT_UNIFIED_SETTINGS.addProjectBaseDirectory,
-      confirmThreadArchive: DEFAULT_UNIFIED_SETTINGS.confirmThreadArchive,
-      confirmThreadDelete: DEFAULT_UNIFIED_SETTINGS.confirmThreadDelete,
-      confirmThreadUnpin: DEFAULT_UNIFIED_SETTINGS.confirmThreadUnpin,
-      confirmQuit: DEFAULT_UNIFIED_SETTINGS.confirmQuit,
-      textGenerationModelSelection: DEFAULT_UNIFIED_SETTINGS.textGenerationModelSelection,
-      threadTitleInstructions: DEFAULT_UNIFIED_SETTINGS.threadTitleInstructions,
-      fontFamilySans: DEFAULT_UNIFIED_SETTINGS.fontFamilySans,
-      fontFamilyComposer: DEFAULT_UNIFIED_SETTINGS.fontFamilyComposer,
-      fontFamilyCode: DEFAULT_UNIFIED_SETTINGS.fontFamilyCode,
-      fontFamilyTerminal: DEFAULT_UNIFIED_SETTINGS.fontFamilyTerminal,
-      fontSizeInterface: DEFAULT_UNIFIED_SETTINGS.fontSizeInterface,
-      fontSizePrompt: DEFAULT_UNIFIED_SETTINGS.fontSizePrompt,
-      fontSizeCode: DEFAULT_UNIFIED_SETTINGS.fontSizeCode,
-      fontSizeTerminal: DEFAULT_UNIFIED_SETTINGS.fontSizeTerminal,
-      browserDefaultViewport: DEFAULT_UNIFIED_SETTINGS.browserDefaultViewport,
-      browserDefaultZoomFactor: DEFAULT_UNIFIED_SETTINGS.browserDefaultZoomFactor,
-      browserDefaultAppearance: DEFAULT_UNIFIED_SETTINGS.browserDefaultAppearance,
-      browserRecordingFrameRate: DEFAULT_UNIFIED_SETTINGS.browserRecordingFrameRate,
-      browserRecordingShowKeyPresses: DEFAULT_UNIFIED_SETTINGS.browserRecordingShowKeyPresses,
-      browserRecordingShowMousePresses: DEFAULT_UNIFIED_SETTINGS.browserRecordingShowMousePresses,
-      browserLinkTarget: DEFAULT_UNIFIED_SETTINGS.browserLinkTarget,
-      browserSearchEngine: DEFAULT_UNIFIED_SETTINGS.browserSearchEngine,
-      browserCustomSearchUrl: DEFAULT_UNIFIED_SETTINGS.browserCustomSearchUrl,
-      browserAutoShowFloatingPreview: DEFAULT_UNIFIED_SETTINGS.browserAutoShowFloatingPreview,
-      pullRequestLinksOpenInApp: DEFAULT_UNIFIED_SETTINGS.pullRequestLinksOpenInApp,
-      enableAgentBrowserAccess: DEFAULT_UNIFIED_SETTINGS.enableAgentBrowserAccess,
-    });
+    updateSettings(restoredUnifiedSettingsPatch());
     onRestored?.();
   };
 
@@ -888,32 +821,6 @@ export function GeneralSettingsPanel() {
                 updateSettings({ sidebarWorkingShelfEnabled: Boolean(checked) })
               }
               aria-label="Working section"
-            />
-          }
-        />
-        <SettingsRow
-          {...searchableSetting("pinned-threads-on-top")}
-          description="Labs pin overhaul. On keeps a pinned section and Settle. Off sorts pinned threads with activity and hides Settle for pinned threads until they are unpinned; pinning still prevents automatic settling."
-          resetAction={
-            settings.sidebarPinnedThreadsOnTop !==
-            DEFAULT_UNIFIED_SETTINGS.sidebarPinnedThreadsOnTop ? (
-              <SettingResetButton
-                label="pin overhaul"
-                onClick={() =>
-                  updateSettings({
-                    sidebarPinnedThreadsOnTop: DEFAULT_UNIFIED_SETTINGS.sidebarPinnedThreadsOnTop,
-                  })
-                }
-              />
-            ) : null
-          }
-          control={
-            <Switch
-              checked={settings.sidebarPinnedThreadsOnTop}
-              onCheckedChange={(checked) =>
-                updateSettings({ sidebarPinnedThreadsOnTop: Boolean(checked) })
-              }
-              aria-label="Labs pin overhaul"
             />
           }
         />

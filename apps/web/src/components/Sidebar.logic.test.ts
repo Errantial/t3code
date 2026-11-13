@@ -1,5 +1,10 @@
 import { presentThreadShell } from "@t3tools/client-runtime/state/models";
-import { isThreadWorking as isSidebarThreadWorking } from "@t3tools/client-runtime/state/thread-inbox";
+import {
+  WORKING_EXIT_GRACE_MS,
+  createInboxReturnTracker,
+  isThreadWorking as isSidebarThreadWorking,
+  type InboxReturnTracker,
+} from "@t3tools/client-runtime/state/thread-inbox";
 import * as DateTime from "effect/DateTime";
 import { deriveActiveWorkStartedAt } from "../session-logic.ts";
 import { describe, expect, it, vi } from "vite-plus/test";
@@ -36,6 +41,7 @@ import {
   groupSidebarThreadsByProject,
   resolveSidebarFolderDot,
   sidebarFolderExpansionKeys,
+  partitionSidebarThreads,
 } from "./Sidebar.logic";
 import { resolveProjectExpanded } from "../uiStateStore";
 import { threadSearchMatchKey } from "@t3tools/client-runtime/state/thread-search";
@@ -1301,6 +1307,123 @@ describe("Working shelf (beta)", () => {
         unsettle: false,
         unsnooze: false,
       });
+    });
+  });
+  describe("partitionSidebarThreads with pinned threads", () => {
+    const running = {
+      status: "running" as const,
+      activeRunId: null,
+      providerInstanceId: ProviderInstanceId.make("codex"),
+      providerName: "Codex",
+      lastError: null,
+      updatedAt: "2026-03-09T10:00:00.000Z",
+    };
+    const pinnedAt = "2026-03-09T09:00:00.000Z";
+
+    function partition(
+      tracker: InboxReturnTracker,
+      threads: ReadonlyArray<ReturnType<typeof makeThread>>,
+      options: { pinnedThreadsOnTop: boolean; workingShelfEnabled?: boolean },
+    ) {
+      return partitionSidebarThreads({
+        inboxReturns: tracker,
+        threads: threads as never,
+        scopedProjectKeys: null,
+        delegatedUnderParent: new Set(),
+        serverConfigs: new Map([[localEnvironmentId, {} as never]]),
+        optimisticDrop: null,
+        workingShelfEnabled: options.workingShelfEnabled ?? true,
+        pinnedThreadsOnTop: options.pinnedThreadsOnTop,
+        sortActiveBySend: false,
+        clockKey: "test",
+      });
+    }
+    const ids = (list: ReadonlyArray<{ id: ThreadId }>) => list.map((thread) => thread.id);
+
+    it("keeps a pinned working thread in Pinned while pinned threads stay on top", () => {
+      const thread = makeThread({ id: ThreadId.make("pin"), pinnedAt, runtime: running });
+      const result = partition(createInboxReturnTracker(), [thread], { pinnedThreadsOnTop: true });
+      expect(ids(result.pinnedThreads)).toEqual(["pin"]);
+      expect(result.workingThreads).toEqual([]);
+    });
+
+    it("puts a running pinned thread in Working under the overhaul", () => {
+      const thread = makeThread({ id: ThreadId.make("pin"), pinnedAt, runtime: running });
+      const result = partition(createInboxReturnTracker(), [thread], { pinnedThreadsOnTop: false });
+      expect(result.pinnedThreads).toEqual([]);
+      expect(ids(result.workingThreads)).toEqual(["pin"]);
+    });
+
+    it("ranks snoozed and settled ahead of pinned", () => {
+      const settled = makeThread({
+        id: ThreadId.make("settled"),
+        pinnedAt,
+        runtime: running,
+        settledOverride: "settled",
+      });
+      const snoozed = makeThread({
+        id: ThreadId.make("snoozed"),
+        pinnedAt,
+        runtime: running,
+        snoozedAt: "2026-03-09T09:30:00.000Z",
+        snoozedUntil: "2999-01-01T00:00:00.000Z",
+      });
+      for (const pinnedThreadsOnTop of [true, false]) {
+        const result = partition(createInboxReturnTracker(), [settled, snoozed], {
+          pinnedThreadsOnTop,
+        });
+        expect(ids(result.settledThreads)).toEqual(["settled"]);
+        expect(ids(result.snoozedThreads)).toEqual(["snoozed"]);
+        expect(result.pinnedThreads).toEqual([]);
+        expect(result.workingThreads).toEqual([]);
+      }
+    });
+
+    it("holds a stopped pinned thread in Working for the exit grace, then returns it to the activity list", () => {
+      vi.useFakeTimers();
+      try {
+        vi.setSystemTime(new Date("2026-03-09T10:00:00.000Z"));
+        const tracker = createInboxReturnTracker();
+        const stopped = makeThread({ id: ThreadId.make("pin"), pinnedAt });
+        const other = makeThread({ id: ThreadId.make("other") });
+        partition(tracker, [makeThread({ ...stopped, runtime: running }), other], {
+          pinnedThreadsOnTop: false,
+        });
+
+        const held = partition(tracker, [stopped, other], { pinnedThreadsOnTop: false });
+        expect(ids(held.workingThreads)).toEqual(["pin"]);
+        expect(held.pinnedThreads).toEqual([]);
+
+        vi.advanceTimersByTime(WORKING_EXIT_GRACE_MS);
+        const returned = partition(tracker, [stopped, other], { pinnedThreadsOnTop: false });
+        expect(returned.workingThreads).toEqual([]);
+        expect(returned.pinnedThreads).toEqual([]);
+        // It came back last, so it leads the activity list.
+        expect(ids(returned.activeThreads)).toEqual(["pin", "other"]);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("drops a stopped pinned thread straight to Pinned without the overhaul", () => {
+      const tracker = createInboxReturnTracker();
+      const stopped = makeThread({ id: ThreadId.make("pin"), pinnedAt });
+      partition(tracker, [makeThread({ ...stopped, runtime: running })], {
+        pinnedThreadsOnTop: true,
+      });
+      const result = partition(tracker, [stopped], { pinnedThreadsOnTop: true });
+      expect(ids(result.pinnedThreads)).toEqual(["pin"]);
+      expect(result.workingThreads).toEqual([]);
+    });
+
+    it("keeps pinned threads in the activity list when the Working section is off", () => {
+      const thread = makeThread({ id: ThreadId.make("pin"), pinnedAt, runtime: running });
+      const result = partition(createInboxReturnTracker(), [thread], {
+        pinnedThreadsOnTop: false,
+        workingShelfEnabled: false,
+      });
+      expect(result.pinnedThreads).toEqual([]);
+      expect(ids(result.activeThreads)).toEqual(["pin"]);
     });
   });
 });

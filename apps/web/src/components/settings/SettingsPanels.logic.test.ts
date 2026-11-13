@@ -5,6 +5,7 @@ import {
   backgroundActivitySharedPolicySettings,
   getChangedBrowserSettingLabels,
   hasChangedBackgroundActivitySettings,
+  restoredUnifiedSettingsPatch,
 } from "./SettingsPanels.logic";
 
 describe("background activity settings restore", () => {
@@ -86,5 +87,13 @@ describe("getChangedBrowserSettingLabels", () => {
         browserCustomSearchUrl: "https://search.example/?q=%s",
       }),
     ).toEqual(["Search engine"]);
+  });
+});
+
+describe("restoredUnifiedSettingsPatch", () => {
+  it("resets the pin overhaul setting to its default", () => {
+    expect(restoredUnifiedSettingsPatch().sidebarPinnedThreadsOnTop).toBe(
+      DEFAULT_UNIFIED_SETTINGS.sidebarPinnedThreadsOnTop,
+    );
   });
 });

@@ -13,7 +13,9 @@ import * as Dialog from "../../components/ui/Dialog";
 import { scopedThreadKey } from "../../lib/scopedEntities";
 import { refreshArchivedThreadsForEnvironment } from "../archive/useArchivedThreadSnapshots";
 import { pinOrderKeyBetween } from "@t3tools/client-runtime/state/thread-sort";
+import { AsyncResult } from "effect/reactivity";
 import { appAtomRegistry } from "../../state/atom-registry";
+import { mobilePreferencesAtom } from "../../state/preferences";
 import { environmentServerConfigsAtom } from "../../state/server";
 import { readEnvironmentScope } from "../../state/session";
 import { environmentThreadShells, threadEnvironment } from "../../state/threads";
@@ -577,10 +579,14 @@ export function useThreadListActions(): {
     );
     if (!current || current.archivedAt !== null) return false;
     thread = current;
+    const preferences = appAtomRegistry.get(mobilePreferencesAtom);
+    // Under the pin overhaul pinned threads live in the active section, and moving one keeps its pin.
+    const pinOverhaul =
+      AsyncResult.isSuccess(preferences) && preferences.value.pinOverhaulEnabled === true;
     const section =
       typeof direction === "object" && direction.section !== undefined
         ? direction.section
-        : thread.pinnedAt != null
+        : thread.pinnedAt != null && !pinOverhaul
           ? "pinned"
           : "active";
     if (section === "settled") {
@@ -601,6 +607,7 @@ export function useThreadListActions(): {
     const ordered = getThreadListV2OrderedSection({
       threads: shells,
       section,
+      pinOverhaul,
       now: new Date().toISOString(),
       queuedThreadKeys: appAtomRegistry.get(queuedThreadKeysAtom),
       settlementEnvironmentIds: new Set(configs.keys()),
@@ -613,7 +620,8 @@ export function useThreadListActions(): {
       reorderableEnvironmentIds: new Set(configs.keys()),
     })(scopedThreadKey(thread.environmentId, thread.id), direction);
     if (assignments === null) return false;
-    const lifecycle = threadDropLifecycle(thread, section, new Date().toISOString());
+    const dropLifecycle = threadDropLifecycle(thread, section, new Date().toISOString());
+    const lifecycle = pinOverhaul ? { ...dropLifecycle, unpin: false } : dropLifecycle;
     const crossSection = !ordered.some(
       (row) => row.id === thread.id && row.environmentId === thread.environmentId,
     );

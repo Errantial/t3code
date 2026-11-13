@@ -50,21 +50,25 @@ export function useThreadListV2(input: {
   readonly pendingOrder: LayoutInput["pendingOrder"];
   readonly shelfPreferencesLoaded: boolean;
   readonly workingShelfEnabled: boolean;
+  readonly pinOverhaulEnabled: boolean;
   readonly workingShelfExpanded: boolean;
   readonly snoozedShelfExpanded: boolean;
   readonly settledShelfExpanded: boolean;
   readonly selectedThreadKey: string | null;
 }) {
-  const { threads, workingShelfEnabled } = input;
+  const { threads, workingShelfEnabled, pinOverhaulEnabled } = input;
   // A thread can stop working when the threads change, or when its exit grace expires.
   const inboxVersion = useSyncExternalStore(
     threadListInboxReturns.subscribe,
     threadListInboxReturns.getSnapshot,
   );
   const inbox = useMemo(
-    () => threadListInboxReturns.observe(workingShelfEnabled ? threads : null),
+    () =>
+      threadListInboxReturns.observe(workingShelfEnabled ? threads : null, {
+        pinnedInInbox: pinOverhaulEnabled,
+      }),
     // oxlint-disable-next-line react/memo-dependencies -- the version signals an expired grace
-    [threads, workingShelfEnabled, inboxVersion],
+    [threads, workingShelfEnabled, pinOverhaulEnabled, inboxVersion],
   );
   // Up/down menu availability for every card, computed once per section per
   // rebuild (see computeThreadMoveAvailability): per-thread planner calls made
@@ -80,6 +84,7 @@ export function useThreadListV2(input: {
         threads,
         section,
         pendingOrder: input.pendingOrder,
+        pinOverhaul: pinOverhaulEnabled,
         now: input.now,
         settlementEnvironmentIds: input.settlementEnvironmentIds,
         snoozeEnvironmentIds: input.snoozeEnvironmentIds,
@@ -111,6 +116,7 @@ export function useThreadListV2(input: {
     settledLimit: input.settledLimit,
     now: input.now,
     workingShelfEnabled,
+    pinOverhaulEnabled,
     workingShelfExpanded: input.workingShelfExpanded,
     inboxReturnAt: inbox.returnedAt,
     isWorking: inbox.isWorking,

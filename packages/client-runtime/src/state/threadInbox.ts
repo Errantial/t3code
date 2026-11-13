@@ -30,6 +30,24 @@ export function isThreadWorking(thread: WorkingThreadInput): boolean {
   return !(thread.interactionMode === "plan" && thread.hasActionableProposedPlan && runSettled);
 }
 
+export type InboxSection = "snoozed" | "settled" | "pinned" | "inbox";
+
+/**
+ * The section rule shared by web and mobile. Snoozed and settled win. A pinned thread has its
+ * own section unless the pin overhaul is on, which sorts it with the rest of the inbox.
+ */
+export function resolveInboxSection(input: {
+  readonly snoozed: boolean;
+  readonly settled: boolean;
+  readonly pinned: boolean;
+  readonly pinOverhaul: boolean;
+}): InboxSection {
+  if (input.snoozed) return "snoozed";
+  if (input.settled) return "settled";
+  if (input.pinned && !input.pinOverhaul) return "pinned";
+  return "inbox";
+}
+
 type InboxThreadInput = Pick<
   EnvironmentThreadShell,
   "id" | "environmentId" | "createdAt" | "unsettledAt" | "latestRun"
@@ -117,7 +135,7 @@ export const WORKING_EXIT_GRACE_MS = 2_000;
 /**
  * Keep one at module scope so placement survives routes that unmount the list. Call
  * `observe` when the shells or the snapshot version change, or with null while the beta
- * is off. Its result stays fixed, so a list built from it can be cached.
+ * is off. Pass `pinnedInInbox` while the pin overhaul is on. Its result stays fixed, so a list built from it can be cached.
  */
 export function createInboxReturnTracker() {
   const keyOf = (thread: ThreadKeyInput) => `${thread.environmentId}:${thread.id}`;
@@ -166,7 +184,13 @@ export function createInboxReturnTracker() {
       };
     },
     getSnapshot: () => version,
-    observe(threads: readonly TrackedInboxThread[] | null): {
+    observe(
+      threads: readonly TrackedInboxThread[] | null,
+      options?: {
+        /** The pin overhaul is on: pinned threads sit in the inbox and get the exit grace. */
+        readonly pinnedInInbox?: boolean;
+      },
+    ): {
       readonly isWorking: (thread: WorkingThreadInput & ThreadKeyInput) => boolean;
       readonly returnedAt: (thread: ThreadKeyInput) => number | undefined;
     } {
@@ -177,6 +201,7 @@ export function createInboxReturnTracker() {
         returns.clear();
         return { isWorking: isThreadWorking, returnedAt: () => undefined };
       }
+      const pinnedInInbox = options?.pinnedInInbox === true;
       const present = new Set<string>();
       const at = now();
       // @effect-diagnostics-next-line globalDate:off - Snooze checks compare wall-clock ISO times.
@@ -207,7 +232,7 @@ export function createInboxReturnTracker() {
         const excluded =
           thread.archivedAt != null ||
           thread.deletedAt != null ||
-          thread.pinnedAt != null ||
+          (thread.pinnedAt != null && !pinnedInInbox) ||
           thread.settledOverride === "settled" ||
           effectiveSnoozed(thread, { now: observedAt });
         const actual = isThreadWorking(thread);
@@ -239,3 +264,5 @@ export function createInboxReturnTracker() {
     returnedAt: (thread: ThreadKeyInput) => returns.get(keyOf(thread)),
   };
 }
+
+export type InboxReturnTracker = ReturnType<typeof createInboxReturnTracker>;

@@ -174,6 +174,8 @@ export function WorkingSectionSettings() {
   const preferences = useAtomValue(mobilePreferencesAtom);
   const workingShelfEnabled =
     AsyncResult.isSuccess(preferences) && preferences.value.workingShelfEnabled !== false;
+  const pinOverhaulEnabled =
+    AsyncResult.isSuccess(preferences) && preferences.value.pinOverhaulEnabled === true;
 
   return (
     <View className="gap-3">
@@ -183,6 +185,13 @@ export function WorkingSectionSettings() {
           label="Working section"
           value={workingShelfEnabled}
           onValueChange={(value) => savePreferences({ workingShelfEnabled: value })}
+        />
+        <SettingsSwitchRow
+          icon="pin"
+          label="Pin overhaul (Labs)"
+          subtitle="Pinned threads sort with activity and fold into Working while they run. Settle is hidden for pinned threads until they are unpinned. Pinning still prevents automatic settling."
+          value={pinOverhaulEnabled}
+          onValueChange={(value) => savePreferences({ pinOverhaulEnabled: value })}
         />
       </SettingsSection>
       <Text className="px-2 text-sm text-foreground-muted">

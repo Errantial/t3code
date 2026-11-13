@@ -435,8 +435,8 @@ export const SETTINGS_SEARCH_ITEMS = [
   },
   {
     id: "pinned-threads-on-top",
-    title: "Pin overhaul (Labs)",
-    to: "/settings/general",
+    title: "Pin overhaul",
+    to: "/settings/labs",
     searchTerms: ["pin pinned sort order activity recent settle sidebar labs overhaul hide"],
   },
   {

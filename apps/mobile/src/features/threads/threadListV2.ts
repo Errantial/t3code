@@ -19,6 +19,7 @@ import { foldSearchQuery, rankSearchItems, scoreThreadSearch } from "@t3tools/sh
 import {
   createInboxReturnTracker,
   isThreadWorking,
+  resolveInboxSection,
   sortInboxThreadsByReturn,
   sortWorkingThreadsBySend,
 } from "@t3tools/client-runtime/state/thread-inbox";
@@ -116,6 +117,8 @@ export function resolveThreadListV2SwipeActions(input: {
   readonly snoozeSupported: boolean;
   readonly snoozable: boolean;
   readonly snoozed?: boolean;
+  /** A pinned thread under the pin overhaul: Settle is hidden and the swipe archives. */
+  readonly settleHidden?: boolean;
 }): {
   readonly primary: Exclude<ThreadListV2SwipeAction, "snooze">;
   readonly secondary: "snooze" | null;
@@ -123,11 +126,12 @@ export function resolveThreadListV2SwipeActions(input: {
   if (input.snoozed === true) {
     return { primary: "unsnooze", secondary: null };
   }
-  const primary = input.settlementSupported
-    ? input.variant === "slim"
-      ? "unsettle"
-      : "settle"
-    : "archive";
+  const primary =
+    input.settlementSupported && input.settleHidden !== true
+      ? input.variant === "slim"
+        ? "unsettle"
+        : "settle"
+      : "archive";
   return {
     primary,
     secondary: input.snoozeSupported && input.snoozable ? "snooze" : null,
@@ -262,6 +266,8 @@ export function getThreadListV2OrderedSection(input: {
   readonly settlementEnvironmentIds?: ReadonlySet<EnvironmentId>;
   readonly snoozeEnvironmentIds?: ReadonlySet<EnvironmentId>;
   readonly queuedThreadKeys?: ReadonlySet<string>;
+  /** The pin overhaul is on: pinned threads belong to the active section. */
+  readonly pinOverhaul?: boolean;
 }): EnvironmentThreadShell[] {
   const queuedThreadKeys = input.queuedThreadKeys?.size ? input.queuedThreadKeys : undefined;
   const threads = input.threads.filter((thread) => {
@@ -280,7 +286,7 @@ export function getThreadListV2OrderedSection(input: {
     ) {
       return false;
     }
-    return (thread.pinnedAt != null) === (input.section === "pinned");
+    return (thread.pinnedAt != null && input.pinOverhaul !== true) === (input.section === "pinned");
   });
   const ordered =
     input.section === "pinned"
@@ -606,6 +612,8 @@ export function buildThreadListV2Items(input: {
   readonly settledLimit?: number;
   readonly now: string;
   readonly workingShelfEnabled?: boolean;
+  /** The pin overhaul is on: pinned threads sort with activity and can fold into Working. */
+  readonly pinOverhaulEnabled?: boolean;
   readonly workingShelfExpanded?: boolean;
   readonly isWorking?: (thread: EnvironmentThreadShell) => boolean;
   readonly inboxReturnAt?: (thread: EnvironmentThreadShell) => number | undefined;
@@ -626,6 +634,7 @@ export function buildThreadListV2Items(input: {
           input.pendingOrder,
           getThreadListV2OrderedSection({
             ...input,
+            pinOverhaul: input.pinOverhaulEnabled === true,
             section: input.pendingOrder.section,
             pendingOrder: null,
           }),
@@ -677,7 +686,15 @@ export function buildThreadListV2Items(input: {
     }
     const supportsSettlement = input.settlementEnvironmentIds?.has(thread.environmentId) ?? true;
     const supportsSnooze = input.snoozeEnvironmentIds?.has(thread.environmentId) ?? true;
-    if (supportsSnooze && effectiveSnoozed(thread, { now })) {
+    const hasQueuedMessages =
+      queuedThreadKeys?.has(`${thread.environmentId}:${thread.id}`) === true;
+    const section = resolveInboxSection({
+      snoozed: supportsSnooze && effectiveSnoozed(thread, { now }),
+      settled: supportsSettlement && thread.settledOverride === "settled" && !hasQueuedMessages,
+      pinned: thread.pinnedAt != null,
+      pinOverhaul: input.pinOverhaulEnabled === true,
+    });
+    if (section === "snoozed") {
       snoozed.push(thread);
       if (
         thread.snoozedUntil != null &&
@@ -688,11 +705,9 @@ export function buildThreadListV2Items(input: {
       }
       continue;
     }
-    const hasQueuedMessages =
-      queuedThreadKeys?.has(`${thread.environmentId}:${thread.id}`) === true;
-    if (supportsSettlement && thread.settledOverride === "settled" && !hasQueuedMessages) {
+    if (section === "settled") {
       settled.push(thread);
-    } else if (thread.pinnedAt != null) {
+    } else if (section === "pinned") {
       pinned.push(thread);
     } else if (workingShelfEnabled && (input.isWorking ?? isThreadWorking)(thread)) {
       working.push(thread);
