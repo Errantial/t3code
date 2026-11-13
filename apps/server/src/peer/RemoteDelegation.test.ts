@@ -481,8 +481,14 @@ const boxToolkitLayer = (thread: BoxThread) => {
         Layer.provide(NodeServices.layer),
       ),
     ),
-    Layer.provide(Layer.mock(ProviderRegistry.ProviderRegistry)({})),
-    Layer.provide(Layer.mock(ProviderAdapterRegistry.ProviderAdapterRegistryV2)({})),
+    Layer.provide(
+      Layer.mock(ProviderRegistry.ProviderRegistry)({ getProviders: Effect.succeed([]) } as never),
+    ),
+    Layer.provide(
+      Layer.mock(ProviderAdapterRegistry.ProviderAdapterRegistryV2)({
+        list: () => Effect.succeed([]),
+      }),
+    ),
     Layer.provide(Layer.mock(ScheduledTaskService.ScheduledTaskService)({})),
     Layer.provide(
       Layer.mock(ProjectService.ProjectService)({
@@ -590,7 +596,11 @@ const makeLaptop = (
       Layer.provide(Layer.mock(PeerLinkRequests.PeerLinkRequests)({})),
       Layer.provide(NodeCrypto.layer),
       Layer.provideMerge(layerThreads),
-      Layer.provide(Layer.mock(ProviderRegistry.ProviderRegistry)({})),
+      Layer.provide(
+        Layer.mock(ProviderRegistry.ProviderRegistry)({
+          getProviders: Effect.succeed([]),
+        } as never),
+      ),
       Layer.provide(Layer.mock(ProviderAdapterRegistry.ProviderAdapterRegistryV2)({})),
       Layer.provide(Layer.mock(ScheduledTaskService.ScheduledTaskService)({})),
       Layer.provide(Layer.mock(ProjectService.ProjectService)({})),
